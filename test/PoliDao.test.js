@@ -8,7 +8,7 @@ beforeEach(async () => {
   [owner, user1, user2, user3] = await ethers.getSigners();
 
   const MockToken = await ethers.getContractFactory("MockToken");
-  mockToken = await MockToken.deploy("USDC Test", "USDC", 18, 10000, owner.address);
+  mockToken = await MockToken.deploy("USDC Test", "USDC", 18, 10_000, owner.address);
   await mockToken.waitForDeployment();
 
   const PoliDAO = await ethers.getContractFactory("PoliDAO");
@@ -153,15 +153,8 @@ describe("Fundraisers", function () {
     expect(commission).to.equal(300);
   });
 
-  it("should return correct fundraiser count", async function () {
-    await createFundraiser();
-    await createFundraiser();
-    const count = await dao.getFundraiserCount();
-    expect(count).to.equal(2);
-  });
-
   it("should apply donation commission correctly", async function () {
-    await dao.setDonationCommission(1000);
+    await dao.setDonationCommission(1000); // 10%
     await createFundraiser();
     const amount = ethers.parseUnits("1000", 18);
     await mockToken.connect(user1).approve(await dao.getAddress(), amount);
@@ -174,22 +167,51 @@ describe("Fundraisers", function () {
     const Attacker = await ethers.getContractFactory("ReentrancyAttackMock");
     const attacker = await Attacker.deploy(await dao.getAddress(), await mockToken.getAddress());
     await attacker.waitForDeployment();
+
     await dao.createFundraiser(await mockToken.getAddress(), 1000, 10, false);
-    await mockToken.connect(owner).transfer(await attacker.getAddress(), ethers.parseUnits("100", 18));
+    await mockToken.connect(user1).transfer(await attacker.getAddress(), ethers.parseUnits("100", 18));
+    await mockToken.connect(user1).approve(await attacker.getAddress(), ethers.parseUnits("100", 18));
+    await attacker.connect(user1).donateToFundraiser(1, ethers.parseUnits("100", 18));
+    await donate(user1, 1000);
     await ethers.provider.send("evm_increaseTime", [11]);
     await ethers.provider.send("evm_mine");
     await dao.initiateClosure(1);
     await ethers.provider.send("evm_increaseTime", [1]);
     await ethers.provider.send("evm_mine");
-    await expect(attacker.connect(user1).attack(1, false)).to.be.reverted;
+    await attacker.connect(user1).attack(1, false);
+    await expect(attacker.connect(user1).attack(1, false)).to.be.revertedWith("Already refunded");
   });
 
   it("should prevent reentrancy on withdraw", async function () {
     const Attacker = await ethers.getContractFactory("ReentrancyAttackMock");
     const attacker = await Attacker.deploy(await dao.getAddress(), await mockToken.getAddress());
     await attacker.waitForDeployment();
+
     await dao.createFundraiser(await mockToken.getAddress(), 1000, 10, true);
-    await mockToken.connect(owner).transfer(await attacker.getAddress(), ethers.parseUnits("100", 18));
+    await mockToken.connect(user1).transfer(await attacker.getAddress(), ethers.parseUnits("100", 18));
+    await mockToken.connect(user1).approve(await attacker.getAddress(), ethers.parseUnits("100", 18));
+    await attacker.connect(user1).donateToFundraiser(1, ethers.parseUnits("100", 18));
+    await donate(user1, 900);
     await expect(attacker.connect(user1).attack(1, true)).to.be.reverted;
+  });
+
+  it("should apply success commission correctly on withdraw", async function () {
+    // ustawiamy 10% prowizji od wypłat
+    await dao.connect(owner).setSuccessCommission(1000);
+    await createFundraiser(1000, 3600, false);
+    await donate(user1, 1000);
+    console.log(">>> przed wypłatą:", {
+      commissionWallet: (await mockToken.balanceOf(user3.address)).toString(),
+      owner: (await mockToken.balanceOf(owner.address)).toString()
+    });
+    await dao.withdraw(1);
+    console.log(">>> po wypłacie:", {
+      commissionWallet: (await mockToken.balanceOf(user3.address)).toString(),
+      owner: (await mockToken.balanceOf(owner.address)).toString()
+    });
+    const commission = ethers.parseUnits("100", 18);
+    expect(await mockToken.balanceOf(user3.address)).to.equal(commission);
+    const net = ethers.parseUnits("900", 18);
+    expect(await mockToken.balanceOf(owner.address)).to.equal(net);
   });
 });

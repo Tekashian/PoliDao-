@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "../PoliDao.sol";
+
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
@@ -23,18 +24,17 @@ contract ReentrancyAttackMock {
         targetFundraiser = _fundraiserId;
         attackWithdraw = _attackWithdraw;
 
-        uint256 amount = 100 ether;
-
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
-        IERC20(token).approve(address(dao), amount);
-
-        dao.donate(_fundraiserId, amount);
-
         if (_attackWithdraw) {
             dao.withdraw(_fundraiserId);
         } else {
             dao.refund(_fundraiserId);
         }
+    }
+
+    function donateToFundraiser(uint256 _fundraiserId, uint256 amount) external {
+        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        IERC20(token).approve(address(dao), amount);
+        dao.donate(_fundraiserId, amount);
     }
 
     fallback() external {
