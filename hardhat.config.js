@@ -9,17 +9,22 @@ const BSCSCAN_API_KEY = process.env.BSCSCAN_API_KEY || "";
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
-  solidity: "0.8.20",
   defaultNetwork: "hardhat",
+  solidity: {
+    compilers: [
+      { version: "0.8.20" },
+      { version: "0.8.30" },
+    ],
+  },
   networks: {
     hardhat: {},
     sepolia: {
       url: SEPOLIA_RPC_URL,
-      accounts: [PRIVATE_KEY],
+      accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
     },
     bscTestnet: {
       url: BSC_TESTNET_RPC_URL,
-      accounts: [PRIVATE_KEY],
+      accounts: PRIVATE_KEY ? [PRIVATE_KEY] : [],
     },
   },
   etherscan: {

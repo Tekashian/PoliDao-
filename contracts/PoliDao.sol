@@ -4,368 +4,434 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /// @title PoliDAO
 /// @notice Smart contract wspierający mechanizmy głosowania oraz zbiórek w tokenach ERC20,
 ///         z możliwością naliczania prowizji przy wielokrotnych refundach w miesiącu.
 /// @dev    Obsługuje głosowania z ograniczonym czasem, zbiórki z opcją zwrotu, prowizje oraz whitelistę tokenów.
 ///         Zabezpiecza funkcje związane z tokenami przed atakami reentrancy przy użyciu ReentrancyGuard.
-contract PoliDAO is Ownable, ReentrancyGuard {
+///         Pozwala na awaryjne wstrzymanie operacji dzięki Pausable.
+contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     // ========== STRUKTURY ==========
 
     /// @notice Struktura przechowująca wszystkie dane pojedynczej propozycji do głosowania
     struct Proposal {
-        uint256 id;                       // @notice Unikalny identyfikator propozycji
-        string question;                  // @notice Treść pytania/propozycji
-        uint256 yesVotes;                 // @notice Liczba głosów "za"
-        uint256 noVotes;                  // @notice Liczba głosów "przeciw"
-        uint256 endTime;                  // @notice Timestamp zakończenia głosowania
-        bool exists;                      // @notice Flaga istnienia propozycji
-        mapping(address => bool) hasVoted;// @notice Mapa adresów, które już głosowały
+        uint256 id;                       // Unikalny identyfikator propozycji
+        string question;                  // Treść pytania/propozycji
+        uint256 yesVotes;                 // Liczba głosów "za"
+        uint256 noVotes;                  // Liczba głosów "przeciw"
+        uint256 endTime;                  // Timestamp zakończenia głosowania
+        bool exists;                      // Flaga istnienia propozycji
+        mapping(address => bool) hasVoted;// Mapa adresów, które już głosowały
+    }
+
+    /// @notice Skrót danych propozycji do front-endu
+    struct ProposalSummary {
+        uint256 id;
+        string question;
+        uint256 yesVotes;
+        uint256 noVotes;
+        uint256 endTime;
     }
 
     /// @notice Struktura przechowująca wszystkie dane pojedynczej zbiórki
     struct Fundraiser {
-        uint256 id;                          // @notice Unikalny identyfikator zbiórki
-        address creator;                     // @notice Adres twórcy zbiórki
-        address token;                       // @notice Adres tokenu ERC20 używanego w zbiórce
-        uint256 target;                      // @notice Cel zbiórki (ilość tokenów)
-        uint256 raised;                      // @notice Aktualnie zebrana ilość netto
-        uint256 endTime;                     // @notice Timestamp zakończenia zbiórki
-        bool withdrawn;                      // @notice Flaga czy środki zostały wypłacone
-        bool exists;                         // @notice Flaga istnienia zbiórki
-        bool isFlexible;                     // @notice Flaga czy zbiórka ma tryb „elastyczny”
-        uint256 reclaimDeadline;             // @notice Timestamp granicy okresu zwrotów po zamknięciu
-        bool closureInitiated;               // @notice Flaga czy rozpoczęto okres zwrotów
-        mapping(address => uint256) donations; // @notice Mapa środków wpłaconych przez darczyńców
-        mapping(address => bool) refunded;     // @notice Mapa adresów, które już otrzymały refund
+        uint256 id;                          // Unikalny identyfikator zbiórki
+        address creator;                     // Adres twórcy zbiórki
+        address token;                       // Adres tokenu ERC20 używanego w zbiórce
+        uint256 target;                      // Cel zbiórki (ilość tokenów)
+        uint256 raised;                      // Aktualnie zebrana ilość netto
+        uint256 endTime;                     // Timestamp zakończenia zbiórki
+        bool withdrawn;                      // Flaga czy środki zostały wypłacone
+        bool exists;                         // Flaga istnienia zbiórki
+        bool isFlexible;                     // Flaga czy zbiórka ma tryb „elastyczny”
+        uint256 reclaimDeadline;             // Timestamp granicy okresu zwrotów po zamknięciu
+        bool closureInitiated;               // Flaga czy rozpoczęto okres zwrotów
+        mapping(address => uint256) donations; // Mapa środków wpłaconych przez darczyńców
+        mapping(address => bool) refunded;     // Mapa adresów, które już otrzymały refund
+        address[] donors;                    // Lista darczyńców (dla historii wpłat)
+    }
+
+    /// @notice Skrót danych zbiórki do front-endu
+    struct FundraiserSummary {
+        uint256 id;
+        address creator;
+        address token;
+        uint256 target;
+        uint256 raised;
+        uint256 endTime;
+        bool isFlexible;
+        bool closureInitiated;
     }
 
     // ========== ZMIENNE STANU ==========
 
-    /// @notice Liczba utworzonych propozycji
-    uint256 public proposalCount;
+    uint256 public proposalCount;                        // Liczba propozycji
+    uint256 public fundraiserCount;                      // Liczba zbiórek
 
-    /// @notice Liczba utworzonych zbiórek
-    uint256 public fundraiserCount;
+    mapping(uint256 => Proposal) private proposals;      // Propozycje
+    mapping(uint256 => Fundraiser) private fundraisers;  // Zbiórki
 
-    /// @notice Mapa propozycji (id => Proposal)
-    mapping(uint256 => Proposal) private proposals;
+    uint256[] private proposalIds;       // Lista wszystkich ID propozycji
+    uint256[] private fundraiserIds;     // Lista wszystkich ID zbiórek
 
-    /// @notice Mapa zbiórek (id => Fundraiser)
-    mapping(uint256 => Fundraiser) private fundraisers;
+    mapping(address => bool) public isTokenWhitelisted;  // Whitelist tokenów
+    address[] public whitelistedTokens;                   // Lista tokenów
 
-    /// @notice Flaga czy dany token jest dozwolony do zbiórek
-    mapping(address => bool) public isTokenWhitelisted;
+    uint256 public donationCommission;  // Prowizja od wpłat (BPS)
+    uint256 public successCommission;   // Prowizja od sukcesu (BPS)
+    uint256 public refundCommission;    // Prowizja od kolejnych refund (BPS)
 
-    /// @notice Lista adresów tokenów na whitelist
-    address[] public whitelistedTokens;
+    address public commissionWallet;    // Portfel na prowizje
 
-    /// @notice Prowizja (w BPS) pobierana od każdej wpłaty dotacji
-    uint256 public donationCommission;
+    mapping(address => mapping(uint256 => uint256)) public monthlyRefundCount; // Refund count na okres 30d
 
-    /// @notice Prowizja (w BPS) pobierana przy wypłatach środków przez twórcę
-    uint256 public successCommission;
-
-    /// @notice Prowizja (w BPS) pobierana przy kolejnych refundach w miesiącu
-    uint256 public refundCommission;
-
-    /// @notice Portfel, na który trafiają wszystkie pobrane prowizje
-    address public commissionWallet;
-
-    /// @notice Śledzenie liczby refundów adresu w danym 30-dniowym okresie
-    mapping(address => mapping(uint256 => uint256)) public monthlyRefundCount;
-
-    /// @notice Stały okres (w sekundach) dostępny na zwrot po inicjacji closure
     uint256 public constant RECLAIM_PERIOD = 14 days;
 
     // ========== WYDARZENIA ==========
 
-    /// @notice Emitowane przy utworzeniu nowej propozycji do głosowania
-    /// @param id          Unikalny identyfikator propozycji
-    /// @param question    Treść pytania
-    /// @param endTime     Timestamp zakończenia głosowania
     event ProposalCreated(uint256 indexed id, string question, uint256 endTime);
-
-    /// @notice Emitowane przy oddaniu głosu
-    /// @param voter       Adres głosującego
-    /// @param proposalId  ID propozycji
-    /// @param support     True = głos za, False = głos przeciw
     event Voted(address indexed voter, uint256 indexed proposalId, bool support);
-
-    /// @notice Emitowane przy utworzeniu nowej zbiórki
-    /// @param id          Unikalny identyfikator zbiórki
-    /// @param creator     Adres twórcy zbiórki
-    /// @param token       Adres tokenu ERC20
-    /// @param target      Cel zbiórki
-    /// @param endTime     Timestamp zakończenia zbiórki
-    /// @param isFlexible  Flaga elastyczności zbiórki
-    event FundraiserCreated(
-        uint256 indexed id,
-        address indexed creator,
-        address token,
-        uint256 target,
-        uint256 endTime,
-        bool isFlexible
-    );
-
-    /// @notice Emitowane przy wpłacie darowizny
-    /// @param id       ID zbiórki
-    /// @param donor    Adres darczyńcy
-    /// @param amount   Ilość tokenów netto po odjęciu prowizji
+    event FundraiserCreated(uint256 indexed id, address indexed creator, address token, uint256 target, uint256 endTime, bool isFlexible);
     event DonationMade(uint256 indexed id, address indexed donor, uint256 amount);
-
-    /// @notice Emitowane przy wypłacie refundu
-    /// @param id              ID zbiórki
-    /// @param donor           Adres darczyńcy
-    /// @param amountReturned  Ilość tokenów zwrócona darczyńcy
-    /// @param commissionTaken Pobrana prowizja od zwrotu
-    event DonationRefunded(
-        uint256 indexed id,
-        address indexed donor,
-        uint256 amountReturned,
-        uint256 commissionTaken
-    );
-
-    /// @notice Emitowane przy wypłacie środków do twórcy zbiórki
-    /// @param id               ID zbiórki
-    /// @param creator          Adres twórcy
-    /// @param amountAfterCommission Ilość tokenów przekazana po odjęciu prowizji
+    event DonationRefunded(uint256 indexed id, address indexed donor, uint256 amountReturned, uint256 commissionTaken);
     event FundsWithdrawn(uint256 indexed id, address indexed creator, uint256 amountAfterCommission);
-
-    /// @notice Emitowane przy dodaniu tokenu do whitelisty
-    /// @param token   Adres tokenu
     event TokenWhitelisted(address indexed token);
-
-    /// @notice Emitowane przy inicjacji okresu zwrotu (closure) dla nieelastycznej zbiórki
-    /// @param id              ID zbiórki
-    /// @param reclaimDeadline Timestamp zakończenia okresu zwrotów
+    event TokenRemoved(address indexed token);
     event ClosureInitiated(uint256 indexed id, uint256 reclaimDeadline);
+    event DonationCommissionSet(uint256 newCommission);
+    event SuccessCommissionSet(uint256 newCommission);
+    event RefundCommissionSet(uint256 newCommission);
 
     // ========== KONSTRUKTOR ==========
 
-    /// @param initialOwner       Adres właściciela kontraktu (Ownable)
-    /// @param _commissionWallet  Portfel, na który będą trafiać prowizje
+    /// @param initialOwner      Adres właściciela kontraktu
+    /// @param _commissionWallet Portfel, na który będą trafiać prowizje
     constructor(address initialOwner, address _commissionWallet) Ownable(initialOwner) {
         require(_commissionWallet != address(0), "Invalid wallet");
         commissionWallet = _commissionWallet;
-        donationCommission = 0;
-        successCommission = 0;
-        refundCommission = 0;
     }
 
-    // ========== ADMIN: USTAWIENIA PROWIZJI ==========
+    // ========== ADMINISTRACJA ==========
 
-    /// @notice Ustawia prowizję od każdej wpłaty dotacji
-    /// @param _bps  Prowizja w punktach bazowych (0–10000)
-    function setDonationCommission(uint256 _bps) external onlyOwner {
-        require(_bps <= 10000, "Max 100%");
-        donationCommission = _bps;
+    /// @notice Pauzuje wszystkie krytyczne operacje
+    function pause() external onlyOwner {
+        _pause();
     }
 
-    /// @notice Ustawia prowizję przy wypłacie środków przez twórcę
-    /// @param _bps  Prowizja w punktach bazowych (0–10000)
-    function setSuccessCommission(uint256 _bps) external onlyOwner {
-        require(_bps <= 10000, "Max 100%");
-        successCommission = _bps;
+    /// @notice Odblokowuje kontrakt
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
-    /// @notice Ustawia prowizję przy kolejnych refundach w tym samym miesiącu
-    /// @param _bps  Prowizja w punktach bazowych (0–10000)
-    function setRefundCommission(uint256 _bps) external onlyOwner {
-        require(_bps <= 10000, "Max 100%");
-        refundCommission = _bps;
+    /// @notice Ustawia prowizję od wpłat
+    function setDonationCommission(uint256 bps) external onlyOwner {
+        require(bps <= 10_000, "Max 100%");
+        donationCommission = bps;
+        emit DonationCommissionSet(bps);
+    }
+
+    /// @notice Ustawia prowizję od sukcesu
+    function setSuccessCommission(uint256 bps) external onlyOwner {
+        require(bps <= 10_000, "Max 100%");
+        successCommission = bps;
+        emit SuccessCommissionSet(bps);
+    }
+
+    /// @notice Ustawia prowizję od refund
+    function setRefundCommission(uint256 bps) external onlyOwner {
+        require(bps <= 10_000, "Max 100%");
+        refundCommission = bps;
+        emit RefundCommissionSet(bps);
+    }
+
+    /// @notice Dodaje token do whitelisty
+    function whitelistToken(address token) external onlyOwner {
+        require(token != address(0), "Invalid token");
+        require(!isTokenWhitelisted[token], "Already whitelisted");
+        isTokenWhitelisted[token] = true;
+        whitelistedTokens.push(token);
+        emit TokenWhitelisted(token);
+    }
+
+    /// @notice Usuwa token z whitelisty
+    function removeWhitelistToken(address token) external onlyOwner {
+        require(isTokenWhitelisted[token], "Not whitelisted");
+        isTokenWhitelisted[token] = false;
+        // usuwamy z tablicy
+        for (uint256 i = 0; i < whitelistedTokens.length; i++) {
+            if (whitelistedTokens[i] == token) {
+                whitelistedTokens[i] = whitelistedTokens[whitelistedTokens.length - 1];
+                whitelistedTokens.pop();
+                break;
+            }
+        }
+        emit TokenRemoved(token);
     }
 
     // ========== GŁOSOWANIA ==========
 
-    /// @notice Tworzy nową propozycję do głosowania
-    /// @param _question         Treść pytania
-    /// @param _durationSeconds  Czas trwania głosowania w sekundach
-    function createProposal(string memory _question, uint256 _durationSeconds) external {
+    /// @notice Tworzy nową propozycję
+    /// @param question Treść pytania
+    /// @param duration Czas trwania w sekundach
+    function createProposal(string calldata question, uint256 duration) external whenNotPaused {
         proposalCount++;
         Proposal storage p = proposals[proposalCount];
         p.id = proposalCount;
-        p.question = _question;
-        p.endTime = block.timestamp + _durationSeconds;
+        p.question = question;
+        p.endTime = block.timestamp + duration;
         p.exists = true;
-        emit ProposalCreated(p.id, _question, p.endTime);
+
+        proposalIds.push(proposalCount);
+
+        emit ProposalCreated(p.id, question, p.endTime);
     }
 
-    /// @notice Oddaje głos w istniejącej propozycji
-    /// @param _proposalId  ID propozycji
-    /// @param _support     True = głos za, False = głos przeciw
-    function vote(uint256 _proposalId, bool _support) external {
-        Proposal storage p = proposals[_proposalId];
-        require(p.exists, "Proposal does not exist");
-        require(block.timestamp <= p.endTime, "Voting ended");
+    /// @notice Oddaje głos na propozycję
+    /// @param proposalId ID propozycji
+    /// @param support    True = za, False = przeciw
+    function vote(uint256 proposalId, bool support) external whenNotPaused {
+        Proposal storage p = proposals[proposalId];
+        require(p.exists, "Not exist");
+        require(block.timestamp <= p.endTime, "Ended");
         require(!p.hasVoted[msg.sender], "Already voted");
+
         p.hasVoted[msg.sender] = true;
-        if (_support) {
-            p.yesVotes++;
-        } else {
-            p.noVotes++;
-        }
-        emit Voted(msg.sender, _proposalId, _support);
+        if (support) p.yesVotes++; else p.noVotes++;
+
+        emit Voted(msg.sender, proposalId, support);
+    }
+
+    /// @notice Zwraca ile czasu zostało do końca głosowania
+    function timeLeftOnProposal(uint256 proposalId) external view returns (uint256) {
+        Proposal storage p = proposals[proposalId];
+        if (!p.exists || block.timestamp >= p.endTime) return 0;
+        return p.endTime - block.timestamp;
+    }
+
+    /// @notice Zwraca wszystkie ID propozycji
+    function getAllProposalIds() external view returns (uint256[] memory) {
+        return proposalIds;
+    }
+
+    /// @notice Skrótowe dane propozycji (dla front-endu)
+    function getProposalSummary(uint256 proposalId) public view returns (ProposalSummary memory) {
+        Proposal storage p = proposals[proposalId];
+        require(p.exists, "Not exist");
+        return ProposalSummary({
+            id: p.id,
+            question: p.question,
+            yesVotes: p.yesVotes,
+            noVotes: p.noVotes,
+            endTime: p.endTime
+        });
+    }
+
+    /// @notice Pełne dane propozycji (wymagane przez testy)
+    function getProposal(uint256 id) external view returns (
+        uint256, string memory, uint256, uint256, uint256, bool
+    ) {
+        Proposal storage p = proposals[id];
+        require(p.exists, "Not exist");
+        return (p.id, p.question, p.yesVotes, p.noVotes, p.endTime, p.exists);
     }
 
     // ========== ZBIÓRKI ==========
 
-    /// @notice Dodaje token do whitelisty
-    /// @param _token  Adres tokenu ERC20 dozwolonego w zbiórkach
-    function whitelistToken(address _token) external onlyOwner {
-        require(_token != address(0), "Invalid token");
-        isTokenWhitelisted[_token] = true;
-        whitelistedTokens.push(_token);
-        emit TokenWhitelisted(_token);
-    }
-
     /// @notice Tworzy nową zbiórkę ERC20
-    /// @param _token            Adres tokenu ERC20
-    /// @param _target           Cel zbiórki (ilość tokenów)
-    /// @param _durationSeconds  Czas trwania zbiórki w sekundach
-    /// @param _isFlexible       True = tryb elastyczny (wypłaty w trakcie)
-    function createFundraiser(
-        address _token,
-        uint256 _target,
-        uint256 _durationSeconds,
-        bool _isFlexible
-    ) external {
-        require(isTokenWhitelisted[_token], "Token not allowed");
+    function createFundraiser(address token, uint256 target, uint256 duration, bool isFlexible)
+        external
+        whenNotPaused
+    {
+        require(isTokenWhitelisted[token], "Token not allowed");
+
         fundraiserCount++;
         Fundraiser storage f = fundraisers[fundraiserCount];
         f.id = fundraiserCount;
         f.creator = msg.sender;
-        f.token = _token;
-        f.target = _target;
-        f.endTime = block.timestamp + _durationSeconds;
+        f.token = token;
+        f.target = target;
+        f.endTime = block.timestamp + duration;
         f.exists = true;
-        f.isFlexible = _isFlexible;
-        emit FundraiserCreated(f.id, msg.sender, _token, _target, f.endTime, _isFlexible);
+        f.isFlexible = isFlexible;
+
+        fundraiserIds.push(fundraiserCount);
+
+        emit FundraiserCreated(f.id, msg.sender, token, target, f.endTime, isFlexible);
     }
 
-    /// @notice Wpłaca darowiznę na zbiórkę
-    /// @param _id      ID zbiórki
-    /// @param _amount  Kwota do wpłaty (tokeny ERC20)
-    function donate(uint256 _id, uint256 _amount) external nonReentrant {
-        Fundraiser storage f = fundraisers[_id];
+    /// @notice Dokonuje darowizny
+    function donate(uint256 id, uint256 amount) external nonReentrant whenNotPaused {
+        Fundraiser storage f = fundraisers[id];
         require(f.exists, "Not found");
         require(block.timestamp <= f.endTime, "Ended");
-        require(_amount > 0, "Amount = 0");
+        require(amount > 0, "Zero amount");
 
-        IERC20 token = IERC20(f.token);
-        require(token.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
+        IERC20 tok = IERC20(f.token);
+        require(tok.transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
-        uint256 commission = (_amount * donationCommission) / 10000;
-        if (commission > 0) {
-            require(token.transfer(commissionWallet, commission), "Commission failed");
+        uint256 comm = (amount * donationCommission) / 10_000;
+        uint256 net  = amount - comm;
+
+        f.raised += net;
+        if (f.donations[msg.sender] == 0) {
+            f.donors.push(msg.sender);
+        }
+        f.donations[msg.sender] += net;
+
+        if (comm > 0) {
+            require(tok.transfer(commissionWallet, comm), "Commission failed");
         }
 
-        uint256 net = _amount - commission;
-        f.raised += net;
-        f.donations[msg.sender] += net;
-        emit DonationMade(_id, msg.sender, net);
+        emit DonationMade(id, msg.sender, net);
     }
 
-    /// @notice Oddaje refundę darczyńcy; nalicza prowizję przy drugim i kolejnych zwrotach w miesiącu
-    /// @param _id  ID zbiórki
-    function refund(uint256 _id) external nonReentrant {
-        Fundraiser storage f = fundraisers[_id];
+    /// @notice Zwraca refundę darczyńcy
+    function refund(uint256 id) external nonReentrant whenNotPaused {
+        Fundraiser storage f = fundraisers[id];
         require(f.exists, "Not found");
         require(!f.refunded[msg.sender], "Already refunded");
 
         uint256 donated = f.donations[msg.sender];
-        require(donated > 0, "Nothing donated");
+        require(donated > 0, "None donated");
 
         if (!f.isFlexible) {
             require(block.timestamp > f.endTime, "Too early");
-            require(f.raised < f.target || f.closureInitiated, "No refunds now");
+            require(f.raised < f.target || f.closureInitiated, "No refunds");
             if (f.closureInitiated) {
-                require(block.timestamp <= f.reclaimDeadline, "Reclaim period over");
+                require(block.timestamp <= f.reclaimDeadline, "Reclaim over");
             }
         }
 
         uint256 period = block.timestamp / 30 days;
         monthlyRefundCount[msg.sender][period]++;
 
-        uint256 commissionAmt = 0;
+        uint256 commAmt = 0;
         if (monthlyRefundCount[msg.sender][period] > 1 && refundCommission > 0) {
-            commissionAmt = (donated * refundCommission) / 10000;
+            commAmt = (donated * refundCommission) / 10_000;
         }
 
-        f.refunded[msg.sender] = true;
-        f.donations[msg.sender] = 0;
+        f.refunded[msg.sender]    = true;
+        f.raised                 -= donated;
+        f.donations[msg.sender]   = 0;
 
-        IERC20 token = IERC20(f.token);
-
-        if (commissionAmt > 0) {
-            require(token.transfer(commissionWallet, commissionAmt), "Refund commission failed");
+        IERC20 tok = IERC20(f.token);
+        if (commAmt > 0) {
+            require(tok.transfer(commissionWallet, commAmt), "Commission failed");
         }
+        require(tok.transfer(msg.sender, donated - commAmt), "Refund failed");
 
-        uint256 toReturn = donated - commissionAmt;
-        require(token.transfer(msg.sender, toReturn), "Refund failed");
-
-        emit DonationRefunded(_id, msg.sender, toReturn, commissionAmt);
+        emit DonationRefunded(id, msg.sender, donated - commAmt, commAmt);
     }
 
-    /// @notice Wypłaca zebrane środki twórcy zbiórki
-    /// @param _id  ID zbiórki
-    function withdraw(uint256 _id) external nonReentrant {
-        Fundraiser storage f = fundraisers[_id];
+    /// @notice Wypłaca środki twórcy
+    function withdraw(uint256 id) external nonReentrant whenNotPaused {
+        Fundraiser storage f = fundraisers[id];
         require(f.exists, "Not found");
         require(msg.sender == f.creator, "Not creator");
+        // natychmiastowy check wypłacono?
         require(!f.withdrawn || f.isFlexible, "Already withdrawn");
 
+        IERC20 tok = IERC20(f.token);
+
+        // elastyczna – zawsze pozwalamy
         if (f.isFlexible) {
-            uint256 available = f.raised;
+            uint256 amt = f.raised;
+            require(amt > 0, "Zero");
             f.raised = 0;
-            require(available > 0, "Nothing to withdraw");
-            require(IERC20(f.token).transfer(f.creator, available), "Withdraw failed");
-            emit FundsWithdrawn(_id, f.creator, available);
+            require(tok.transfer(f.creator, amt), "Transfer failed");
+            emit FundsWithdrawn(id, f.creator, amt);
             return;
         }
 
+        // docelowa: przed pierwszą wypłatą
         if (f.raised >= f.target) {
+            require(!f.withdrawn, "Already withdrawn");
             f.withdrawn = true;
         } else {
+            // zbiórka zakończona i refund window
             require(block.timestamp > f.endTime, "Too early");
             require(f.closureInitiated && block.timestamp >= f.reclaimDeadline, "Not ready");
             f.withdrawn = true;
         }
 
-        uint256 commission = (f.raised * successCommission) / 10000;
-        uint256 net = f.raised - commission;
-        if (commission > 0) {
-            require(IERC20(f.token).transfer(commissionWallet, commission), "Commission fail");
-        }
-        require(IERC20(f.token).transfer(f.creator, net), "Withdraw fail");
+        uint256 comm = (f.raised * successCommission) / 10_000;
+        uint256 net  = f.raised - comm;
+        f.raised = 0;
 
-        emit FundsWithdrawn(_id, f.creator, net);
+        if (comm > 0) {
+            require(tok.transfer(commissionWallet, comm), "Commission failed");
+        }
+        require(tok.transfer(f.creator, net), "Transfer failed");
+
+        emit FundsWithdrawn(id, f.creator, net);
     }
 
-    /// @notice Inicjuje okres zwrotów (closure) dla nieelastycznej zbiórki
-    /// @param _id  ID zbiórki
-    function initiateClosure(uint256 _id) external {
-        Fundraiser storage f = fundraisers[_id];
+    /// @notice Inicjuje okres refundów po zakończeniu zbiórki (docelowa, nieelastyczna)
+    function initiateClosure(uint256 id) external whenNotPaused {
+        Fundraiser storage f = fundraisers[id];
         require(msg.sender == f.creator, "Not creator");
-        require(!f.isFlexible, "Flexible can't initiate closure");
+        require(!f.isFlexible, "Flexible only");
         require(block.timestamp > f.endTime, "Too early");
         require(!f.closureInitiated, "Already initiated");
+
         f.closureInitiated = true;
-        f.reclaimDeadline = block.timestamp + RECLAIM_PERIOD;
-        emit ClosureInitiated(_id, f.reclaimDeadline);
+        f.reclaimDeadline   = block.timestamp + RECLAIM_PERIOD;
+
+        emit ClosureInitiated(id, f.reclaimDeadline);
+    }
+
+    /// @notice Ile czasu zostało do końca zbiórki
+    function timeLeftOnFundraiser(uint256 id) external view returns (uint256) {
+        Fundraiser storage f = fundraisers[id];
+        if (!f.exists || block.timestamp >= f.endTime) return 0;
+        return f.endTime - block.timestamp;
+    }
+
+    /// @notice Wszystkie ID zbiórek
+    function getAllFundraiserIds() external view returns (uint256[] memory) {
+        return fundraiserIds;
+    }
+
+    /// @notice Lista darczyńców danej zbiórki
+    function getDonors(uint256 id) external view returns (address[] memory) {
+        return fundraisers[id].donors;
     }
 
     // ========== GETTERY ==========
 
-    /// @notice Zwraca dane zbiórki (bez mappingów wewnętrznych)
-    /// @param id  ID zbiórki
+    function getProposalCount() external view returns (uint256) {
+        return proposalCount;
+    }
+
+    function hasVoted(uint256 proposalId, address voter) external view returns (bool) {
+        return proposals[proposalId].hasVoted[voter];
+    }
+
+    function getFundraiserCount() external view returns (uint256) {
+        return fundraiserCount;
+    }
+
+    function donationOf(uint256 id, address donor) external view returns (uint256) {
+        return fundraisers[id].donations[donor];
+    }
+
+    function hasRefunded(uint256 id, address donor) external view returns (bool) {
+        return fundraisers[id].refunded[donor];
+    }
+
+    function getWhitelistedTokens() external view returns (address[] memory) {
+        return whitelistedTokens;
+    }
+
+    /// @notice Pełne dane zbiórki (wymagane przez testy)
     function getFundraiser(uint256 id) external view returns (
         uint256, address, address, uint256, uint256,
         uint256, bool, bool, uint256, bool
     ) {
         Fundraiser storage f = fundraisers[id];
-        require(f.exists, "Not found");
+        require(f.exists, "Not exist");
         return (
             f.id,
             f.creator,
@@ -380,51 +446,24 @@ contract PoliDAO is Ownable, ReentrancyGuard {
         );
     }
 
-    /// @notice Pobiera wpłaconą kwotę przez darczyńcę dla danej zbiórki
-    /// @param id     ID zbiórki
-    /// @param donor  Adres darczyńcy
-    function donationOf(uint256 id, address donor) external view returns (uint256) {
-        return fundraisers[id].donations[donor];
+    /// @notice Skrótowe dane propozycji (publiczny wrapper)
+    function getProposalSummaryPublic(uint256 id) external view returns (ProposalSummary memory) {
+        return getProposalSummary(id);
     }
 
-    /// @notice Sprawdza, czy darczyńca otrzymał refundę w danej zbiórce
-    /// @param id     ID zbiórki
-    /// @param donor  Adres darczyńcy
-    function hasRefunded(uint256 id, address donor) external view returns (bool) {
-        return fundraisers[id].refunded[donor];
-    }
-
-    /// @notice Zwraca liczbę utworzonych zbiórek
-    function getFundraiserCount() external view returns (uint256) {
-        return fundraiserCount;
-    }
-
-    /// @notice Zwraca dane propozycji (bez mappingów wewnętrznych)
-    /// @param id  ID propozycji
-    function getProposal(uint256 id) external view returns (
-        uint256, string memory, uint256, uint256, uint256, bool
-    ) {
-        Proposal storage p = proposals[id];
-        require(p.exists, "Not found");
-        return (
-            p.id,
-            p.question,
-            p.yesVotes,
-            p.noVotes,
-            p.endTime,
-            p.exists
-        );
-    }
-
-    /// @notice Sprawdza, czy adres już głosował w danej propozycji
-    /// @param id     ID propozycji
-    /// @param voter  Adres głosującego
-    function hasVoted(uint256 id, address voter) external view returns (bool) {
-        return proposals[id].hasVoted[voter];
-    }
-
-    /// @notice Zwraca liczbę utworzonych propozycji
-    function getProposalCount() external view returns (uint256) {
-        return proposalCount;
+    /// @notice Skrótowe dane zbiórki (publiczny wrapper)
+    function getFundraiserSummary(uint256 id) external view returns (FundraiserSummary memory) {
+        Fundraiser storage f = fundraisers[id];
+        require(f.exists, "Not exist");
+        return FundraiserSummary({
+            id: f.id,
+            creator: f.creator,
+            token: f.token,
+            target: f.target,
+            raised: f.raised,
+            endTime: f.endTime,
+            isFlexible: f.isFlexible,
+            closureInitiated: f.closureInitiated
+        });
     }
 }
