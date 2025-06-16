@@ -196,22 +196,83 @@ describe("Fundraisers", function () {
   });
 
   it("should apply success commission correctly on withdraw", async function () {
-    // ustawiamy 10% prowizji od wypłat
     await dao.connect(owner).setSuccessCommission(1000);
     await createFundraiser(1000, 3600, false);
     await donate(user1, 1000);
-    console.log(">>> przed wypłatą:", {
-      commissionWallet: (await mockToken.balanceOf(user3.address)).toString(),
-      owner: (await mockToken.balanceOf(owner.address)).toString()
-    });
     await dao.withdraw(1);
-    console.log(">>> po wypłacie:", {
-      commissionWallet: (await mockToken.balanceOf(user3.address)).toString(),
-      owner: (await mockToken.balanceOf(owner.address)).toString()
-    });
     const commission = ethers.parseUnits("100", 18);
     expect(await mockToken.balanceOf(user3.address)).to.equal(commission);
     const net = ethers.parseUnits("900", 18);
     expect(await mockToken.balanceOf(owner.address)).to.equal(net);
+  });
+});
+
+// ==============================
+// New tests for refundCommission
+// ==============================
+describe("Refund Commission", function () {
+  const donatedAmount = ethers.parseUnits("1000", 18);
+
+  it("should allow owner to set refund commission", async function () {
+    await dao.setRefundCommission(500); // 5%
+    expect(await dao.refundCommission()).to.equal(500);
+  });
+
+  it("should not charge commission on first refund but charge on second refund in same month", async function () {
+    // set 10% refund commission
+    await dao.setRefundCommission(1000);
+
+    // --- First fundraiser & refund ---
+    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
+    const fa1 = 1;
+    await mockToken.connect(user1).approve(await dao.getAddress(), donatedAmount);
+    await dao.connect(user1).donate(fa1, donatedAmount);
+
+    // record balances before refund1
+    const beforeUser1_1 = await mockToken.balanceOf(user1.address);
+    const beforeComm_1 = await mockToken.balanceOf(user3.address);
+
+    // refund1
+    await dao.connect(user1).refund(fa1);
+
+    const afterUser1_1 = await mockToken.balanceOf(user1.address);
+    const afterComm_1 = await mockToken.balanceOf(user3.address);
+
+    // user1 gets full amount back, commission wallet unchanged
+    expect(afterUser1_1 - beforeUser1_1).to.equal(donatedAmount);
+    expect(afterComm_1 - beforeComm_1).to.equal(0n);
+
+    // period index
+    const block1 = await ethers.provider.getBlock();
+    const period = Math.floor(block1.timestamp / (30 * 24 * 3600));
+
+    // monthlyRefundCount should be 1
+    expect(await dao.monthlyRefundCount(user1.address, period)).to.equal(1);
+
+    // --- Second fundraiser & refund ---
+    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
+    const fa2 = 2;
+    await mockToken.connect(user1).approve(await dao.getAddress(), donatedAmount);
+    await dao.connect(user1).donate(fa2, donatedAmount);
+
+    // record balances before refund2
+    const beforeUser1_2 = await mockToken.balanceOf(user1.address);
+    const beforeComm_2 = await mockToken.balanceOf(user3.address);
+
+    // refund2
+    await dao.connect(user1).refund(fa2);
+
+    const afterUser1_2 = await mockToken.balanceOf(user1.address);
+    const afterComm_2 = await mockToken.balanceOf(user3.address);
+
+    // calculate expected values
+    const expectedCommission = (donatedAmount * 1000n) / 10000n;
+    const expectedRefund = donatedAmount - expectedCommission;
+
+    expect(afterUser1_2 - beforeUser1_2).to.equal(expectedRefund);
+    expect(afterComm_2 - beforeComm_2).to.equal(expectedCommission);
+
+    // monthlyRefundCount should now be 2
+    expect(await dao.monthlyRefundCount(user1.address, period)).to.equal(2);
   });
 });
