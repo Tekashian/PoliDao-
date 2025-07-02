@@ -6,9 +6,11 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
-/// @title PoliDAO v3.0 - Simplified Authorization Model
+/// @title PoliDAO v3.1 - Production Ready Governance & Fundraising Platform
 /// @notice Smart contract with authorization-only governance and ERC20 fundraising
-/// @dev Streamlined architecture with owner + authorized proposers model only
+/// @dev Streamlined architecture with enhanced security features
+/// @author PoliDAO Team
+/// @custom:security-contact security@polidao.io
 contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     // ========== CUSTOM ERRORS ==========
     
@@ -19,12 +21,16 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     error InvalidToken(address token);
     error NotAContract(address token);
     error DailyLimitExceeded(uint256 requested, uint256 limit);
+    error InvalidRecipient(address recipient);
+    error TransferFailed();
+    error PaginationError(uint256 offset, uint256 total);
 
     // ========== CONSTANTS ==========
     
     uint256 public constant MAX_DURATION = 365 days;
     uint256 public constant MAX_QUESTION_LENGTH = 500;
     uint256 public constant RECLAIM_PERIOD = 14 days;
+    uint256 public constant MAX_DONORS_BATCH = 100; // Gas optimization for getDonors
 
     // ========== STRUKTURY ==========
 
@@ -108,7 +114,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     bool public donationsPaused;
     bool public withdrawalsPaused;
 
-    // SIMPLIFIED: Only authorized proposers (owner + authorized users)
+    // Authorization system
     mapping(address => bool) public authorizedProposers;
 
     // ========== EVENTS ==========
@@ -131,6 +137,10 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     event WithdrawalsPauseToggled(bool paused);
     event ProposerAuthorized(address indexed proposer);
     event ProposerRevoked(address indexed proposer);
+    
+    // Security events
+    event CommissionWalletChanged(address indexed oldWallet, address indexed newWallet);
+    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
 
     // ========== MODIFIERS ==========
 
@@ -149,7 +159,6 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         _;
     }
 
-    /// @dev SIMPLIFIED: Only owner or authorized proposers can create proposals
     modifier onlyAuthorizedProposer() {
         if (msg.sender != owner() && !authorizedProposers[msg.sender]) {
             revert NotAuthorized();
@@ -168,78 +177,135 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         _;
     }
 
+    modifier validAddress(address addr) {
+        if (addr == address(0)) revert InvalidRecipient(addr);
+        _;
+    }
+
     // ========== CONSTRUCTOR ==========
 
-    constructor(address initialOwner, address _commissionWallet) Ownable(initialOwner) {
-        require(_commissionWallet != address(0), "Invalid wallet");
+    /// @notice Initializes the PoliDAO contract
+    /// @param initialOwner Address that will own the contract
+    /// @param _commissionWallet Address that will receive commission payments
+    constructor(address initialOwner, address _commissionWallet) 
+        Ownable(initialOwner) 
+        validAddress(initialOwner)
+        validAddress(_commissionWallet)
+    {
         commissionWallet = _commissionWallet;
     }
 
     // ========== ADMIN FUNCTIONS ==========
 
+    /// @notice Pauses all contract operations
     function pause() external onlyOwner {
         _pause();
     }
 
+    /// @notice Unpauses all contract operations
     function unpause() external onlyOwner {
         _unpause();
     }
 
+    /// @notice Toggles voting functionality
     function toggleVotingPause() external onlyOwner {
         votingPaused = !votingPaused;
         emit VotingPauseToggled(votingPaused);
     }
 
+    /// @notice Toggles donation functionality
     function toggleDonationsPause() external onlyOwner {
         donationsPaused = !donationsPaused;
         emit DonationsPauseToggled(donationsPaused);
     }
 
+    /// @notice Toggles withdrawal functionality
     function toggleWithdrawalsPause() external onlyOwner {
         withdrawalsPaused = !withdrawalsPaused;
         emit WithdrawalsPauseToggled(withdrawalsPaused);
     }
 
+    /// @notice Changes the commission wallet address
+    /// @param newWallet New wallet address for receiving commissions
+    function setCommissionWallet(address newWallet) external onlyOwner validAddress(newWallet) {
+        address oldWallet = commissionWallet;
+        commissionWallet = newWallet;
+        emit CommissionWalletChanged(oldWallet, newWallet);
+    }
+
+    /// @notice Emergency function to withdraw stuck tokens
+    /// @param token Token address (address(0) for ETH)
+    /// @param to Recipient address
+    /// @param amount Amount to withdraw
+    function emergencyWithdraw(address token, address to, uint256 amount) 
+        external 
+        onlyOwner 
+        validAddress(to) 
+    {
+        if (token == address(0)) {
+            // ETH withdrawal
+            (bool success, ) = to.call{value: amount}("");
+            if (!success) revert TransferFailed();
+        } else {
+            // ERC20 withdrawal
+            IERC20(token).transfer(to, amount);
+        }
+        
+        emit EmergencyWithdraw(token, to, amount);
+    }
+
     /// @notice Authorize address to create proposals
-    function authorizeProposer(address proposer) external onlyOwner {
-        require(proposer != address(0), "Invalid address");
+    /// @param proposer Address to authorize
+    function authorizeProposer(address proposer) external onlyOwner validAddress(proposer) {
         authorizedProposers[proposer] = true;
         emit ProposerAuthorized(proposer);
     }
 
     /// @notice Revoke proposal creation authorization
+    /// @param proposer Address to revoke authorization from
     function revokeProposer(address proposer) external onlyOwner {
         authorizedProposers[proposer] = false;
         emit ProposerRevoked(proposer);
     }
 
+    /// @notice Set maximum daily donation limit
+    /// @param newLimit New daily limit
     function setMaxDailyDonations(uint256 newLimit) external onlyOwner {
         maxDailyDonations = newLimit;
         emit MaxDailyDonationsSet(newLimit);
     }
 
+    /// @notice Set donation commission rate
+    /// @param bps Commission rate in basis points (1 bps = 0.01%)
     function setDonationCommission(uint256 bps) external onlyOwner {
         require(bps <= 10_000, "Max 100%");
         donationCommission = bps;
         emit DonationCommissionSet(bps);
     }
 
+    /// @notice Set success commission rate
+    /// @param bps Commission rate in basis points (1 bps = 0.01%)
     function setSuccessCommission(uint256 bps) external onlyOwner {
         require(bps <= 10_000, "Max 100%");
         successCommission = bps;
         emit SuccessCommissionSet(bps);
     }
 
+    /// @notice Set refund commission rate
+    /// @param bps Commission rate in basis points (1 bps = 0.01%)
     function setRefundCommission(uint256 bps) external onlyOwner {
         require(bps <= 10_000, "Max 100%");
         refundCommission = bps;
         emit RefundCommissionSet(bps);
     }
 
+    /// @notice Add token to whitelist
+    /// @param token ERC20 token address to whitelist
     function whitelistToken(address token) external onlyOwner {
         if (token == address(0)) revert InvalidToken(token);
         if (token.code.length == 0) revert NotAContract(token);
         
+        // Verify ERC20 compatibility
         try IERC20(token).totalSupply() returns (uint256) {
             // Token is likely ERC20 compatible
         } catch {
@@ -255,6 +321,8 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit TokenWhitelisted(token);
     }
 
+    /// @notice Remove token from whitelist
+    /// @param token Token address to remove
     function removeWhitelistToken(address token) external onlyOwner {
         require(isTokenWhitelisted[token], "Not whitelisted");
         
@@ -263,6 +331,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         uint256 index = tokenIndex[token];
         address lastToken = whitelistedTokens[whitelistedTokens.length - 1];
         
+        // Swap with last element and pop
         whitelistedTokens[index] = lastToken;
         tokenIndex[lastToken] = index;
         
@@ -274,9 +343,9 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
 
     // ========== GOVERNANCE ==========
 
-    /// @notice SIMPLIFIED: Single function for creating proposals (authorization-only)
-    /// @param question Proposal question
-    /// @param duration Voting duration in seconds
+    /// @notice Create new proposal (authorization required)
+    /// @param question Proposal question (1-500 characters)
+    /// @param duration Voting duration in seconds (max 365 days)
     function createProposal(string calldata question, uint256 duration) 
         external 
         whenNotPaused 
@@ -303,6 +372,9 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit ProposalCreated(p.id, question, p.endTime, msg.sender);
     }
 
+    /// @notice Vote on a proposal
+    /// @param proposalId ID of the proposal
+    /// @param support True for "yes", false for "no"
     function vote(uint256 proposalId, bool support) 
         external 
         whenNotPaused 
@@ -326,6 +398,11 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
 
     // ========== FUNDRAISING ==========
 
+    /// @notice Create new fundraiser
+    /// @param token Whitelisted ERC20 token address
+    /// @param target Target amount (0 for flexible fundraiser)
+    /// @param duration Duration in seconds
+    /// @param isFlexible True for flexible mode, false for target mode
     function createFundraiser(address token, uint256 target, uint256 duration, bool isFlexible)
         external
         whenNotPaused
@@ -349,6 +426,9 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit FundraiserCreated(f.id, msg.sender, token, target, f.endTime, isFlexible);
     }
 
+    /// @notice Donate to a fundraiser
+    /// @param id Fundraiser ID
+    /// @param amount Amount to donate
     function donate(uint256 id, uint256 amount) 
         external 
         nonReentrant 
@@ -380,6 +460,8 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit DonationMade(id, msg.sender, netAmount);
     }
 
+    /// @notice Refund donation
+    /// @param id Fundraiser ID
     function refund(uint256 id) external nonReentrant whenNotPaused {
         Fundraiser storage f = fundraisers[id];
         require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
@@ -417,6 +499,8 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit DonationRefunded(id, msg.sender, donated - commissionAmount, commissionAmount);
     }
 
+    /// @notice Withdraw funds from fundraiser
+    /// @param id Fundraiser ID
     function withdraw(uint256 id) 
         external 
         nonReentrant 
@@ -460,10 +544,12 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit FundsWithdrawn(id, f.creator, netAmount);
     }
 
+    /// @notice Initiate closure period for failed fundraiser
+    /// @param id Fundraiser ID
     function initiateClosure(uint256 id) external whenNotPaused {
         Fundraiser storage f = fundraisers[id];
         require(msg.sender == f.creator, "Not creator");
-        require(!f.isFlexible, "Flexible fundraisers only");
+        require(!f.isFlexible, "Only non-flexible fundraisers");
         require(block.timestamp > f.endTime, "Too early");
         require(!f.closureInitiated, "Already initiated");
 
@@ -476,10 +562,15 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     // ========== VIEW FUNCTIONS ==========
 
     /// @notice Check if address can create proposals
+    /// @param proposer Address to check
+    /// @return True if address can create proposals
     function canPropose(address proposer) external view returns (bool) {
         return proposer == owner() || authorizedProposers[proposer];
     }
 
+    /// @notice Get remaining time for proposal voting
+    /// @param proposalId Proposal ID
+    /// @return Remaining time in seconds (0 if ended)
     function timeLeftOnProposal(uint256 proposalId) external view returns (uint256) {
         if (proposalId > proposalCount || proposalId == 0) return 0;
         Proposal storage p = proposals[proposalId];
@@ -487,6 +578,9 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         return p.endTime - block.timestamp;
     }
 
+    /// @notice Get remaining time for fundraiser
+    /// @param id Fundraiser ID
+    /// @return Remaining time in seconds (0 if ended)
     function timeLeftOnFundraiser(uint256 id) external view returns (uint256) {
         if (id > fundraiserCount || id == 0) return 0;
         Fundraiser storage f = fundraisers[id];
@@ -494,14 +588,21 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         return f.endTime - block.timestamp;
     }
 
+    /// @notice Get all proposal IDs
+    /// @return Array of proposal IDs
     function getAllProposalIds() external view returns (uint256[] memory) {
         return proposalIds;
     }
 
+    /// @notice Get all fundraiser IDs
+    /// @return Array of fundraiser IDs
     function getAllFundraiserIds() external view returns (uint256[] memory) {
         return fundraiserIds;
     }
 
+    /// @notice Get proposal summary
+    /// @param proposalId Proposal ID
+    /// @return Proposal summary struct
     function getProposalSummary(uint256 proposalId) external view returns (ProposalSummary memory) {
         require(proposalId <= proposalCount && proposalId > 0, "Invalid proposal");
         Proposal storage p = proposals[proposalId];
@@ -516,6 +617,9 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         });
     }
 
+    /// @notice Get fundraiser summary
+    /// @param id Fundraiser ID
+    /// @return Fundraiser summary struct
     function getFundraiserSummary(uint256 id) external view returns (FundraiserSummary memory) {
         require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
         Fundraiser storage f = fundraisers[id];
@@ -532,6 +636,49 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         });
     }
 
+    /// @notice Get donors with pagination
+    /// @param id Fundraiser ID
+    /// @param offset Starting index
+    /// @param limit Maximum number of donors to return
+    /// @return donors Array of donor addresses
+    /// @return total Total number of donors
+    function getDonorsPaginated(uint256 id, uint256 offset, uint256 limit) 
+        external view returns (address[] memory donors, uint256 total) 
+    {
+        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
+        require(limit <= MAX_DONORS_BATCH, "Limit too high");
+        
+        address[] storage allDonors = fundraisers[id].donors;
+        total = allDonors.length;
+        
+        if (offset >= total) {
+            return (new address[](0), total);
+        }
+        
+        uint256 end = offset + limit;
+        if (end > total) {
+            end = total;
+        }
+        
+        donors = new address[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            donors[i - offset] = allDonors[i];
+        }
+    }
+
+    /// @notice Get total number of donors for a fundraiser
+    /// @param id Fundraiser ID
+    /// @return Number of unique donors
+    function getDonorsCount(uint256 id) external view returns (uint256) {
+        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
+        return fundraisers[id].donors.length;
+    }
+
+    // ========== LEGACY SUPPORT FUNCTIONS ==========
+
+    /// @notice Get proposal data (legacy format)
+    /// @param id Proposal ID
+    /// @return id, question, yesVotes, noVotes, endTime, exists
     function getProposal(uint256 id) external view returns (
         uint256, string memory, uint256, uint256, uint256, bool
     ) {
@@ -540,11 +687,17 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         return (p.id, p.question, p.yesVotes, p.noVotes, p.endTime, true);
     }
 
+    /// @notice Get proposal creator
+    /// @param proposalId Proposal ID
+    /// @return Creator address
     function getProposalCreator(uint256 proposalId) external view returns (address) {
         require(proposalId <= proposalCount && proposalId > 0, "Invalid proposal");
         return proposals[proposalId].creator;
     }
 
+    /// @notice Get fundraiser data (legacy format)
+    /// @param id Fundraiser ID
+    /// @return id, creator, token, target, raised, endTime, withdrawn, isFlexible, reclaimDeadline, closureInitiated
     function getFundraiser(uint256 id) external view returns (
         uint256, address, address, uint256, uint256,
         uint256, bool, bool, uint256, bool
@@ -557,43 +710,90 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         );
     }
 
+    /// @notice Get all donors (legacy function - limited to prevent gas issues)
+    /// @param id Fundraiser ID
+    /// @return Array of donor addresses (first 100 donors only)
     function getDonors(uint256 id) external view returns (address[] memory) {
         require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        return fundraisers[id].donors;
+        address[] storage allDonors = fundraisers[id].donors;
+        
+        uint256 length = allDonors.length;
+        if (length > MAX_DONORS_BATCH) {
+            length = MAX_DONORS_BATCH;
+        }
+        
+        address[] memory result = new address[](length);
+        for (uint256 i = 0; i < length; i++) {
+            result[i] = allDonors[i];
+        }
+        
+        return result;
     }
 
+    // ========== UTILITY FUNCTIONS ==========
+
+    /// @notice Get total number of proposals
+    /// @return Number of proposals
     function getProposalCount() external view returns (uint256) {
         return proposalCount;
     }
 
+    /// @notice Get total number of fundraisers
+    /// @return Number of fundraisers
     function getFundraiserCount() external view returns (uint256) {
         return fundraiserCount;
     }
 
+    /// @notice Check if address has voted on proposal
+    /// @param proposalId Proposal ID
+    /// @param voter Voter address
+    /// @return True if voted
     function hasVoted(uint256 proposalId, address voter) external view returns (bool) {
         if (proposalId > proposalCount || proposalId == 0) return false;
         return proposals[proposalId].hasVoted[voter];
     }
 
+    /// @notice Get donation amount for address
+    /// @param id Fundraiser ID
+    /// @param donor Donor address
+    /// @return Donation amount
     function donationOf(uint256 id, address donor) external view returns (uint256) {
         if (id > fundraiserCount || id == 0) return 0;
         return fundraisers[id].donations[donor];
     }
 
+    /// @notice Check if address has been refunded
+    /// @param id Fundraiser ID
+    /// @param donor Donor address
+    /// @return True if refunded
     function hasRefunded(uint256 id, address donor) external view returns (bool) {
         if (id > fundraiserCount || id == 0) return false;
         return fundraisers[id].refunded[donor];
     }
 
+    /// @notice Get all whitelisted tokens
+    /// @return Array of token addresses
     function getWhitelistedTokens() external view returns (address[] memory) {
         return whitelistedTokens;
     }
 
+    /// @notice Get daily donation count for specific day
+    /// @param day Day timestamp divided by 1 days
+    /// @return Donation count for that day
     function getDailyDonationCount(uint256 day) external view returns (uint256) {
         return dailyDonationCount[day];
     }
 
+    /// @notice Get today's donation count
+    /// @return Today's donation count
     function getTodayDonationCount() external view returns (uint256) {
         return dailyDonationCount[block.timestamp / 1 days];
+    }
+
+    // ========== RECEIVE FUNCTION ==========
+
+    /// @notice Receive function to accept ETH (for emergency purposes)
+    receive() external payable {
+        // ETH can be sent to contract for emergency withdrawal
     }
 }
