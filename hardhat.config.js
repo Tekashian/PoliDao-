@@ -12,8 +12,24 @@ module.exports = {
   defaultNetwork: "hardhat",
   solidity: {
     compilers: [
-      { version: "0.8.20" },
-      { version: "0.8.30" },
+      { 
+        version: "0.8.20",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200  // Niska wartość dla lepszej kompresji kodu
+          }
+        }
+      },
+      { 
+        version: "0.8.30",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200  // Niska wartość dla lepszej kompresji kodu
+          }
+        }
+      },
     ],
   },
   networks: {
