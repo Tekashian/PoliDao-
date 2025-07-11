@@ -6,9 +6,9 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
-/// @title PoliDAO v3.1 - Production Ready Governance & Fundraising Platform
-/// @notice Smart contract with authorization-only governance and ERC20 fundraising
-/// @dev Streamlined architecture with enhanced security features
+/// @title PoliDAO v3.5 - Enhanced Governance & Fundraising Platform with Multimedia
+/// @notice Smart contract with authorization-only governance, ERC20 fundraising, and multimedia support
+/// @dev All original functionalities preserved + multimedia support added after fundraiser creation
 /// @author PoliDAO Team
 /// @custom:security-contact security@polidao.io
 contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
@@ -24,15 +24,60 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     error InvalidRecipient(address recipient);
     error TransferFailed();
     error PaginationError(uint256 offset, uint256 total);
+    error UpdateTooLong(uint256 length);
+    error EmptyUpdate();
+    error InvalidUpdateId(uint256 updateId);
+    error NotFundraiserCreator();
+    error InvalidIPFSHash(string hash);
+    error MediaLimitExceeded(uint256 provided, uint256 limit);
+    error InvalidMediaType(uint8 mediaType);
 
     // ========== CONSTANTS ==========
     
     uint256 public constant MAX_DURATION = 365 days;
     uint256 public constant MAX_QUESTION_LENGTH = 500;
+    uint256 public constant MAX_UPDATE_LENGTH = 1000;
+    uint256 public constant MAX_IPFS_HASH_LENGTH = 100;
     uint256 public constant RECLAIM_PERIOD = 14 days;
-    uint256 public constant MAX_DONORS_BATCH = 100; // Gas optimization for getDonors
+    uint256 public constant MAX_DONORS_BATCH = 100;
+    uint256 public constant MAX_UPDATES_BATCH = 50;
+    uint256 private constant PRECISION = 10_000; // For basis points calculations
+    uint256 private constant MAX_COMMISSION = 10_000; // 100% in basis points
+    
+    // MULTIMEDIA LIMITS (FREE for everyone)
+    uint256 public constant MAX_MEDIA_BATCH = 20;              // 20 files at once
+    uint256 public constant MAX_TOTAL_MEDIA = 200;             // 200 total per fundraiser
+    uint256 public constant MAX_IMAGES = 100;                  // 100 images
+    uint256 public constant MAX_VIDEOS = 30;                   // 30 videos 
+    uint256 public constant MAX_AUDIO = 20;                    // 20 audio files
+    uint256 public constant MAX_DOCUMENTS = 50;                // 50 documents
 
-    // ========== STRUKTURY ==========
+    // ========== MULTIMEDIA STRUCTURES ==========
+
+    /// @notice Media item structure for IPFS integration
+    struct MediaItem {
+        string ipfsHash;        // IPFS file hash
+        uint8 mediaType;        // 0=image, 1=video, 2=audio, 3=document
+        string filename;        // Original filename
+        uint256 fileSize;       // Size in bytes
+        uint256 uploadTime;     // When added
+        address uploader;       // Who added it
+        string description;     // File description
+    }
+
+    /// @notice Update with multimedia support
+    struct FundraiserUpdate {
+        uint256 id;
+        uint256 fundraiserId;
+        address author;
+        string content;         // Update content
+        uint256 timestamp;
+        bool isPinned;
+        uint8 updateType;       // 0=general, 1=milestone, 2=urgent, 3=final
+        MediaItem[] attachments; // Attached multimedia
+    }
+
+    // ========== ENHANCED STRUCTURES ==========
 
     struct Proposal {
         uint256 id;
@@ -41,6 +86,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         uint256 noVotes;
         uint256 endTime;
         address creator;
+        string metadataHash;    // IPFS hash for additional data
         mapping(address => bool) hasVoted;
     }
 
@@ -51,6 +97,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         uint256 noVotes;
         uint256 endTime;
         address creator;
+        string metadataHash;
     }
 
     struct Fundraiser {
@@ -64,9 +111,13 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         bool isFlexible;
         uint256 reclaimDeadline;
         bool closureInitiated;
+        string metadataHash;    // IPFS hash for metadata
+        MediaItem[] gallery;    // Multimedia gallery
         mapping(address => uint256) donations;
         mapping(address => bool) refunded;
         address[] donors;
+        uint256[] updateIds;    // Update IDs
+        uint256 pinnedUpdateId; // Pinned update ID
     }
 
     struct FundraiserSummary {
@@ -78,47 +129,64 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         uint256 endTime;
         bool isFlexible;
         bool closureInitiated;
+        uint256 updateCount;
+        uint256 pinnedUpdateId;
+        uint256 mediaCount;
+        string metadataHash;
     }
 
     // ========== STORAGE ==========
 
     uint256 public proposalCount;
     uint256 public fundraiserCount;
+    uint256 public updateCount;
 
     mapping(uint256 => Proposal) private proposals;
     mapping(uint256 => Fundraiser) private fundraisers;
+    mapping(uint256 => FundraiserUpdate) private fundraiserUpdates;
 
     uint256[] private proposalIds;
     uint256[] private fundraiserIds;
+
+    // Media tracking per fundraiser [images, videos, audio, documents]
+    mapping(uint256 => uint256[4]) public mediaTypeCounts;
 
     // Token management
     mapping(address => bool) public isTokenWhitelisted;
     address[] public whitelistedTokens;
     mapping(address => uint256) private tokenIndex;
 
-    // Commission system
-    uint256 public donationCommission;
-    uint256 public successCommission;
-    uint256 public refundCommission;
+    // Commission system (ONLY standard commissions - NO multimedia bonus)
+    uint256 public donationCommission;      // Donation commission
+    uint256 public successCommission;       // Withdrawal commission
+    uint256 public refundCommission;        // Refund commission
     address public commissionWallet;
 
     // Refund tracking
     mapping(address => mapping(uint256 => uint256)) public monthlyRefundCount;
 
-    // Circuit breaker
-    uint256 public maxDailyDonations = 1000000 * 10**18;
+    // Circuit breaker - ✅ FIX: Better number formatting
+    uint256 public maxDailyDonations = 1_000_000 * 10**18;
     mapping(uint256 => uint256) public dailyDonationCount;
 
-    // Selective pausing
-    bool public votingPaused;
-    bool public donationsPaused;
-    bool public withdrawalsPaused;
+    // Selective pausing - ✅ FIX: Explicit initialization
+    bool public votingPaused = false;
+    bool public donationsPaused = false;
+    bool public withdrawalsPaused = false;
+    bool public updatesPaused = false;      // ✅ FIX: Initialize to false
+    bool public mediaPaused = false;
 
     // Authorization system
     mapping(address => bool) public authorizedProposers;
+    mapping(uint256 => mapping(address => bool)) public authorizedUpdaters;
+    mapping(uint256 => mapping(address => bool)) public authorizedMediaManagers;
+
+    // Multimedia flags
+    mapping(uint256 => bool) public hasMultimedia;
 
     // ========== EVENTS ==========
 
+    // Original events
     event ProposalCreated(uint256 indexed id, string question, uint256 endTime, address indexed creator);
     event Voted(address indexed voter, uint256 indexed proposalId, bool support);
     event FundraiserCreated(uint256 indexed id, address indexed creator, address token, uint256 target, uint256 endTime, bool isFlexible);
@@ -137,10 +205,21 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     event WithdrawalsPauseToggled(bool paused);
     event ProposerAuthorized(address indexed proposer);
     event ProposerRevoked(address indexed proposer);
-    
-    // Security events
     event CommissionWalletChanged(address indexed oldWallet, address indexed newWallet);
     event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
+    
+    // New multimedia events
+    event UpdatePosted(uint256 indexed updateId, uint256 indexed fundraiserId, address indexed author, string content, uint8 updateType);
+    event UpdatePinned(uint256 indexed updateId, uint256 indexed fundraiserId);
+    event UpdateUnpinned(uint256 indexed fundraiserId, uint256 indexed oldUpdateId);
+    event MediaAdded(uint256 indexed fundraiserId, string ipfsHash, uint8 mediaType, string filename, address uploader);
+    event MediaRemoved(uint256 indexed fundraiserId, uint256 mediaIndex, string ipfsHash);
+    event MultimediaActivated(uint256 indexed fundraiserId);
+    event UpdaterAuthorized(uint256 indexed fundraiserId, address indexed updater);
+    event UpdaterRevoked(uint256 indexed fundraiserId, address indexed updater);
+    event MediaManagerAuthorized(uint256 indexed fundraiserId, address indexed manager);
+    event MediaManagerRevoked(uint256 indexed fundraiserId, address indexed manager);
+    event MediaPauseToggled(bool paused);
 
     // ========== MODIFIERS ==========
 
@@ -159,9 +238,66 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         _;
     }
 
+    modifier whenUpdatesNotPaused() {
+        require(!updatesPaused, "Updates paused");
+        _;
+    }
+
+    modifier whenMediaNotPaused() {
+        require(!mediaPaused, "Media operations paused");
+        _;
+    }
+
     modifier onlyAuthorizedProposer() {
         if (msg.sender != owner() && !authorizedProposers[msg.sender]) {
             revert NotAuthorized();
+        }
+        _;
+    }
+
+    modifier onlyFundraiserCreatorOrAuthorized(uint256 fundraiserId) {
+        if (fundraiserId > fundraiserCount || fundraiserId == 0) {
+            revert InvalidUpdateId(fundraiserId);
+        }
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator && !authorizedUpdaters[fundraiserId][msg.sender]) {
+            revert NotFundraiserCreator();
+        }
+        _;
+    }
+
+    modifier onlyMediaManager(uint256 fundraiserId) {
+        if (fundraiserId > fundraiserCount || fundraiserId == 0) {
+            revert InvalidUpdateId(fundraiserId);
+        }
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator && 
+            !authorizedUpdaters[fundraiserId][msg.sender] && 
+            !authorizedMediaManagers[fundraiserId][msg.sender]) {
+            revert NotFundraiserCreator();
+        }
+        _;
+    }
+
+    modifier validFundraiserId(uint256 fundraiserId) {
+        if (fundraiserId > fundraiserCount || fundraiserId == 0) {
+            revert InvalidUpdateId(fundraiserId);
+        }
+        _;
+    }
+
+    modifier validIPFSHash(string memory hash) {
+        if (bytes(hash).length > MAX_IPFS_HASH_LENGTH) {
+            revert InvalidIPFSHash(hash);
+        }
+        _;
+    }
+
+    modifier validMediaType(uint8 mediaType) {
+        if (mediaType > 3) {
+            revert InvalidMediaType(mediaType);
         }
         _;
     }
@@ -225,6 +361,26 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit WithdrawalsPauseToggled(withdrawalsPaused);
     }
 
+    /// @notice Toggle multimedia operations
+    function toggleMediaPause() external onlyOwner {
+        mediaPaused = !mediaPaused;
+        emit MediaPauseToggled(mediaPaused);
+    }
+
+    /// @notice Emergency pause for all operations
+    function emergencyPauseAll() external onlyOwner {
+        _pause();
+        votingPaused = true;
+        donationsPaused = true;
+        withdrawalsPaused = true;
+        mediaPaused = true;
+        
+        emit VotingPauseToggled(true);
+        emit DonationsPauseToggled(true);
+        emit WithdrawalsPauseToggled(true);
+        emit MediaPauseToggled(true);
+    }
+
     /// @notice Changes the commission wallet address
     /// @param newWallet New wallet address for receiving commissions
     function setCommissionWallet(address newWallet) external onlyOwner validAddress(newWallet) {
@@ -247,8 +403,8 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
             (bool success, ) = to.call{value: amount}("");
             if (!success) revert TransferFailed();
         } else {
-            // ERC20 withdrawal
-            IERC20(token).transfer(to, amount);
+            // ✅ FIX: Add return value check for ERC20 transfer
+            require(IERC20(token).transfer(to, amount), "Emergency transfer failed");
         }
         
         emit EmergencyWithdraw(token, to, amount);
@@ -278,7 +434,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     /// @notice Set donation commission rate
     /// @param bps Commission rate in basis points (1 bps = 0.01%)
     function setDonationCommission(uint256 bps) external onlyOwner {
-        require(bps <= 10_000, "Max 100%");
+        require(bps <= MAX_COMMISSION, "Max 100%");
         donationCommission = bps;
         emit DonationCommissionSet(bps);
     }
@@ -286,7 +442,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     /// @notice Set success commission rate
     /// @param bps Commission rate in basis points (1 bps = 0.01%)
     function setSuccessCommission(uint256 bps) external onlyOwner {
-        require(bps <= 10_000, "Max 100%");
+        require(bps <= MAX_COMMISSION, "Max 100%");
         successCommission = bps;
         emit SuccessCommissionSet(bps);
     }
@@ -294,7 +450,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     /// @notice Set refund commission rate
     /// @param bps Commission rate in basis points (1 bps = 0.01%)
     function setRefundCommission(uint256 bps) external onlyOwner {
-        require(bps <= 10_000, "Max 100%");
+        require(bps <= MAX_COMMISSION, "Max 100%");
         refundCommission = bps;
         emit RefundCommissionSet(bps);
     }
@@ -305,9 +461,10 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         if (token == address(0)) revert InvalidToken(token);
         if (token.code.length == 0) revert NotAContract(token);
         
-        // Verify ERC20 compatibility
-        try IERC20(token).totalSupply() returns (uint256) {
-            // Token is likely ERC20 compatible
+        // ✅ FIX: Proper try-catch for return value with supply validation
+        try IERC20(token).totalSupply() returns (uint256 supply) {
+            // Token is ERC20 compatible, supply check passed
+            require(supply > 0, "Token has zero supply");
         } catch {
             revert InvalidToken(token);
         }
@@ -346,6 +503,9 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     /// @notice Create new proposal (authorization required)
     /// @param question Proposal question (1-500 characters)
     /// @param duration Voting duration in seconds (max 365 days)
+    /// @dev Functions using block.timestamp for time comparisons
+    /// Note: block.timestamp has ~15 second tolerance by miners
+    /// This is acceptable for fundraiser durations (hours/days)
     function createProposal(string calldata question, uint256 duration) 
         external 
         whenNotPaused 
@@ -366,6 +526,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         p.question = question;
         p.endTime = block.timestamp + duration;
         p.creator = msg.sender;
+        p.metadataHash = ""; // Empty by default
 
         proposalIds.push(proposalCount);
 
@@ -383,6 +544,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         Proposal storage p = proposals[proposalId];
         
         require(proposalId <= proposalCount && proposalId > 0, "Invalid proposal");
+        // ✅ DOCUMENTED: 15s tolerance acceptable for voting periods
         require(block.timestamp <= p.endTime, "Voting ended");
         require(!p.hasVoted[msg.sender], "Already voted");
 
@@ -420,13 +582,14 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         f.target = target;
         f.endTime = block.timestamp + duration;
         f.isFlexible = isFlexible;
+        f.metadataHash = ""; // Empty by default
 
         fundraiserIds.push(fundraiserCount);
 
         emit FundraiserCreated(f.id, msg.sender, token, target, f.endTime, isFlexible);
     }
 
-    /// @notice Donate to a fundraiser
+    /// @notice Donation with standard commission (NO multimedia bonus)
     /// @param id Fundraiser ID
     /// @param amount Amount to donate
     function donate(uint256 id, uint256 amount) 
@@ -442,17 +605,22 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         require(amount > 0, "Zero amount");
 
         IERC20 token = IERC20(f.token);
-        require(token.transferFrom(msg.sender, address(this), amount), "Transfer failed");
-
-        uint256 commission = (amount * donationCommission) / 10_000;
+        
+        // ✅ FIX: Calculate commission before external calls
+        uint256 commission = (amount * donationCommission) / PRECISION;
         uint256 netAmount = amount - commission;
 
+        // External call
+        require(token.transferFrom(msg.sender, address(this), amount), "Transfer failed");
+
+        // ✅ FIX: Update state after calculating but before commission transfer
         f.raised += netAmount;
         if (f.donations[msg.sender] == 0) {
             f.donors.push(msg.sender);
         }
         f.donations[msg.sender] += netAmount;
 
+        // Send commission after state updates
         if (commission > 0) {
             require(token.transfer(commissionWallet, commission), "Commission transfer failed");
         }
@@ -483,7 +651,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
 
         uint256 commissionAmount = 0;
         if (monthlyRefundCount[msg.sender][period] > 1 && refundCommission > 0) {
-            commissionAmount = (donated * refundCommission) / 10_000;
+            commissionAmount = (donated * refundCommission) / PRECISION;
         }
 
         f.refunded[msg.sender] = true;
@@ -499,7 +667,7 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit DonationRefunded(id, msg.sender, donated - commissionAmount, commissionAmount);
     }
 
-    /// @notice Withdraw funds from fundraiser
+    /// @notice Withdraw with standard commission (NO multimedia bonus)
     /// @param id Fundraiser ID
     function withdraw(uint256 id) 
         external 
@@ -532,7 +700,8 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
             f.withdrawn = true;
         }
 
-        uint256 commission = (f.raised * successCommission) / 10_000;
+        // Calculate ONLY standard success commission - NO multimedia bonus
+        uint256 commission = (f.raised * successCommission) / PRECISION;
         uint256 netAmount = f.raised - commission;
         f.raised = 0;
 
@@ -559,13 +728,382 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit ClosureInitiated(id, f.reclaimDeadline);
     }
 
+    // ========== MULTIMEDIA MANAGEMENT ==========
+
+    /// @notice Add multimedia to existing fundraiser
+    /// @param fundraiserId ID of fundraiser
+    /// @param mediaItems Array of media to add
+    function addMultimediaToFundraiser(uint256 fundraiserId, MediaItem[] calldata mediaItems)
+        external
+        whenNotPaused
+        whenMediaNotPaused
+        validFundraiserId(fundraiserId)
+        onlyMediaManager(fundraiserId)
+    {
+        if (mediaItems.length > MAX_MEDIA_BATCH) {
+            revert MediaLimitExceeded(mediaItems.length, MAX_MEDIA_BATCH);
+        }
+
+        Fundraiser storage f = fundraisers[fundraiserId];
+        uint256[4] storage typeCounts = mediaTypeCounts[fundraiserId];
+        uint256 totalCurrent = f.gallery.length;
+        
+        // Check total limit
+        if (totalCurrent + mediaItems.length > MAX_TOTAL_MEDIA) {
+            revert MediaLimitExceeded(totalCurrent + mediaItems.length, MAX_TOTAL_MEDIA);
+        }
+
+        bool wasEmpty = (totalCurrent == 0);
+
+        for (uint256 i = 0; i < mediaItems.length; i++) {
+            MediaItem memory item = mediaItems[i];
+            
+            // Validate media type
+            if (item.mediaType > 3) {
+                revert InvalidMediaType(item.mediaType);
+            }
+            
+            // Validate IPFS hash
+            if (bytes(item.ipfsHash).length == 0) {
+                revert InvalidIPFSHash(item.ipfsHash);
+            }
+            
+            // Check type-specific limits
+            uint256 typeLimit = getMediaTypeLimit(item.mediaType);
+            if (typeCounts[item.mediaType] + 1 > typeLimit) {
+                revert MediaLimitExceeded(typeCounts[item.mediaType] + 1, typeLimit);
+            }
+            
+            // Create media item with metadata
+            MediaItem memory newItem = MediaItem({
+                ipfsHash: item.ipfsHash,
+                mediaType: item.mediaType,
+                filename: item.filename,
+                fileSize: item.fileSize,
+                uploadTime: block.timestamp,
+                uploader: msg.sender,
+                description: item.description
+            });
+            
+            // Add to gallery
+            f.gallery.push(newItem);
+            typeCounts[item.mediaType]++;
+            
+            emit MediaAdded(fundraiserId, item.ipfsHash, item.mediaType, item.filename, msg.sender);
+        }
+
+        // Mark as multimedia fundraiser (for tracking purposes only)
+        if (wasEmpty && mediaItems.length > 0) {
+            hasMultimedia[fundraiserId] = true;
+            emit MultimediaActivated(fundraiserId);
+        }
+    }
+
+    /// @notice Remove media from fundraiser
+    /// @param fundraiserId ID of fundraiser
+    /// @param mediaIndex Index of media to remove
+    function removeMediaFromFundraiser(uint256 fundraiserId, uint256 mediaIndex)
+        external
+        whenNotPaused
+        whenMediaNotPaused
+        validFundraiserId(fundraiserId)
+        onlyMediaManager(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        require(mediaIndex < f.gallery.length, "Invalid media index");
+        
+        MediaItem storage mediaToRemove = f.gallery[mediaIndex];
+        uint8 mediaType = mediaToRemove.mediaType;
+        string memory ipfsHash = mediaToRemove.ipfsHash;
+        
+        // Update counters
+        mediaTypeCounts[fundraiserId][mediaType]--;
+        
+        // Remove from array (swap with last and pop)
+        f.gallery[mediaIndex] = f.gallery[f.gallery.length - 1];
+        f.gallery.pop();
+        
+        emit MediaRemoved(fundraiserId, mediaIndex, ipfsHash);
+    }
+
+    /// @notice Authorize address to manage media for fundraiser
+    /// @param fundraiserId ID of fundraiser
+    /// @param manager Address to authorize
+    function authorizeMediaManager(uint256 fundraiserId, address manager)
+        external
+        whenNotPaused
+        validFundraiserId(fundraiserId)
+        validAddress(manager)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        require(msg.sender == f.creator, "Not creator");
+        
+        authorizedMediaManagers[fundraiserId][manager] = true;
+        emit MediaManagerAuthorized(fundraiserId, manager);
+    }
+
+    /// @notice Revoke media management authorization
+    /// @param fundraiserId ID of fundraiser
+    /// @param manager Address to revoke
+    function revokeMediaManager(uint256 fundraiserId, address manager)
+        external
+        whenNotPaused
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        require(msg.sender == f.creator, "Not creator");
+        
+        authorizedMediaManagers[fundraiserId][manager] = false;
+        emit MediaManagerRevoked(fundraiserId, manager);
+    }
+
+    // ========== UPDATE SYSTEM WITH MULTIMEDIA ==========
+
+    /// @notice Post update with multimedia attachments
+    /// @param fundraiserId Fundraiser ID
+    /// @param content Text content
+    /// @param updateType Type of update
+    /// @param attachments Multimedia attachments
+    function postUpdateWithMultimedia(
+        uint256 fundraiserId, 
+        string calldata content,
+        uint8 updateType,
+        MediaItem[] calldata attachments
+    ) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+        validFundraiserId(fundraiserId)
+        onlyFundraiserCreatorOrAuthorized(fundraiserId)
+    {
+        if (bytes(content).length > MAX_UPDATE_LENGTH) {
+            revert UpdateTooLong(bytes(content).length);
+        }
+        if (attachments.length > 10) { // Max 10 attachments per update
+            revert MediaLimitExceeded(attachments.length, 10);
+        }
+
+        updateCount++;
+        FundraiserUpdate storage update = fundraiserUpdates[updateCount];
+        update.id = updateCount;
+        update.fundraiserId = fundraiserId;
+        update.author = msg.sender;
+        update.content = content;
+        update.timestamp = block.timestamp;
+        update.updateType = updateType;
+
+        // Add attachments
+        for (uint256 i = 0; i < attachments.length; i++) {
+            MediaItem memory attachment = attachments[i];
+            attachment.uploadTime = block.timestamp;
+            attachment.uploader = msg.sender;
+            update.attachments.push(attachment);
+        }
+
+        Fundraiser storage f = fundraisers[fundraiserId];
+        f.updateIds.push(updateCount);
+
+        emit UpdatePosted(updateCount, fundraiserId, msg.sender, content, updateType);
+    }
+
+    /// @notice Post simple text update (legacy support)
+    function postUpdate(uint256 fundraiserId, string calldata content) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+        validFundraiserId(fundraiserId)
+        onlyFundraiserCreatorOrAuthorized(fundraiserId)
+    {
+        if (bytes(content).length > MAX_UPDATE_LENGTH) {
+            revert UpdateTooLong(bytes(content).length);
+        }
+
+        updateCount++;
+        FundraiserUpdate storage update = fundraiserUpdates[updateCount];
+        update.id = updateCount;
+        update.fundraiserId = fundraiserId;
+        update.author = msg.sender;
+        update.content = content;
+        update.timestamp = block.timestamp;
+        update.updateType = 0; // general update
+
+        Fundraiser storage f = fundraisers[fundraiserId];
+        f.updateIds.push(updateCount);
+
+        emit UpdatePosted(updateCount, fundraiserId, msg.sender, content, 0);
+    }
+
+    /// @notice Pin update to top
+    function pinUpdate(uint256 updateId) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+    {
+        require(updateId <= updateCount && updateId > 0, "Invalid update");
+        
+        FundraiserUpdate storage update = fundraiserUpdates[updateId];
+        uint256 fundraiserId = update.fundraiserId;
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        require(msg.sender == f.creator, "Not creator");
+
+        uint256 oldPinnedId = f.pinnedUpdateId;
+        if (oldPinnedId != 0) {
+            fundraiserUpdates[oldPinnedId].isPinned = false;
+            emit UpdateUnpinned(fundraiserId, oldPinnedId);
+        }
+
+        f.pinnedUpdateId = updateId;
+        update.isPinned = true;
+
+        emit UpdatePinned(updateId, fundraiserId);
+    }
+
+    /// @notice Unpin current pinned update
+    function unpinUpdate(uint256 fundraiserId) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        require(msg.sender == f.creator, "Not creator");
+        require(f.pinnedUpdateId != 0, "No pinned update");
+
+        uint256 oldPinnedId = f.pinnedUpdateId;
+        f.pinnedUpdateId = 0;
+        fundraiserUpdates[oldPinnedId].isPinned = false;
+
+        emit UpdateUnpinned(fundraiserId, oldPinnedId);
+    }
+
+    /// @notice Authorize updater
+    function authorizeUpdater(uint256 fundraiserId, address updater) 
+        external 
+        whenNotPaused 
+        validFundraiserId(fundraiserId)
+        validAddress(updater)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        require(msg.sender == f.creator, "Not creator");
+        
+        authorizedUpdaters[fundraiserId][updater] = true;
+        emit UpdaterAuthorized(fundraiserId, updater);
+    }
+
+    /// @notice Revoke updater authorization
+    function revokeUpdater(uint256 fundraiserId, address updater) 
+        external 
+        whenNotPaused 
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        require(msg.sender == f.creator, "Not creator");
+        
+        authorizedUpdaters[fundraiserId][updater] = false;
+        emit UpdaterRevoked(fundraiserId, updater);
+    }
+
     // ========== VIEW FUNCTIONS ==========
+
+    /// @notice Get media type limit
+    function getMediaTypeLimit(uint8 mediaType) public pure returns (uint256) {
+        if (mediaType == 0) return MAX_IMAGES;      // Images
+        if (mediaType == 1) return MAX_VIDEOS;      // Videos
+        if (mediaType == 2) return MAX_AUDIO;       // Audio
+        if (mediaType == 3) return MAX_DOCUMENTS;   // Documents
+        return 0;
+    }
+
+    /// @notice Check if can add more media
+    function canAddMedia(uint256 fundraiserId, uint8 mediaType, uint256 quantity) 
+        external view 
+        returns (bool canAdd, string memory reason) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        uint256 totalCurrent = f.gallery.length;
+        uint256 typeCurrent = mediaTypeCounts[fundraiserId][mediaType];
+        uint256 typeLimit = getMediaTypeLimit(mediaType);
+        
+        if (totalCurrent + quantity > MAX_TOTAL_MEDIA) {
+            return (false, "Total media limit exceeded (200 max)");
+        }
+        
+        if (typeCurrent + quantity > typeLimit) {
+            return (false, "Media type limit exceeded");
+        }
+        
+        if (quantity > MAX_MEDIA_BATCH) {
+            return (false, "Batch size too large (20 max)");
+        }
+        
+        return (true, "Can add media");
+    }
+
+    /// @notice Get multimedia statistics for fundraiser
+    function getMediaStatistics(uint256 fundraiserId) 
+        external view 
+        validFundraiserId(fundraiserId)
+        returns (uint256 images, uint256 videos, uint256 audio, uint256 documents, uint256 total) 
+    {
+        uint256[4] storage counts = mediaTypeCounts[fundraiserId];
+        images = counts[0];
+        videos = counts[1];
+        audio = counts[2];
+        documents = counts[3];
+        total = fundraisers[fundraiserId].gallery.length;
+    }
+
+    /// @notice Get fundraiser gallery (paginated)
+    function getFundraiserGallery(uint256 fundraiserId, uint256 offset, uint256 limit) 
+        external view 
+        validFundraiserId(fundraiserId)
+        returns (MediaItem[] memory media, uint256 total) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        total = f.gallery.length;
+        
+        if (offset >= total) {
+            return (new MediaItem[](0), total);
+        }
+        
+        uint256 end = offset + limit;
+        if (end > total) {
+            end = total;
+        }
+        
+        media = new MediaItem[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            media[i - offset] = f.gallery[i];
+        }
+    }
+
+    /// @notice Get update with attachments
+    function getUpdateWithAttachments(uint256 updateId) 
+        external view 
+        returns (FundraiserUpdate memory) 
+    {
+        require(updateId <= updateCount && updateId > 0, "Invalid update");
+        return fundraiserUpdates[updateId];
+    }
 
     /// @notice Check if address can create proposals
     /// @param proposer Address to check
     /// @return True if address can create proposals
     function canPropose(address proposer) external view returns (bool) {
         return proposer == owner() || authorizedProposers[proposer];
+    }
+
+    /// @notice Check if address can manage media for fundraiser
+    function canManageMedia(uint256 fundraiserId, address manager) 
+        external view 
+        validFundraiserId(fundraiserId)
+        returns (bool) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        return manager == f.creator || 
+               authorizedUpdaters[fundraiserId][manager] || 
+               authorizedMediaManagers[fundraiserId][manager];
     }
 
     /// @notice Get remaining time for proposal voting
@@ -613,13 +1151,14 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
             yesVotes: p.yesVotes,
             noVotes: p.noVotes,
             endTime: p.endTime,
-            creator: p.creator
+            creator: p.creator,
+            metadataHash: p.metadataHash
         });
     }
 
-    /// @notice Get fundraiser summary
+    /// @notice Get enhanced fundraiser summary
     /// @param id Fundraiser ID
-    /// @return Fundraiser summary struct
+    /// @return Enhanced fundraiser summary struct
     function getFundraiserSummary(uint256 id) external view returns (FundraiserSummary memory) {
         require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
         Fundraiser storage f = fundraisers[id];
@@ -632,7 +1171,11 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
             raised: f.raised,
             endTime: f.endTime,
             isFlexible: f.isFlexible,
-            closureInitiated: f.closureInitiated
+            closureInitiated: f.closureInitiated,
+            updateCount: f.updateIds.length,
+            pinnedUpdateId: f.pinnedUpdateId,
+            mediaCount: f.gallery.length,
+            metadataHash: f.metadataHash
         });
     }
 
@@ -672,6 +1215,25 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     function getDonorsCount(uint256 id) external view returns (uint256) {
         require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
         return fundraisers[id].donors.length;
+    }
+
+    /// @notice Check contract health
+    function healthCheck() external view returns (
+        bool contractNotPaused,
+        bool votingEnabled,
+        bool donationsEnabled,
+        bool withdrawalsEnabled,
+        uint256 totalFundraisers,
+        uint256 totalProposals
+    ) {
+        return (
+            !paused(),
+            !votingPaused,
+            !donationsPaused,
+            !withdrawalsPaused,
+            fundraiserCount,
+            proposalCount
+        );
     }
 
     // ========== LEGACY SUPPORT FUNCTIONS ==========
@@ -742,6 +1304,12 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     /// @return Number of fundraisers
     function getFundraiserCount() external view returns (uint256) {
         return fundraiserCount;
+    }
+
+    /// @notice Get total number of updates
+    /// @return Number of updates
+    function getUpdateCount() external view returns (uint256) {
+        return updateCount;
     }
 
     /// @notice Check if address has voted on proposal
