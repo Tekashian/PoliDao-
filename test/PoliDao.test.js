@@ -2,22 +2,34 @@ const { expect } = require("chai");
 const hre = require("hardhat");
 const { ethers } = hre;
 
-let dao, mockToken, owner, user1, user2, user3, user4;
+let dao, mockToken, owner, user1, user2, user3, user4, commissionWallet, feeToken;
 
 beforeEach(async () => {
   [owner, user1, user2, user3, user4] = await ethers.getSigners();
+  commissionWallet = user3;
 
+  // Deploy mock USDC token
   const MockToken = await ethers.getContractFactory("MockToken");
-  mockToken = await MockToken.deploy("USDC Test", "USDC", 18, ethers.parseUnits("1000000", 18), owner.address);
+  mockToken = await MockToken.deploy("USDC Test", "USDC", 6, ethers.parseUnits("1000000", 6), owner.address);
   await mockToken.waitForDeployment();
 
-  const PoliDAO = await ethers.getContractFactory("PoliDAO");
-  dao = await PoliDAO.deploy(owner.address, user3.address);
+  // Deploy fee token (same as mock token for testing)
+  feeToken = mockToken;
+
+  // Deploy PoliDAOV6
+  const PoliDAO = await ethers.getContractFactory("PoliDAOV6");
+  dao = await PoliDAO.deploy(
+    owner.address,
+    commissionWallet.address,
+    await feeToken.getAddress()
+  );
   await dao.waitForDeployment();
 
+  // Whitelist the mock token
   await dao.whitelistToken(await mockToken.getAddress());
 
-  const mintAmount = ethers.parseUnits("5000", 18);
+  // Distribute tokens
+  const mintAmount = ethers.parseUnits("50000", 6);
   await mockToken.connect(owner).transfer(user1.address, mintAmount);
   await mockToken.connect(owner).transfer(user2.address, mintAmount);
   await mockToken.connect(owner).transfer(user3.address, mintAmount);
@@ -25,101 +37,54 @@ beforeEach(async () => {
 });
 
 // ==============================
-// AUTHORIZATION-ONLY ACCESS CONTROL
+// GOVERNANCE SYSTEM
 // ==============================
 
-describe("🔐 Authorization-Only Access Control", function () {
-  describe("Default Authorization Model", function () {
+describe("🗳️ Governance System", function () {
+  describe("Proposal Creation", function () {
     it("should allow owner to create proposals", async function () {
-      await dao.createProposal("Owner proposal", 3600);
+      await dao.createProposal("Should we increase commission rates?", 3600);
       
       const count = await dao.getProposalCount();
       expect(count).to.equal(1);
       
-      const [id, question, yesVotes, noVotes] = await dao.getProposal(1);
+      const [id, question, yesVotes, noVotes, endTime, creator] = await dao.getProposal(1);
       expect(id).to.equal(1);
-      expect(question).to.equal("Owner proposal");
+      expect(question).to.equal("Should we increase commission rates?");
       expect(yesVotes).to.equal(0);
       expect(noVotes).to.equal(0);
-      
-      const creator = await dao.getProposalCreator(1);
       expect(creator).to.equal(owner.address);
     });
 
     it("should prevent unauthorized users from creating proposals", async function () {
       await expect(dao.connect(user1).createProposal("User proposal", 3600))
-        .to.be.revertedWithCustomError(dao, "NotAuthorized");
-      
-      await expect(dao.connect(user2).createProposal("Another user proposal", 3600))
-        .to.be.revertedWithCustomError(dao, "NotAuthorized");
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
     });
 
-    it("should show correct canPropose status", async function () {
-      expect(await dao.canPropose(owner.address)).to.be.true;
-      expect(await dao.canPropose(user1.address)).to.be.false;
-      expect(await dao.canPropose(user2.address)).to.be.false;
-    });
-  });
-
-  describe("Authorization Management", function () {
-    it("should allow owner to authorize specific proposers", async function () {
+    it("should allow authorized proposers to create proposals", async function () {
       await dao.authorizeProposer(user1.address);
-      
-      expect(await dao.authorizedProposers(user1.address)).to.be.true;
-      expect(await dao.canPropose(user1.address)).to.be.true;
-    });
-
-    it("should prevent non-owner from authorizing proposers", async function () {
-      await expect(dao.connect(user1).authorizeProposer(user2.address))
-        .to.be.reverted;
-    });
-
-    it("should allow authorized user to create proposals", async function () {
-      await dao.authorizeProposer(user1.address);
-      await dao.connect(user1).createProposal("Authorized user proposal", 3600);
+      await dao.connect(user1).createProposal("Authorized proposal", 3600);
       
       const count = await dao.getProposalCount();
       expect(count).to.equal(1);
       
-      const creator = await dao.getProposalCreator(1);
+      const [, , , , , creator] = await dao.getProposal(1);
       expect(creator).to.equal(user1.address);
     });
 
-    it("should allow owner to revoke authorization", async function () {
-      await dao.authorizeProposer(user1.address);
-      expect(await dao.canPropose(user1.address)).to.be.true;
+    it("should validate proposal parameters", async function () {
+      await expect(dao.createProposal("", 3600))
+        .to.be.revertedWith("Invalid question");
       
-      await dao.revokeProposer(user1.address);
-      expect(await dao.authorizedProposers(user1.address)).to.be.false;
-      expect(await dao.canPropose(user1.address)).to.be.false;
-    });
-
-    it("should prevent revoked user from creating proposals", async function () {
-      await dao.authorizeProposer(user1.address);
-      await dao.revokeProposer(user1.address);
+      const longQuestion = "a".repeat(501);
+      await expect(dao.createProposal(longQuestion, 3600))
+        .to.be.revertedWith("Invalid question");
       
-      await expect(dao.connect(user1).createProposal("Revoked user proposal", 3600))
-        .to.be.revertedWithCustomError(dao, "NotAuthorized");
+      await expect(dao.createProposal("Valid question", 366 * 24 * 3600))
+        .to.be.revertedWith("Duration too long");
     });
 
-    it("should prevent authorization of zero address", async function () {
-      await expect(dao.authorizeProposer(ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(dao, "InvalidRecipient");
-    });
-
-    it("should emit events for authorization and revocation", async function () {
-      await expect(dao.authorizeProposer(user1.address))
-        .to.emit(dao, "ProposerAuthorized")
-        .withArgs(user1.address);
-      
-      await expect(dao.revokeProposer(user1.address))
-        .to.emit(dao, "ProposerRevoked")
-        .withArgs(user1.address);
-    });
-  });
-
-  describe("Proposal Creation Events", function () {
-    it("should emit ProposalCreated with creator address for owner", async function () {
+    it("should emit ProposalCreated event", async function () {
       const tx = await dao.createProposal("Test proposal", 3600);
       const receipt = await tx.wait();
       const block = await ethers.provider.getBlock(receipt.blockNumber);
@@ -129,303 +94,629 @@ describe("🔐 Authorization-Only Access Control", function () {
         .to.emit(dao, "ProposalCreated")
         .withArgs(1, "Test proposal", expectedEndTime, owner.address);
     });
+  });
 
-    it("should emit ProposalCreated for authorized user", async function () {
-      await dao.authorizeProposer(user1.address);
+  describe("Voting", function () {
+    beforeEach(async () => {
+      await dao.createProposal("Test proposal", 3600);
+    });
+
+    it("should allow voting on proposals", async function () {
+      await dao.connect(user1).vote(1, true);
+      await dao.connect(user2).vote(1, false);
       
-      const tx = await dao.connect(user1).createProposal("Authorized proposal", 3600);
-      const receipt = await tx.wait();
-      const block = await ethers.provider.getBlock(receipt.blockNumber);
-      const expectedEndTime = block.timestamp + 3600;
+      const [, , yesVotes, noVotes] = await dao.getProposal(1);
+      expect(yesVotes).to.equal(1);
+      expect(noVotes).to.equal(1);
       
-      await expect(tx)
-        .to.emit(dao, "ProposalCreated")
-        .withArgs(1, "Authorized proposal", expectedEndTime, user1.address);
+      expect(await dao.hasVoted(1, user1.address)).to.be.true;
+      expect(await dao.hasVoted(1, user2.address)).to.be.true;
+      expect(await dao.hasVoted(1, user3.address)).to.be.false;
+    });
+
+    it("should prevent double voting", async function () {
+      await dao.connect(user1).vote(1, true);
+      await expect(dao.connect(user1).vote(1, false))
+        .to.be.revertedWith("Already voted");
+    });
+
+    it("should prevent voting on expired proposals", async function () {
+      await ethers.provider.send("evm_increaseTime", [3601]);
+      await ethers.provider.send("evm_mine");
+      
+      await expect(dao.connect(user1).vote(1, true))
+        .to.be.revertedWith("Voting ended");
+    });
+
+    it("should emit Voted event", async function () {
+      await expect(dao.connect(user1).vote(1, true))
+        .to.emit(dao, "Voted")
+        .withArgs(user1.address, 1, true);
     });
   });
 
-  describe("Multiple Authorized Proposers", function () {
-    it("should handle multiple authorized proposers", async function () {
-      await dao.authorizeProposer(user1.address);
-      await dao.authorizeProposer(user2.address);
+  describe("Authorization Management", function () {
+    it("should manage proposer authorization", async function () {
+      expect(await dao.canPropose(user1.address)).to.be.false;
       
-      await dao.createProposal("Owner proposal", 3600);
-      await dao.connect(user1).createProposal("User1 proposal", 3600);
-      await dao.connect(user2).createProposal("User2 proposal", 3600);
+      await expect(dao.authorizeProposer(user1.address))
+        .to.emit(dao, "ProposerAuthorized")
+        .withArgs(user1.address);
       
-      const count = await dao.getProposalCount();
-      expect(count).to.equal(3);
+      expect(await dao.canPropose(user1.address)).to.be.true;
+      expect(await dao.authorizedProposers(user1.address)).to.be.true;
       
-      expect(await dao.getProposalCreator(1)).to.equal(owner.address);
-      expect(await dao.getProposalCreator(2)).to.equal(user1.address);
-      expect(await dao.getProposalCreator(3)).to.equal(user2.address);
-    });
-
-    it("should maintain individual authorization states", async function () {
-      await dao.authorizeProposer(user1.address);
-      await dao.authorizeProposer(user2.address);
-      
-      await dao.revokeProposer(user1.address);
+      await expect(dao.revokeProposer(user1.address))
+        .to.emit(dao, "ProposerRevoked")
+        .withArgs(user1.address);
       
       expect(await dao.canPropose(user1.address)).to.be.false;
-      expect(await dao.canPropose(user2.address)).to.be.true;
-      
-      await expect(dao.connect(user1).createProposal("Should fail", 3600))
-        .to.be.revertedWithCustomError(dao, "NotAuthorized");
-      
-      await dao.connect(user2).createProposal("Should succeed", 3600);
-      expect(await dao.getProposalCount()).to.equal(1);
+      expect(await dao.authorizedProposers(user1.address)).to.be.false;
     });
-  });
 
-  describe("Proposal Summary with Creator", function () {
-    it("should include creator in proposal summary", async function () {
-      await dao.authorizeProposer(user1.address);
-      await dao.connect(user1).createProposal("Summary test", 3600);
+    it("should prevent non-owner from managing authorization", async function () {
+      await expect(dao.connect(user1).authorizeProposer(user2.address))
+        .to.be.reverted;
       
-      const summary = await dao.getProposalSummary(1);
-      expect(summary.id).to.equal(1);
-      expect(summary.question).to.equal("Summary test");
-      expect(summary.creator).to.equal(user1.address);
-      expect(summary.yesVotes).to.equal(0);
-      expect(summary.noVotes).to.equal(0);
+      await expect(dao.connect(user1).revokeProposer(user2.address))
+        .to.be.reverted;
     });
   });
 });
 
 // ==============================
-// CORE VOTING FUNCTIONALITY
-// ==============================
-
-describe("🗳️ Voting System", function () {
-  it("should allow creating and voting on a proposal", async function () {
-    await dao.createProposal("Abolish tax?", 3600);
-    await dao.connect(user1).vote(1, true);
-
-    const count = await dao.getProposalCount();
-    expect(count).to.equal(1);
-
-    const [id, question, yesVotes, noVotes] = await dao.getProposal(1);
-    expect(id).to.equal(1);
-    expect(question).to.equal("Abolish tax?");
-    expect(yesVotes).to.equal(1);
-    expect(noVotes).to.equal(0);
-
-    const voted = await dao.hasVoted(1, user1.address);
-    expect(voted).to.be.true;
-  });
-
-  it("should not allow double voting", async function () {
-    await dao.createProposal("Tax reform?", 3600);
-    await dao.connect(user1).vote(1, true);
-    await expect(dao.connect(user1).vote(1, false)).to.be.revertedWith("Already voted");
-  });
-
-  it("should return correct proposal count", async function () {
-    await dao.createProposal("A", 100);
-    await dao.createProposal("B", 100);
-    const count = await dao.getProposalCount();
-    expect(count).to.equal(2);
-  });
-
-  it("should handle voting on proposals created by different users", async function () {
-    await dao.authorizeProposer(user1.address);
-    await dao.createProposal("Owner proposal", 3600);
-    await dao.connect(user1).createProposal("User proposal", 3600);
-    
-    await dao.connect(user2).vote(1, true);
-    await dao.connect(user2).vote(2, false);
-    
-    const [, , yesVotes1, noVotes1] = await dao.getProposal(1);
-    const [, , yesVotes2, noVotes2] = await dao.getProposal(2);
-    
-    expect(yesVotes1).to.equal(1);
-    expect(noVotes1).to.equal(0);
-    expect(yesVotes2).to.equal(0);
-    expect(noVotes2).to.equal(1);
-  });
-
-  it("should handle multiple voters correctly", async function () {
-    await dao.createProposal("Multi-user vote", 3600);
-    
-    await dao.connect(user1).vote(1, true);
-    await dao.connect(user2).vote(1, false);
-    await dao.connect(user4).vote(1, true);
-    
-    const [, , yesVotes, noVotes] = await dao.getProposal(1);
-    expect(yesVotes).to.equal(2);
-    expect(noVotes).to.equal(1);
-  });
-
-  it("should handle voting after proposal expiry", async function () {
-    await dao.createProposal("Short proposal", 1);
-    await ethers.provider.send("evm_increaseTime", [2]);
-    await ethers.provider.send("evm_mine");
-    
-    await expect(dao.connect(user1).vote(1, true)).to.be.revertedWith("Voting ended");
-    expect(await dao.timeLeftOnProposal(1)).to.equal(0);
-  });
-});
-
-// ==============================
-// FUNDRAISING FUNCTIONALITY
+// FUNDRAISING SYSTEM
 // ==============================
 
 describe("💰 Fundraising System", function () {
-  async function createFundraiser(target = 1000, duration = 3600, flexible = false) {
-    await dao.createFundraiser(await mockToken.getAddress(), target, duration, flexible);
-  }
+  describe("Fundraiser Creation", function () {
+    it("should create fundraiser with complete data structure", async function () {
+      const creationData = {
+        title: "Save the Environment",
+        description: "A comprehensive project to save our planet",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0, // WITH_GOAL
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("10000", 6),
+        initialImages: ["QmImage1", "QmImage2"],
+        initialVideos: ["QmVideo1"],
+        metadataHash: "QmMetadata123",
+        location: "San Francisco, CA"
+      };
 
-  async function donate(user, amount, id = 1) {
-    const amountWei = ethers.parseUnits(amount.toString(), 18);
-    await mockToken.connect(user).approve(await dao.getAddress(), amountWei);
-    await dao.connect(user).donate(id, amountWei);
-  }
+      await expect(dao.createFundraiser(creationData))
+        .to.emit(dao, "FundraiserCreated")
+        .withArgs(1, owner.address, await mockToken.getAddress(), "Save the Environment", 0, ethers.parseUnits("10000", 6), creationData.endDate, "San Francisco, CA");
 
-  it("should allow donations and reflect in getter", async function () {
-    await createFundraiser();
-    await donate(user1, 1000);
+      const [title, description, location, endDate, fundraiserType, status] = await dao.getFundraiserDetails(1);
+      expect(title).to.equal("Save the Environment");
+      expect(description).to.equal("A comprehensive project to save our planet");
+      expect(location).to.equal("San Francisco, CA");
+      expect(fundraiserType).to.equal(0);
+      expect(status).to.equal(0); // ACTIVE
 
-    const [id, creator, token, target, raised, , withdrawn, isFlexible] = await dao.getFundraiser(1);
-    expect(id).to.equal(1);
-    expect(creator).to.equal(owner.address);
-    expect(token).to.equal(await mockToken.getAddress());
-    expect(target).to.equal(1000);
-    expect(raised).to.equal(ethers.parseUnits("1000", 18));
-    expect(withdrawn).to.be.false;
-    expect(isFlexible).to.be.false;
+      expect(await dao.getFundraiserCount()).to.equal(1);
+    });
 
-    const donation = await dao.donationOf(1, user1.address);
-    expect(donation).to.equal(ethers.parseUnits("1000", 18));
+    it("should create WITHOUT_GOAL fundraiser", async function () {
+      const creationData = {
+        title: "Flexible Funding",
+        description: "Flexible funding project",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 1, // WITHOUT_GOAL
+        token: await mockToken.getAddress(),
+        goalAmount: 0,
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Remote"
+      };
 
-    const refunded = await dao.hasRefunded(1, user1.address);
-    expect(refunded).to.be.false;
+      await dao.createFundraiser(creationData);
+      
+      const [, , , , fundraiserType] = await dao.getFundraiserDetails(1);
+      expect(fundraiserType).to.equal(1);
+    });
+
+    it("should validate fundraiser creation parameters", async function () {
+      const baseData = {
+        title: "Valid Title",
+        description: "Valid description",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Valid Location"
+      };
+
+      // Invalid title
+      await expect(dao.createFundraiser({...baseData, title: ""}))
+        .to.be.revertedWith("Invalid title");
+      
+      await expect(dao.createFundraiser({...baseData, title: "a".repeat(101)}))
+        .to.be.revertedWith("Invalid title");
+
+      // Invalid description
+      await expect(dao.createFundraiser({...baseData, description: ""}))
+        .to.be.revertedWith("Invalid description");
+
+      // Invalid location
+      await expect(dao.createFundraiser({...baseData, location: ""}))
+        .to.be.revertedWith("Invalid location");
+
+      // Invalid end date
+      await expect(dao.createFundraiser({...baseData, endDate: Math.floor(Date.now() / 1000) - 1}))
+        .to.be.revertedWith("End date must be in future");
+
+      // Non-whitelisted token
+      await expect(dao.createFundraiser({...baseData, token: user1.address}))
+        .to.be.revertedWithCustomError(dao, "InvalidTokenAddress");
+
+      // WITH_GOAL without goal amount
+      await expect(dao.createFundraiser({...baseData, goalAmount: 0}))
+        .to.be.revertedWith("Goal amount required for WITH_GOAL type");
+
+      // Too many initial images
+      await expect(dao.createFundraiser({...baseData, initialImages: Array(11).fill("QmTest")}))
+        .to.be.revertedWith("Too many initial images");
+    });
+
+    it("should handle multimedia in fundraiser creation", async function () {
+      const creationData = {
+        title: "Multimedia Project",
+        description: "Project with media",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: ["QmImage1", "QmImage2"],
+        initialVideos: ["QmVideo1"],
+        metadataHash: "",
+        location: "Test Location"
+      };
+
+      await expect(dao.createFundraiser(creationData))
+        .to.emit(dao, "MediaAdded")
+        .and.to.emit(dao, "MultimediaActivated");
+
+      const [media, total] = await dao.getFundraiserGallery(1, 0, 10);
+      expect(total).to.equal(3);
+      expect(media[0].ipfsHash).to.equal("QmImage1");
+      expect(media[2].ipfsHash).to.equal("QmVideo1");
+    });
   });
 
-  it("should revert donation after endTime", async function () {
-    await createFundraiser(1000, 0);
-    await expect(donate(user1, 1000)).to.be.revertedWith("Fundraiser ended");
+  describe("Donation System", function () {
+    beforeEach(async () => {
+      const creationData = {
+        title: "Test Fundraiser",
+        description: "Test description",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test Location"
+      };
+      await dao.createFundraiser(creationData);
+    });
+
+    it("should allow donations and track progress", async function () {
+      const donationAmount = ethers.parseUnits("500", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      
+      await expect(dao.connect(user1).donate(1, donationAmount))
+        .to.emit(dao, "DonationMade")
+        .withArgs(1, user1.address, await mockToken.getAddress(), donationAmount, donationAmount);
+
+      const [raised, goal, percentage, donorsCount] = await dao.getFundraiserProgress(1);
+      expect(raised).to.equal(donationAmount);
+      expect(goal).to.equal(ethers.parseUnits("1000", 6));
+      expect(percentage).to.equal(50);
+      expect(donorsCount).to.equal(1);
+
+      const [donors, amounts] = await dao.getDonors(1, 0, 10);
+      expect(donors[0]).to.equal(user1.address);
+      expect(amounts[0]).to.equal(donationAmount);
+    });
+
+    it("should handle goal completion", async function () {
+      const donationAmount = ethers.parseUnits("1000", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      
+      await expect(dao.connect(user1).donate(1, donationAmount))
+        .to.emit(dao, "FundraiserStatusChanged")
+        .withArgs(1, 0, 1); // ACTIVE to SUCCESSFUL
+
+      const [, , , , , status] = await dao.getFundraiserDetails(1);
+      expect(status).to.equal(1); // SUCCESSFUL
+    });
+
+    it("should apply donation commission", async function () {
+      await dao.setDonationCommission(1000); // 10%
+      
+      const donationAmount = ethers.parseUnits("1000", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(1, donationAmount);
+
+      const [raised] = await dao.getFundraiserProgress(1);
+      expect(raised).to.equal(ethers.parseUnits("900", 6)); // 90% after commission
+
+      const commissionBalance = await mockToken.balanceOf(commissionWallet.address);
+      expect(commissionBalance).to.be.gt(ethers.parseUnits("50100", 6)); // Original + commission
+    });
+
+    it("should handle batch donations", async function () {
+      // Create second fundraiser
+      const creationData = {
+        title: "Second Fundraiser",
+        description: "Second test",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("500", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test Location 2"
+      };
+      await dao.createFundraiser(creationData);
+
+      const amounts = [ethers.parseUnits("300", 6), ethers.parseUnits("200", 6)];
+      const totalAmount = amounts[0] + amounts[1];
+      
+      await mockToken.connect(user1).approve(await dao.getAddress(), totalAmount);
+      
+      await expect(dao.connect(user1).batchDonate([1, 2], amounts))
+        .to.emit(dao, "BatchDonationExecuted");
+
+      const [raised1] = await dao.getFundraiserProgress(1);
+      const [raised2] = await dao.getFundraiserProgress(2);
+      expect(raised1).to.equal(amounts[0]);
+      expect(raised2).to.equal(amounts[1]);
+    });
+
+    it("should validate donation parameters", async function () {
+      await expect(dao.connect(user1).donate(1, 0))
+        .to.be.revertedWithCustomError(dao, "InsufficientAmount");
+
+      await expect(dao.connect(user1).donate(999, ethers.parseUnits("100", 6)))
+        .to.be.revertedWithCustomError(dao, "FundraiserNotFound");
+    });
   });
 
-  it("should allow refund before withdrawal", async function () {
-    await createFundraiser(2000, 10);
-    await donate(user1, 1000);
-    await ethers.provider.send("evm_increaseTime", [11]);
-    await ethers.provider.send("evm_mine");
-    await dao.initiateClosure(1);
-    await ethers.provider.send("evm_increaseTime", [5]);
-    await ethers.provider.send("evm_mine");
-    await dao.connect(user1).refund(1);
-    const balance = await mockToken.balanceOf(user1.address);
-    expect(balance).to.equal(ethers.parseUnits("5000", 18));
+  describe("Fundraiser Extensions", function () {
+    beforeEach(async () => {
+      const creationData = {
+        title: "Extendable Fundraiser",
+        description: "Can be extended",
+        endDate: Math.floor(Date.now() / 1000) + 1000,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test Location"
+      };
+      await dao.createFundraiser(creationData);
+    });
+
+    it("should allow fundraiser extension with fee", async function () {
+      await mockToken.connect(owner).approve(await dao.getAddress(), ethers.parseUnits("20", 6));
+      
+      await expect(dao.extendFundraiser(1, 30))
+        .to.emit(dao, "FundraiserExtended");
+
+      const [, , , , , , , , , extensionCount] = await dao.getFundraiserDetails(1);
+      expect(extensionCount).to.equal(1);
+    });
+
+    it("should validate extension parameters", async function () {
+      await expect(dao.extendFundraiser(1, 0))
+        .to.be.revertedWith("Invalid extension period");
+
+      await expect(dao.extendFundraiser(1, 91))
+        .to.be.revertedWith("Invalid extension period");
+
+      await expect(dao.connect(user1).extendFundraiser(1, 30))
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
+    });
   });
 
-  it("should allow full withdraw if target met early", async function () {
-    await createFundraiser(1000, 3600);
-    await donate(user1, 1000);
-    
-    const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
-    await dao.withdraw(1);
-    const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
-    
-    const expectedIncrease = ethers.parseUnits("1000", 18);
-    expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(expectedIncrease);
+  describe("Withdrawal System", function () {
+    beforeEach(async () => {
+      const creationData = {
+        title: "Withdrawal Test",
+        description: "Test withdrawals",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test Location"
+      };
+      await dao.createFundraiser(creationData);
+
+      const donationAmount = ethers.parseUnits("1000", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(1, donationAmount);
+    });
+
+    it("should allow withdrawal when goal is met", async function () {
+      const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
+      
+      await expect(dao.withdrawFunds(1))
+        .to.emit(dao, "FundsWithdrawn");
+
+      const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
+      expect(ownerBalanceAfter).to.be.gt(ownerBalanceBefore);
+
+      const [, , , , , , , , , , fundsWithdrawn] = await dao.getFundraiserDetails(1);
+      expect(fundsWithdrawn).to.be.true;
+    });
+
+    it("should apply success commission on withdrawal", async function () {
+      await dao.setSuccessCommission(500); // 5%
+      
+      const commissionBalanceBefore = await mockToken.balanceOf(commissionWallet.address);
+      await dao.withdrawFunds(1);
+      const commissionBalanceAfter = await mockToken.balanceOf(commissionWallet.address);
+      
+      const commissionIncrease = commissionBalanceAfter - commissionBalanceBefore;
+      expect(commissionIncrease).to.be.gt(0);
+    });
+
+    it("should prevent unauthorized withdrawal", async function () {
+      await expect(dao.connect(user1).withdrawFunds(1))
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
+    });
+
+    it("should prevent double withdrawal", async function () {
+      await dao.withdrawFunds(1);
+      await expect(dao.withdrawFunds(1))
+        .to.be.revertedWith("Already withdrawn");
+    });
   });
 
-  it("should allow flexible withdrawal anytime", async function () {
-    await createFundraiser(0, 3600, true);
-    await donate(user1, 1000);
-    
-    const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
-    await dao.withdraw(1);
-    const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
-    
-    const expectedIncrease = ethers.parseUnits("1000", 18);
-    expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(expectedIncrease);
-  });
+  describe("Refund System", function () {
+    beforeEach(async () => {
+      const creationData = {
+        title: "Refund Test",
+        description: "Test refunds",
+        endDate: Math.floor(Date.now() / 1000) + 10,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("2000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test Location"
+      };
+      await dao.createFundraiser(creationData);
 
-  it("should reject non-creator withdrawal", async function () {
-    await createFundraiser(1000, 3600);
-    await expect(dao.connect(user1).withdraw(1)).to.be.revertedWith("Not creator");
-  });
+      const donationAmount = ethers.parseUnits("1000", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(1, donationAmount);
+    });
 
-  it("should revert double withdrawal in targeted fundraiser", async function () {
-    await createFundraiser(1000, 3600);
-    await donate(user1, 1000);
-    await dao.withdraw(1);
-    await expect(dao.withdraw(1)).to.be.revertedWith("Already withdrawn");
-  });
+    it("should allow refunds for failed fundraisers", async function () {
+      // Wait for fundraiser to expire
+      await ethers.provider.send("evm_increaseTime", [15]);
+      await ethers.provider.send("evm_mine");
 
-  it("should initiate closure and set reclaim deadline", async function () {
-    await createFundraiser(2000, 3);
-    await donate(user1, 1000);
-    await ethers.provider.send("evm_increaseTime", [5]);
-    await ethers.provider.send("evm_mine");
-    await dao.initiateClosure(1);
-    const [, , , , , endTime, , , reclaimDeadline, closureInitiated] = await dao.getFundraiser(1);
-    expect(closureInitiated).to.be.true;
-    expect(reclaimDeadline).to.be.gt(endTime);
-  });
+      await dao.initiateClosure(1);
 
-  it("should handle multiple donors", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 3000, 3600, false);
-    
-    const amount1 = ethers.parseUnits("1000", 18);
-    const amount2 = ethers.parseUnits("800", 18);
-    const amount3 = ethers.parseUnits("1200", 18);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount1);
-    await dao.connect(user1).donate(1, amount1);
-    
-    await mockToken.connect(user2).approve(await dao.getAddress(), amount2);
-    await dao.connect(user2).donate(1, amount2);
-    
-    await mockToken.connect(user4).approve(await dao.getAddress(), amount3);
-    await dao.connect(user4).donate(1, amount3);
-    
-    const [, , , , raised] = await dao.getFundraiser(1);
-    expect(raised).to.equal(amount1 + amount2 + amount3);
-    
-    const donors = await dao.getDonors(1);
-    expect(donors).to.have.lengthOf(3);
+      const user1BalanceBefore = await mockToken.balanceOf(user1.address);
+      
+      await expect(dao.connect(user1).refund(1))
+        .to.emit(dao, "DonationRefunded");
+
+      const user1BalanceAfter = await mockToken.balanceOf(user1.address);
+      expect(user1BalanceAfter).to.be.gt(user1BalanceBefore);
+    });
+
+    it("should apply refund commission on multiple refunds", async function () {
+      await dao.setRefundCommission(1000); // 10%
+
+      // Wait for fundraiser to expire
+      await ethers.provider.send("evm_increaseTime", [15]);
+      await ethers.provider.send("evm_mine");
+
+      await dao.initiateClosure(1);
+
+      // First refund - no commission
+      await dao.connect(user1).refund(1);
+
+      // Create and donate to second fundraiser for second refund
+      const creationData = {
+        title: "Second Refund Test",
+        description: "Second test",
+        endDate: Math.floor(Date.now() / 1000) + 10,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("2000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test Location 2"
+      };
+      await dao.createFundraiser(creationData);
+
+      const donationAmount = ethers.parseUnits("1000", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(2, donationAmount);
+
+      await ethers.provider.send("evm_increaseTime", [15]);
+      await ethers.provider.send("evm_mine");
+
+      await dao.initiateClosure(2);
+
+      const commissionBalanceBefore = await mockToken.balanceOf(commissionWallet.address);
+      await dao.connect(user1).refund(2);
+      const commissionBalanceAfter = await mockToken.balanceOf(commissionWallet.address);
+
+      expect(commissionBalanceAfter).to.be.gt(commissionBalanceBefore);
+    });
+
+    it("should validate refund conditions", async function () {
+      await expect(dao.connect(user2).refund(1))
+        .to.be.revertedWith("No donation found");
+
+      await expect(dao.connect(user1).refund(1))
+        .to.be.revertedWith("Not in refund period");
+    });
   });
 });
 
 // ==============================
-// MULTIMEDIA FUNCTIONALITY
+// SUSPENSION SYSTEM
+// ==============================
+
+describe("🚫 Suspension System", function () {
+  beforeEach(async () => {
+    const creationData = {
+      title: "Suspendable Fundraiser",
+      description: "Can be suspended",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Test Location"
+    };
+    await dao.createFundraiser(creationData);
+  });
+
+  it("should allow owner to suspend fundraiser", async function () {
+    await expect(dao.suspendFundraiser(1, "Violation of terms"))
+      .to.emit(dao, "FundraiserSuspended")
+      .withArgs(1, owner.address, "Violation of terms", await ethers.provider.getBlock().then(b => b.timestamp + 1));
+
+    const [isSuspended, , suspensionReason] = await dao.getSuspensionInfo(1);
+    expect(isSuspended).to.be.true;
+    expect(suspensionReason).to.equal("Violation of terms");
+  });
+
+  it("should allow creator to suspend their own fundraiser", async function () {
+    await dao.connect(owner).suspendFundraiser(1, "Self-suspension");
+    
+    const [isSuspended] = await dao.getSuspensionInfo(1);
+    expect(isSuspended).to.be.true;
+  });
+
+  it("should allow owner to unsuspend fundraiser", async function () {
+    await dao.suspendFundraiser(1, "Test suspension");
+    
+    await expect(dao.unsuspendFundraiser(1))
+      .to.emit(dao, "FundraiserUnsuspended")
+      .withArgs(1, owner.address, await ethers.provider.getBlock().then(b => b.timestamp + 1));
+
+    const [isSuspended] = await dao.getSuspensionInfo(1);
+    expect(isSuspended).to.be.false;
+  });
+
+  it("should allow refunds from suspended fundraisers", async function () {
+    const donationAmount = ethers.parseUnits("500", 6);
+    await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+    await dao.connect(user1).donate(1, donationAmount);
+
+    await dao.suspendFundraiser(1, "Emergency suspension");
+
+    const user1BalanceBefore = await mockToken.balanceOf(user1.address);
+    
+    await expect(dao.connect(user1).refundFromSuspended(1))
+      .to.emit(dao, "DonationRefunded");
+
+    const user1BalanceAfter = await mockToken.balanceOf(user1.address);
+    expect(user1BalanceAfter - user1BalanceBefore).to.equal(donationAmount);
+  });
+
+  it("should prevent operations on suspended fundraisers", async function () {
+    await dao.suspendFundraiser(1, "Test suspension");
+
+    const donationAmount = ethers.parseUnits("100", 6);
+    await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+    
+    await expect(dao.connect(user1).donate(1, donationAmount))
+      .to.be.revertedWithCustomError(dao, "FundraiserSuspended");
+  });
+
+  it("should validate suspension parameters", async function () {
+    await expect(dao.suspendFundraiser(1, ""))
+      .to.be.revertedWith("Suspension reason required");
+
+    await expect(dao.connect(user1).suspendFundraiser(1, "Unauthorized"))
+      .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
+  });
+});
+
+// ==============================
+// MULTIMEDIA SYSTEM
 // ==============================
 
 describe("🎬 Multimedia Management", function () {
   beforeEach(async () => {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
+    const creationData = {
+      title: "Multimedia Fundraiser",
+      description: "With multimedia support",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Test Location"
+    };
+    await dao.createFundraiser(creationData);
   });
 
-  describe("Core Multimedia Features", function () {
-    it("should allow creator to add multimedia and activate flag", async function () {
+  describe("Media Management", function () {
+    it("should allow adding multimedia to fundraiser", async function () {
       const mediaItems = [
         {
-          ipfsHash: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+          ipfsHash: "QmTestImage",
           mediaType: 0,
-          filename: "project-image.jpg",
+          filename: "test.jpg",
           fileSize: 1024000,
           uploadTime: 0,
           uploader: ethers.ZeroAddress,
-          description: "Main project image"
+          description: "Test image"
+        },
+        {
+          ipfsHash: "QmTestVideo",
+          mediaType: 1,
+          filename: "test.mp4",
+          fileSize: 5024000,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Test video"
         }
       ];
 
       await expect(dao.addMultimediaToFundraiser(1, mediaItems))
         .to.emit(dao, "MediaAdded")
-        .withArgs(1, mediaItems[0].ipfsHash, 0, "project-image.jpg", owner.address)
-        .and.to.emit(dao, "MultimediaActivated")
-        .withArgs(1);
+        .withArgs(1, "QmTestImage", 0, "test.jpg", owner.address);
 
-      expect(await dao.hasMultimedia(1)).to.be.true;
+      const [media, total] = await dao.getFundraiserGallery(1, 0, 10);
+      expect(total).to.equal(2);
+      expect(media[0].ipfsHash).to.equal("QmTestImage");
+      expect(media[1].ipfsHash).to.equal("QmTestVideo");
     });
 
-    it("should enforce media type limits correctly", async function () {
+    it("should enforce media type limits", async function () {
       const tooManyVideos = Array(31).fill().map((_, i) => ({
-        ipfsHash: `QmVideo${i.toString().padStart(3, '0')}`,
+        ipfsHash: `QmVideo${i}`,
         mediaType: 1,
         filename: `video${i}.mp4`,
         fileSize: 5024000,
@@ -438,474 +729,334 @@ describe("🎬 Multimedia Management", function () {
         .to.be.revertedWithCustomError(dao, "MediaLimitExceeded");
     });
 
-    it("should track media statistics accurately", async function () {
-      const mixedMedia = [
-        { ipfsHash: "QmImage1", mediaType: 0, filename: "img1.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Image 1" },
-        { ipfsHash: "QmImage2", mediaType: 0, filename: "img2.jpg", fileSize: 2048, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Image 2" },
-        { ipfsHash: "QmVideo1", mediaType: 1, filename: "vid1.mp4", fileSize: 5024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Video 1" },
-        { ipfsHash: "QmAudio1", mediaType: 2, filename: "aud1.mp3", fileSize: 3024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Audio 1" },
-        { ipfsHash: "QmDoc1", mediaType: 3, filename: "doc1.pdf", fileSize: 4024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Document 1" }
-      ];
-
-      await dao.addMultimediaToFundraiser(1, mixedMedia);
-
-      const [images, videos, audio, documents, total] = await dao.getMediaStatistics(1);
-      expect(images).to.equal(2);
-      expect(videos).to.equal(1);
-      expect(audio).to.equal(1);
-      expect(documents).to.equal(1);
-      expect(total).to.equal(5);
-    });
-
-    it("should handle media removal with proper counter updates", async function () {
+    it("should allow removing media from fundraiser", async function () {
       const mediaItems = [
-        { ipfsHash: "QmImage1", mediaType: 0, filename: "img1.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Image 1" },
-        { ipfsHash: "QmVideo1", mediaType: 1, filename: "vid1.mp4", fileSize: 5024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Video 1" }
+        {
+          ipfsHash: "QmTestImage",
+          mediaType: 0,
+          filename: "test.jpg",
+          fileSize: 1024000,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Test image"
+        }
       ];
-      await dao.addMultimediaToFundraiser(1, mediaItems);
 
+      await dao.addMultimediaToFundraiser(1, mediaItems);
+      
       await expect(dao.removeMediaFromFundraiser(1, 0))
         .to.emit(dao, "MediaRemoved")
-        .withArgs(1, 0, "QmImage1");
+        .withArgs(1, 0, "QmTestImage");
 
-      const [images, videos, , , total] = await dao.getMediaStatistics(1);
-      expect(images).to.equal(0);
-      expect(videos).to.equal(1);
-      expect(total).to.equal(1);
+      const [, total] = await dao.getFundraiserGallery(1, 0, 10);
+      expect(total).to.equal(0);
+    });
+
+    it("should validate media parameters", async function () {
+      const invalidMedia = [
+        {
+          ipfsHash: "",
+          mediaType: 0,
+          filename: "test.jpg",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Empty hash"
+        }
+      ];
+
+      await expect(dao.addMultimediaToFundraiser(1, invalidMedia))
+        .to.be.revertedWith("Empty IPFS hash");
+
+      const invalidTypeMedia = [
+        {
+          ipfsHash: "QmValid",
+          mediaType: 5,
+          filename: "test.xyz",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Invalid type"
+        }
+      ];
+
+      await expect(dao.addMultimediaToFundraiser(1, invalidTypeMedia))
+        .to.be.revertedWithCustomError(dao, "InvalidMediaType");
+    });
+
+    it("should enforce batch size limits", async function () {
+      const tooBigBatch = Array(21).fill().map((_, i) => ({
+        ipfsHash: `QmBatch${i}`,
+        mediaType: 0,
+        filename: `file${i}.jpg`,
+        fileSize: 1024,
+        uploadTime: 0,
+        uploader: ethers.ZeroAddress,
+        description: `File ${i}`
+      }));
+
+      await expect(dao.addMultimediaToFundraiser(1, tooBigBatch))
+        .to.be.revertedWith("Too many media files");
     });
   });
 
-  describe("Authorization System", function () {
-    it("should manage media manager authorization correctly", async function () {
+  describe("Media Authorization", function () {
+    it("should manage media manager authorization", async function () {
       await expect(dao.authorizeMediaManager(1, user1.address))
         .to.emit(dao, "MediaManagerAuthorized")
         .withArgs(1, user1.address);
 
-      expect(await dao.canManageMedia(1, user1.address)).to.be.true;
+      const mediaItems = [
+        {
+          ipfsHash: "QmManagerTest",
+          mediaType: 0,
+          filename: "manager.jpg",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Manager test"
+        }
+      ];
 
-      const mediaItems = [{ ipfsHash: "QmManagerTest", mediaType: 0, filename: "manager.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Manager test" }];
       await dao.connect(user1).addMultimediaToFundraiser(1, mediaItems);
 
       await expect(dao.revokeMediaManager(1, user1.address))
         .to.emit(dao, "MediaManagerRevoked")
         .withArgs(1, user1.address);
 
-      expect(await dao.canManageMedia(1, user1.address)).to.be.false;
+      await expect(dao.connect(user1).addMultimediaToFundraiser(1, mediaItems))
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
     });
 
     it("should prevent unauthorized media operations", async function () {
-      const mediaItems = [{ ipfsHash: "QmUnauth", mediaType: 0, filename: "unauth.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Unauthorized" }];
-      
+      const mediaItems = [
+        {
+          ipfsHash: "QmUnauth",
+          mediaType: 0,
+          filename: "unauth.jpg",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Unauthorized"
+        }
+      ];
+
       await expect(dao.connect(user1).addMultimediaToFundraiser(1, mediaItems))
-        .to.be.revertedWithCustomError(dao, "NotFundraiserCreator");
-    });
-  });
-
-  describe("Input Validation", function () {
-    it("should validate IPFS hash requirements", async function () {
-      const invalidMedia = [{ ipfsHash: "", mediaType: 0, filename: "empty.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Empty hash" }];
-      
-      await expect(dao.addMultimediaToFundraiser(1, invalidMedia))
-        .to.be.revertedWithCustomError(dao, "InvalidIPFSHash");
-    });
-
-    it("should reject invalid media types", async function () {
-      const invalidMedia = [{ ipfsHash: "QmValid", mediaType: 5, filename: "invalid.xyz", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Invalid type" }];
-      
-      await expect(dao.addMultimediaToFundraiser(1, invalidMedia))
-        .to.be.revertedWithCustomError(dao, "InvalidMediaType");
-    });
-
-    it("should enforce batch size limits", async function () {
-      const tooBigBatch = Array(21).fill().map((_, i) => ({
-        ipfsHash: `QmBatch${i}`, mediaType: 0, filename: `file${i}.jpg`, fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: `File ${i}`
-      }));
-
-      await expect(dao.addMultimediaToFundraiser(1, tooBigBatch))
-        .to.be.revertedWithCustomError(dao, "MediaLimitExceeded");
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
     });
   });
 });
 
 // ==============================
-// UPDATE SYSTEM WITH MULTIMEDIA
+// UPDATE SYSTEM
 // ==============================
 
-describe("📝 Enhanced Update System", function () {
+describe("📝 Update System", function () {
   beforeEach(async () => {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
+    const creationData = {
+      title: "Update Test Fundraiser",
+      description: "For testing updates",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Test Location"
+    };
+    await dao.createFundraiser(creationData);
   });
 
-  describe("Multimedia Updates", function () {
-    it("should create updates with multimedia attachments", async function () {
-      const attachments = [
-        { ipfsHash: "QmUpdateImg", mediaType: 0, filename: "update.jpg", fileSize: 2048, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Update image" }
-      ];
-
-      await expect(dao.postUpdateWithMultimedia(1, "Progress update with image", 1, attachments))
+  describe("Basic Updates", function () {
+    it("should allow posting updates", async function () {
+      await expect(dao.postUpdate(1, "First progress update"))
         .to.emit(dao, "UpdatePosted")
-        .withArgs(1, 1, owner.address, "Progress update with image", 1);
+        .withArgs(1, 1, owner.address, "First progress update", 0);
 
-      const update = await dao.getUpdateWithAttachments(1);
-      expect(update.content).to.equal("Progress update with image");
-      expect(update.updateType).to.equal(1);
-      expect(update.attachments).to.have.lengthOf(1);
-      expect(update.attachments[0].ipfsHash).to.equal("QmUpdateImg");
+      expect(await dao.getUpdateCount()).to.equal(1);
+
+      const [id, fundraiserId, author, content, timestamp, updateType, isPinned] = await dao.getUpdate(1);
+      expect(id).to.equal(1);
+      expect(fundraiserId).to.equal(1);
+      expect(author).to.equal(owner.address);
+      expect(content).to.equal("First progress update");
+      expect(updateType).to.equal(0);
+      expect(isPinned).to.be.false;
     });
 
-    it("should handle update pinning system", async function () {
+    it("should allow posting updates with multimedia", async function () {
+      const attachments = [
+        {
+          ipfsHash: "QmUpdateImg",
+          mediaType: 0,
+          filename: "update.jpg",
+          fileSize: 2048,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Update image"
+        }
+      ];
+
+      await expect(dao.postUpdateWithMultimedia(1, "Update with media", 1, attachments))
+        .to.emit(dao, "UpdatePosted")
+        .withArgs(1, 1, owner.address, "Update with media", 1);
+
+      const attachmentCount = await dao.getUpdate(1).then(result => result[7]);
+      expect(attachmentCount).to.equal(1);
+
+      const updateAttachments = await dao.getUpdateAttachments(1);
+      expect(updateAttachments[0].ipfsHash).to.equal("QmUpdateImg");
+    });
+
+    it("should validate update content", async function () {
+      await expect(dao.postUpdate(1, ""))
+        .to.be.revertedWith("Invalid content");
+
+      const longContent = "a".repeat(1001);
+      await expect(dao.postUpdate(1, longContent))
+        .to.be.revertedWith("Invalid content");
+
+      const tooManyAttachments = Array(6).fill().map((_, i) => ({
+        ipfsHash: `QmAttach${i}`,
+        mediaType: 0,
+        filename: `attach${i}.jpg`,
+        fileSize: 1024,
+        uploadTime: 0,
+        uploader: ethers.ZeroAddress,
+        description: `Attachment ${i}`
+      }));
+
+      await expect(dao.postUpdateWithMultimedia(1, "test", 0, tooManyAttachments))
+        .to.be.revertedWith("Too many attachments");
+    });
+  });
+
+  describe("Update Pinning", function () {
+    beforeEach(async () => {
       await dao.postUpdate(1, "First update");
       await dao.postUpdate(1, "Second update");
+    });
 
+    it("should allow pinning updates", async function () {
       await expect(dao.pinUpdate(2))
         .to.emit(dao, "UpdatePinned")
         .withArgs(2, 1);
 
-      const summary = await dao.getFundraiserSummary(1);
-      expect(summary.pinnedUpdateId).to.equal(2);
+      const [, , , , , , isPinned] = await dao.getUpdate(2);
+      expect(isPinned).to.be.true;
+    });
 
-      await expect(dao.pinUpdate(1))
+    it("should handle pin replacement", async function () {
+      await dao.pinUpdate(1);
+      
+      await expect(dao.pinUpdate(2))
         .to.emit(dao, "UpdateUnpinned")
-        .withArgs(1, 2)
+        .withArgs(1, 1)
         .and.to.emit(dao, "UpdatePinned")
+        .withArgs(2, 1);
+    });
+
+    it("should allow unpinning updates", async function () {
+      await dao.pinUpdate(1);
+      
+      await expect(dao.unpinUpdate(1))
+        .to.emit(dao, "UpdateUnpinned")
         .withArgs(1, 1);
     });
 
-    it("should manage update authorization properly", async function () {
+    it("should validate pinning authorization", async function () {
+      await expect(dao.connect(user1).pinUpdate(1))
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
+    });
+  });
+
+  describe("Update Authorization", function () {
+    it("should manage updater authorization", async function () {
       await expect(dao.authorizeUpdater(1, user1.address))
         .to.emit(dao, "UpdaterAuthorized")
         .withArgs(1, user1.address);
 
+      expect(await dao.canUpdate(1, user1.address)).to.be.true;
+
       await dao.connect(user1).postUpdate(1, "Authorized update");
       expect(await dao.getUpdateCount()).to.equal(1);
 
-      await dao.revokeUpdater(1, user1.address);
+      await expect(dao.revokeUpdater(1, user1.address))
+        .to.emit(dao, "UpdaterRevoked")
+        .withArgs(1, user1.address);
+
+      expect(await dao.canUpdate(1, user1.address)).to.be.false;
+
       await expect(dao.connect(user1).postUpdate(1, "Should fail"))
-        .to.be.revertedWithCustomError(dao, "NotFundraiserCreator");
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
     });
   });
 });
 
 // ==============================
-// STANDARD COMMISSION SYSTEM (NO MULTIMEDIA BONUS)
+// COMMISSION SYSTEM
 // ==============================
 
-describe("💼 Standard Commission Management", function () {
-  it("should set donation commission", async function () {
-    await dao.setDonationCommission(700);
-    const commission = await dao.donationCommission();
-    expect(commission).to.equal(700);
-  });
-
-  it("should set success commission", async function () {
-    await dao.setSuccessCommission(300);
-    const commission = await dao.successCommission();
-    expect(commission).to.equal(300);
-  });
-
-  it("should apply donation commission correctly (without multimedia bonus)", async function () {
-    await dao.setDonationCommission(1000); // 10%
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    // Add multimedia to verify it doesn't affect commission
-    const mediaItems = [{ ipfsHash: "QmTest", mediaType: 0, filename: "test.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Test" }];
-    await dao.addMultimediaToFundraiser(1, mediaItems);
-    
-    const amount = ethers.parseUnits("1000", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    const [, , , , raised] = await dao.getFundraiser(1);
-    // Should apply only 10% commission, no multimedia bonus
-    expect(raised).to.equal(ethers.parseUnits("900", 18));
-  });
-
-  it("should apply success commission correctly on withdraw (without multimedia bonus)", async function () {
-    await dao.connect(owner).setSuccessCommission(1000); // 10%
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    // Add multimedia to verify it doesn't affect commission
-    const mediaItems = [{ ipfsHash: "QmTest", mediaType: 1, filename: "test.mp4", fileSize: 5024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Test" }];
-    await dao.addMultimediaToFundraiser(1, mediaItems);
-    
-    const amount = ethers.parseUnits("1000", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
-    const commissionBalanceBefore = await mockToken.balanceOf(user3.address);
-    
-    await dao.withdraw(1);
-    
-    const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
-    const commissionBalanceAfter = await mockToken.balanceOf(user3.address);
-    
-    // Should apply only 10% commission, no multimedia bonus
-    const expectedCommission = ethers.parseUnits("100", 18); // 10% of 1000
-    const expectedOwnerIncrease = ethers.parseUnits("900", 18); // 1000 - 100
-    
-    expect(commissionBalanceAfter - commissionBalanceBefore).to.equal(expectedCommission);
-    expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(expectedOwnerIncrease);
-  });
-
-  it("should handle zero commission", async function () {
-    await dao.setDonationCommission(0);
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    const amount = ethers.parseUnits("1000", 18);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    const [, , , , raised] = await dao.getFundraiser(1);
-    expect(raised).to.equal(amount); // No commission deducted
-  });
-
-  it("should handle maximum commission", async function () {
-    await dao.setDonationCommission(10000); // 100%
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    const amount = ethers.parseUnits("1000", 18);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    const [, , , , raised] = await dao.getFundraiser(1);
-    expect(raised).to.equal(0); // All went to commission
-  });
-
-  it("should emit commission events", async function () {
-    await expect(dao.setDonationCommission(250))
+describe("💼 Commission Management", function () {
+  it("should allow setting commissions", async function () {
+    await expect(dao.setDonationCommission(500))
       .to.emit(dao, "DonationCommissionSet")
-      .withArgs(250);
-    
-    await expect(dao.setSuccessCommission(500))
-      .to.emit(dao, "SuccessCommissionSet")
       .withArgs(500);
-    
-    await expect(dao.setRefundCommission(150))
+
+    await expect(dao.setSuccessCommission(300))
+      .to.emit(dao, "SuccessCommissionSet")
+      .withArgs(300);
+
+    await expect(dao.setRefundCommission(200))
       .to.emit(dao, "RefundCommissionSet")
-      .withArgs(150);
-  });
-});
+      .withArgs(200);
 
-describe("🔄 Refund Commission", function () {
-  const donatedAmount = ethers.parseUnits("1000", 18);
-
-  it("should allow owner to set refund commission", async function () {
-    await dao.setRefundCommission(500); // 5%
-    expect(await dao.refundCommission()).to.equal(500);
+    expect(await dao.donationCommission()).to.equal(500);
+    expect(await dao.successCommission()).to.equal(300);
+    expect(await dao.refundCommission()).to.equal(200);
   });
 
-  it("should not charge commission on first refund but charge on second refund in same month", async function () {
-    await dao.setRefundCommission(1000);
+  it("should validate commission limits", async function () {
+    await expect(dao.setDonationCommission(10001))
+      .to.be.revertedWith("Max 100%");
 
-    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
-    const fa1 = 1;
-    await mockToken.connect(user1).approve(await dao.getAddress(), donatedAmount);
-    await dao.connect(user1).donate(fa1, donatedAmount);
+    await expect(dao.setSuccessCommission(10001))
+      .to.be.revertedWith("Max 100%");
 
-    const beforeUser1_1 = await mockToken.balanceOf(user1.address);
-    const beforeComm_1 = await mockToken.balanceOf(user3.address);
-
-    await dao.connect(user1).refund(fa1);
-
-    const afterUser1_1 = await mockToken.balanceOf(user1.address);
-    const afterComm_1 = await mockToken.balanceOf(user3.address);
-
-    expect(afterUser1_1 - beforeUser1_1).to.equal(donatedAmount);
-    expect(afterComm_1 - beforeComm_1).to.equal(0n);
-
-    const block1 = await ethers.provider.getBlock();
-    const period = Math.floor(block1.timestamp / (30 * 24 * 3600));
-
-    expect(await dao.monthlyRefundCount(user1.address, period)).to.equal(1);
-
-    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
-    const fa2 = 2;
-    await mockToken.connect(user1).approve(await dao.getAddress(), donatedAmount);
-    await dao.connect(user1).donate(fa2, donatedAmount);
-
-    const beforeUser1_2 = await mockToken.balanceOf(user1.address);
-    const beforeComm_2 = await mockToken.balanceOf(user3.address);
-
-    await dao.connect(user1).refund(fa2);
-
-    const afterUser1_2 = await mockToken.balanceOf(user1.address);
-    const afterComm_2 = await mockToken.balanceOf(user3.address);
-
-    const expectedCommission = (donatedAmount * 1000n) / 10000n;
-    const expectedRefund = donatedAmount - expectedCommission;
-
-    expect(afterUser1_2 - beforeUser1_2).to.equal(expectedRefund);
-    expect(afterComm_2 - beforeComm_2).to.equal(expectedCommission);
-
-    expect(await dao.monthlyRefundCount(user1.address, period)).to.equal(2);
+    await expect(dao.setRefundCommission(10001))
+      .to.be.revertedWith("Max 100%");
   });
 
-  it("should handle refund commission for multiple refunds in same month", async function () {
-    await dao.setRefundCommission(1000); // 10%
-    
-    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
-    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
-    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
-    
-    const amount = ethers.parseUnits("1000", 18);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(2, amount);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(3, amount);
-    
-    const balanceBeforeRefunds = await mockToken.balanceOf(user1.address);
-    const commissionBalanceBefore = await mockToken.balanceOf(user3.address);
-    
-    await dao.connect(user1).refund(1); // First refund - no commission
-    await dao.connect(user1).refund(2); // Second refund - 10% commission
-    await dao.connect(user1).refund(3); // Third refund - 10% commission
-    
-    const balanceAfterRefunds = await mockToken.balanceOf(user1.address);
-    const commissionBalanceAfter = await mockToken.balanceOf(user3.address);
-    
-    const expectedUserIncrease = amount + (amount * 90n / 100n) + (amount * 90n / 100n);
-    const expectedCommissionIncrease = (amount * 10n / 100n) + (amount * 10n / 100n);
-    
-    expect(balanceAfterRefunds - balanceBeforeRefunds).to.equal(expectedUserIncrease);
-    expect(commissionBalanceAfter - commissionBalanceBefore).to.equal(expectedCommissionIncrease);
+  it("should allow changing commission wallet", async function () {
+    await expect(dao.setCommissionWallet(user4.address))
+      .to.emit(dao, "CommissionWalletChanged")
+      .withArgs(commissionWallet.address, user4.address);
+
+    await expect(dao.setCommissionWallet(ethers.ZeroAddress))
+      .to.be.revertedWithCustomError(dao, "InvalidTokenAddress");
+  });
+
+  it("should allow changing fee token", async function () {
+    await expect(dao.setFeeToken(user4.address))
+      .to.emit(dao, "FeeTokenSet")
+      .withArgs(await feeToken.getAddress(), user4.address);
+  });
+
+  it("should prevent unauthorized commission changes", async function () {
+    await expect(dao.connect(user1).setDonationCommission(500))
+      .to.be.reverted;
+
+    await expect(dao.connect(user1).setCommissionWallet(user1.address))
+      .to.be.reverted;
   });
 });
 
 // ==============================
-// ACCESS CONTROL & SECURITY
+// TOKEN MANAGEMENT
 // ==============================
 
-describe("🔒 Access Control & Security", function () {
-  it("should only allow owner to pause", async function () {
-    await expect(dao.connect(user1).pause()).to.be.reverted;
-    await dao.pause();
-    expect(await dao.paused()).to.be.true;
-  });
-
-  it("should only allow owner to set commissions", async function () {
-    await expect(dao.connect(user1).setDonationCommission(500)).to.be.reverted;
-    await expect(dao.connect(user1).setSuccessCommission(500)).to.be.reverted;
-    await expect(dao.connect(user1).setRefundCommission(500)).to.be.reverted;
-  });
-
-  it("should reject commission above 100%", async function () {
-    await expect(dao.setDonationCommission(10001)).to.be.revertedWith("Max 100%");
-    await expect(dao.setSuccessCommission(10001)).to.be.revertedWith("Max 100%");
-    await expect(dao.setRefundCommission(10001)).to.be.revertedWith("Max 100%");
-  });
-
-  it("should only allow owner to pause voting", async function () {
-    await expect(dao.connect(user1).toggleVotingPause()).to.be.reverted;
-    
-    await dao.toggleVotingPause();
-    expect(await dao.votingPaused()).to.be.true;
-    
-    await expect(dao.createProposal("Test", 3600)).to.be.revertedWith("Voting paused");
-  });
-
-  it("should only allow owner to pause donations", async function () {
-    await expect(dao.connect(user1).toggleDonationsPause()).to.be.reverted;
-    
-    await dao.toggleDonationsPause();
-    expect(await dao.donationsPaused()).to.be.true;
-  });
-
-  it("should only allow owner to pause withdrawals", async function () {
-    await expect(dao.connect(user1).toggleWithdrawalsPause()).to.be.reverted;
-    
-    await dao.toggleWithdrawalsPause();
-    expect(await dao.withdrawalsPaused()).to.be.true;
-  });
-
-  it("should prevent operations when paused", async function () {
-    await dao.pause();
-    
-    await expect(dao.createProposal("Test", 3600)).to.be.reverted;
-    await expect(dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false)).to.be.reverted;
-  });
-
-  it("should prevent voting when voting paused", async function () {
-    await dao.createProposal("Test", 3600);
-    await dao.toggleVotingPause();
-    
-    await expect(dao.connect(user1).vote(1, true)).to.be.revertedWith("Voting paused");
-  });
-
-  it("should prevent donations when donations paused", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    await dao.toggleDonationsPause();
-    
-    const amount = ethers.parseUnits("100", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await expect(dao.connect(user1).donate(1, amount)).to.be.revertedWith("Donations paused");
-  });
-
-  it("should prevent withdrawals when withdrawals paused", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const amount = ethers.parseUnits("1000", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    await dao.toggleWithdrawalsPause();
-    await expect(dao.withdraw(1)).to.be.revertedWith("Withdrawals paused");
-  });
-
-  it("should handle zero amounts", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    await expect(dao.connect(user1).donate(1, 0)).to.be.revertedWith("Zero amount");
-  });
-
-  it("should handle insufficient balance", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const hugeAmount = ethers.parseUnits("10000", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), hugeAmount);
-    await expect(dao.connect(user1).donate(1, hugeAmount)).to.be.reverted;
-  });
-
-  it("should prevent proposal creation with empty question", async function () {
-    await expect(dao.createProposal("", 3600))
-      .to.be.revertedWithCustomError(dao, "EmptyQuestion");
-  });
-
-  it("should prevent proposal creation with too long question", async function () {
-    const longQuestion = "a".repeat(501);
-    await expect(dao.createProposal(longQuestion, 3600))
-      .to.be.revertedWithCustomError(dao, "QuestionTooLong");
-  });
-
-  it("should prevent proposal creation with invalid duration", async function () {
-    const maxDuration = 365 * 24 * 3600;
-    await expect(dao.createProposal("Test", maxDuration + 1))
-      .to.be.revertedWithCustomError(dao, "InvalidDuration");
-  });
-
-  it("should handle multimedia pause functionality", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    await expect(dao.toggleMediaPause())
-      .to.emit(dao, "MediaPauseToggled")
-      .withArgs(true);
-
-    const mediaItems = [{ ipfsHash: "QmTest", mediaType: 0, filename: "test.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Test" }];
-    await expect(dao.addMultimediaToFundraiser(1, mediaItems))
-      .to.be.revertedWith("Media operations paused");
-  });
-});
-
-// ==============================
-// TOKEN WHITELIST MANAGEMENT
-// ==============================
-
-describe("🪙 Token Whitelist Management", function () {
+describe("🪙 Token Management", function () {
   let mockToken2;
 
   beforeEach(async () => {
@@ -914,39 +1065,97 @@ describe("🪙 Token Whitelist Management", function () {
     await mockToken2.waitForDeployment();
   });
 
-  it("should prevent adding invalid tokens", async function () {
-    await expect(dao.whitelistToken(ethers.ZeroAddress)).to.be.reverted;
-    await expect(dao.whitelistToken(user1.address)).to.be.reverted;
-  });
-
-  it("should prevent double whitelisting", async function () {
-    await expect(dao.whitelistToken(await mockToken.getAddress())).to.be.revertedWith("Already whitelisted");
-  });
-
-  it("should add and remove tokens correctly", async function () {
-    await dao.whitelistToken(await mockToken2.getAddress());
-    
-    let tokens = await dao.getWhitelistedTokens();
-    expect(tokens).to.include(await mockToken2.getAddress());
-    
-    await dao.removeWhitelistToken(await mockToken2.getAddress());
-    tokens = await dao.getWhitelistedTokens();
-    expect(tokens).to.not.include(await mockToken2.getAddress());
-  });
-
-  it("should prevent fundraisers with non-whitelisted tokens", async function () {
-    await expect(dao.createFundraiser(await mockToken2.getAddress(), 1000, 3600, false))
-      .to.be.revertedWith("Token not allowed");
-  });
-
-  it("should emit events for token management", async function () {
+  it("should whitelist new tokens", async function () {
     await expect(dao.whitelistToken(await mockToken2.getAddress()))
       .to.emit(dao, "TokenWhitelisted")
       .withArgs(await mockToken2.getAddress());
+
+    expect(await dao.isTokenWhitelisted(await mockToken2.getAddress())).to.be.true;
+
+    const whitelistedTokens = await dao.getWhitelistedTokens();
+    expect(whitelistedTokens).to.include(await mockToken2.getAddress());
+  });
+
+  it("should remove whitelisted tokens", async function () {
+    await dao.whitelistToken(await mockToken2.getAddress());
     
     await expect(dao.removeWhitelistToken(await mockToken2.getAddress()))
       .to.emit(dao, "TokenRemoved")
       .withArgs(await mockToken2.getAddress());
+
+    expect(await dao.isTokenWhitelisted(await mockToken2.getAddress())).to.be.false;
+  });
+
+  it("should validate token whitelisting", async function () {
+    await expect(dao.whitelistToken(ethers.ZeroAddress))
+      .to.be.revertedWithCustomError(dao, "InvalidTokenAddress");
+
+    await expect(dao.whitelistToken(user1.address))
+      .to.be.revertedWith("Not a contract");
+
+    await expect(dao.whitelistToken(await mockToken.getAddress()))
+      .to.be.revertedWith("Already whitelisted");
+  });
+
+  it("should prevent fundraisers with non-whitelisted tokens", async function () {
+    const creationData = {
+      title: "Invalid Token Test",
+      description: "Should fail",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken2.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 18),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Test Location"
+    };
+
+    await expect(dao.createFundraiser(creationData))
+      .to.be.revertedWithCustomError(dao, "InvalidTokenAddress");
+  });
+});
+
+// ==============================
+// LOCATION MANAGEMENT
+// ==============================
+
+describe("📍 Location Management", function () {
+  beforeEach(async () => {
+    const creationData = {
+      title: "Location Test",
+      description: "Testing locations",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Original Location"
+    };
+    await dao.createFundraiser(creationData);
+  });
+
+  it("should allow updating fundraiser location", async function () {
+    await expect(dao.updateLocation(1, "New Location"))
+      .to.emit(dao, "LocationUpdated")
+      .withArgs(1, "Original Location", "New Location");
+
+    const [, , location] = await dao.getFundraiserDetails(1);
+    expect(location).to.equal("New Location");
+  });
+
+  it("should validate location updates", async function () {
+    await expect(dao.updateLocation(1, ""))
+      .to.be.revertedWith("Invalid location");
+
+    const longLocation = "a".repeat(201);
+    await expect(dao.updateLocation(1, longLocation))
+      .to.be.revertedWith("Invalid location");
+
+    await expect(dao.connect(user1).updateLocation(1, "Unauthorized"))
+      .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
   });
 });
 
@@ -954,192 +1163,369 @@ describe("🪙 Token Whitelist Management", function () {
 // CIRCUIT BREAKER & LIMITS
 // ==============================
 
-describe("🔄 Circuit Breaker & Daily Limits", function () {
-  it("should allow setting daily donation limit", async function () {
-    const newLimit = ethers.parseUnits("500000", 18);
-    await dao.setMaxDailyDonations(newLimit);
-    expect(await dao.maxDailyDonations()).to.equal(newLimit);
+describe("🔄 Circuit Breaker & Limits", function () {
+  it("should enforce daily donation limits", async function () {
+    await dao.setMaxDailyDonations(ethers.parseUnits("100000", 6));
+    await dao.setMaxUserDailyDonation(ethers.parseUnits("10000", 6));
+
+    const creationData = {
+      title: "Limit Test",
+      description: "Testing limits",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 1, // WITHOUT_GOAL
+      token: await mockToken.getAddress(),
+      goalAmount: 0,
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Test Location"
+    };
+    await dao.createFundraiser(creationData);
+
+    // This should work
+    const normalAmount = ethers.parseUnits("5000", 6);
+    await mockToken.connect(user1).approve(await dao.getAddress(), normalAmount);
+    await dao.connect(user1).donate(1, normalAmount);
+
+    // This should fail due to user daily limit
+    const excessiveAmount = ethers.parseUnits("8000", 6);
+    await mockToken.connect(user1).approve(await dao.getAddress(), excessiveAmount);
+    await expect(dao.connect(user1).donate(1, excessiveAmount))
+      .to.be.revertedWithCustomError(dao, "DailyLimitExceeded");
   });
 
-  it("should prevent non-owner from setting daily limit", async function () {
-    const newLimit = ethers.parseUnits("500000", 18);
-    await expect(dao.connect(user1).setMaxDailyDonations(newLimit)).to.be.reverted;
-  });
+  it("should allow setting limits", async function () {
+    const newDailyLimit = ethers.parseUnits("2000000", 6);
+    await dao.setMaxDailyDonations(newDailyLimit);
+    expect(await dao.maxDailyDonations()).to.equal(newDailyLimit);
 
-  it("should track daily donation count for large donations", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 10000, 3600, false);
-    
-    const amount = ethers.parseUnits("200000", 18);
-    await mockToken.connect(owner).transfer(user1.address, amount);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    const today = Math.floor(Date.now() / 1000 / 86400);
-    const dailyCount = await dao.getDailyDonationCount(today);
-    expect(dailyCount).to.equal(amount);
-  });
-
-  it("should get today's donation count", async function () {
-    const todayCount = await dao.getTodayDonationCount();
-    expect(todayCount).to.be.a('bigint');
-  });
-
-  it("should emit event when setting daily limit", async function () {
-    const newLimit = ethers.parseUnits("2000000", 18);
-    await expect(dao.setMaxDailyDonations(newLimit))
-      .to.emit(dao, "MaxDailyDonationsSet")
-      .withArgs(newLimit);
-  });
-});
-
-// ==============================
-// REFUND EDGE CASES
-// ==============================
-
-describe("🔄 Refund Edge Cases", function () {
-  it("should prevent refund for user who never donated", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 10, false);
-    
-    await ethers.provider.send("evm_increaseTime", [11]);
-    await ethers.provider.send("evm_mine");
-    await dao.initiateClosure(1);
-    
-    await expect(dao.connect(user2).refund(1)).to.be.revertedWith("No donation found");
-  });
-
-  it("should prevent double refund", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 2000, 10, false);
-    const amount = ethers.parseUnits("1000", 18);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    await ethers.provider.send("evm_increaseTime", [11]);
-    await ethers.provider.send("evm_mine");
-    await dao.initiateClosure(1);
-    
-    await dao.connect(user1).refund(1);
-    await expect(dao.connect(user1).refund(1)).to.be.revertedWith("Already refunded");
-  });
-
-  it("should prevent refund from flexible fundraiser before conditions are met", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    const amount = ethers.parseUnits("500", 18);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    await expect(dao.connect(user1).refund(1)).to.be.revertedWith("Fundraiser still active");
+    const newUserLimit = ethers.parseUnits("50000", 6);
+    await dao.setMaxUserDailyDonation(newUserLimit);
+    expect(await dao.maxUserDailyDonation()).to.equal(newUserLimit);
   });
 });
 
 // ==============================
-// VIEW FUNCTIONS & GETTERS
+// ACCESS CONTROL & SECURITY
 // ==============================
 
-describe("🔍 View Functions & Data Retrieval", function () {
-  it("should return correct proposal IDs", async function () {
-    await dao.createProposal("Prop 1", 3600);
-    await dao.createProposal("Prop 2", 3600);
-    
-    const ids = await dao.getAllProposalIds();
-    expect(ids).to.have.lengthOf(2);
-    expect(ids[0]).to.equal(1);
-    expect(ids[1]).to.equal(2);
+describe("🔒 Access Control & Security", function () {
+  describe("Pausing System", function () {
+    it("should handle global pause", async function () {
+      await dao.pause();
+      expect(await dao.paused()).to.be.true;
+
+      await expect(dao.createProposal("Should fail", 3600))
+        .to.be.reverted;
+
+      await dao.unpause();
+      expect(await dao.paused()).to.be.false;
+    });
+
+    it("should handle selective pausing", async function () {
+      await dao.toggleVotingPause();
+      expect(await dao.votingPaused()).to.be.true;
+
+      await dao.toggleDonationsPause();
+      expect(await dao.donationsPaused()).to.be.true;
+
+      await dao.toggleWithdrawalsPause();
+      expect(await dao.withdrawalsPaused()).to.be.true;
+
+      await dao.toggleUpdatesPause();
+      expect(await dao.updatesPaused()).to.be.true;
+
+      await dao.toggleMediaPause();
+      expect(await dao.mediaPaused()).to.be.true;
+    });
+
+    it("should enforce pausing restrictions", async function () {
+      await dao.createProposal("Test", 3600);
+      await dao.toggleVotingPause();
+      
+      await expect(dao.connect(user1).vote(1, true))
+        .to.be.revertedWith("Voting paused");
+
+      const creationData = {
+        title: "Test",
+        description: "Test",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test"
+      };
+      await dao.createFundraiser(creationData);
+
+      await dao.toggleDonationsPause();
+      const amount = ethers.parseUnits("100", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), amount);
+      await expect(dao.connect(user1).donate(1, amount))
+        .to.be.revertedWith("Donations paused");
+    });
+
+    it("should handle emergency pause", async function () {
+      await dao.createFundraiser({
+        title: "Emergency Test",
+        description: "Test",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Test"
+      });
+
+      await dao.emergencyFreeze();
+
+      expect(await dao.paused()).to.be.true;
+      expect(await dao.votingPaused()).to.be.true;
+      expect(await dao.donationsPaused()).to.be.true;
+      expect(await dao.withdrawalsPaused()).to.be.true;
+
+      const [, , , , , , , , , , isSuspended] = await dao.getFundraiserDetails(1);
+      expect(isSuspended).to.be.true;
+    });
   });
 
-  it("should return correct fundraiser IDs", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    await dao.createFundraiser(await mockToken.getAddress(), 2000, 3600, true);
-    
-    const ids = await dao.getAllFundraiserIds();
-    expect(ids).to.have.lengthOf(2);
-    expect(ids[0]).to.equal(1);
-    expect(ids[1]).to.equal(2);
+  describe("Emergency Functions", function () {
+    it("should allow emergency withdrawals", async function () {
+      // Send some tokens to the contract
+      const amount = ethers.parseUnits("100", 6);
+      await mockToken.connect(owner).transfer(await dao.getAddress(), amount);
+
+      await expect(dao.emergencyWithdraw(await mockToken.getAddress(), owner.address, amount))
+        .to.emit(dao, "EmergencyWithdraw")
+        .withArgs(await mockToken.getAddress(), owner.address, amount);
+    });
+
+    it("should prevent unauthorized emergency operations", async function () {
+      await expect(dao.connect(user1).pause())
+        .to.be.reverted;
+
+      await expect(dao.connect(user1).emergencyFreeze())
+        .to.be.reverted;
+
+      await expect(dao.connect(user1).emergencyWithdraw(await mockToken.getAddress(), user1.address, 100))
+        .to.be.reverted;
+    });
+  });
+});
+
+// ==============================
+// ADVANCED DONATION METHODS
+// ==============================
+
+describe("🚀 Advanced Donation Methods", function () {
+  beforeEach(async () => {
+    const creationData = {
+      title: "Advanced Donations Test",
+      description: "Testing advanced methods",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Test Location"
+    };
+    await dao.createFundraiser(creationData);
   });
 
-  it("should handle non-existent queries gracefully", async function () {
-    await expect(dao.getProposal(999)).to.be.revertedWith("Invalid proposal");
-    await expect(dao.getFundraiser(999)).to.be.revertedWith("Invalid fundraiser");
-    await expect(dao.getProposalCreator(999)).to.be.revertedWith("Invalid proposal");
-    expect(await dao.timeLeftOnProposal(999)).to.equal(0);
-    expect(await dao.timeLeftOnFundraiser(999)).to.equal(0);
+  describe("Permit Donations", function () {
+    it("should support permit functionality check", async function () {
+      // Most ERC20 tokens don't support permit, so this should return false
+      const supportsPermit = await dao.supportsPermit(await mockToken.getAddress());
+      expect(typeof supportsPermit).to.equal('boolean');
+    });
+
+    it("should get user nonce", async function () {
+      const nonce = await dao.getNonce(user1.address);
+      expect(nonce).to.equal(0);
+    });
   });
 
-  it("should return correct proposal summary with creator", async function () {
-    await dao.authorizeProposer(user1.address);
-    await dao.createProposal("Owner prop", 3600);
-    await dao.connect(user1).createProposal("User prop", 3600);
+  describe("Meta-transactions", function () {
+    it("should verify donation signatures", async function () {
+      const amount = ethers.parseUnits("500", 6);
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
+      
+      // This will return false since we're not providing a real signature
+      const isValid = await dao.verifyDonationSignature(
+        user1.address,
+        1,
+        amount,
+        deadline,
+        "0x00"
+      );
+      expect(isValid).to.be.false;
+    });
+  });
+});
+
+// ==============================
+// VIEW FUNCTIONS & STATISTICS
+// ==============================
+
+describe("📊 View Functions & Statistics", function () {
+  beforeEach(async () => {
+    // Create some test data
+    await dao.createProposal("Test Proposal 1", 3600);
+    await dao.createProposal("Test Proposal 2", 3600);
+
+    const creationData = {
+      title: "Statistics Test",
+      description: "For testing stats",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: ["QmImage1"],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Test Location"
+    };
+    await dao.createFundraiser(creationData);
     
-    const summary1 = await dao.getProposalSummary(1);
-    const summary2 = await dao.getProposalSummary(2);
-    
-    expect(summary1.creator).to.equal(owner.address);
-    expect(summary1.question).to.equal("Owner prop");
-    
-    expect(summary2.creator).to.equal(user1.address);
-    expect(summary2.question).to.equal("User prop");
+    await dao.postUpdate(1, "First update");
   });
 
-  it("should return enhanced fundraiser summary with multimedia data", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const mediaItems = [{ ipfsHash: "QmTest", mediaType: 0, filename: "test.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Test" }];
-    await dao.addMultimediaToFundraiser(1, mediaItems);
-    await dao.postUpdate(1, "Test update");
-    
-    const summary = await dao.getFundraiserSummary(1);
-    expect(summary.mediaCount).to.equal(1);
-    expect(summary.updateCount).to.equal(1);
-    expect(summary.pinnedUpdateId).to.equal(0);
+  describe("Platform Statistics", function () {
+    it("should return correct platform stats", async function () {
+      const [
+        totalFundraisers,
+        totalProposals,
+        totalUpdates,
+        activeFundraisers,
+        successfulFundraisers,
+        suspendedFundraisers,
+        totalWhitelistedTokens
+      ] = await dao.getPlatformStats();
+
+      expect(totalFundraisers).to.equal(1);
+      expect(totalProposals).to.equal(2);
+      expect(totalUpdates).to.equal(1);
+      expect(activeFundraisers).to.equal(1);
+      expect(successfulFundraisers).to.equal(0);
+      expect(suspendedFundraisers).to.equal(0);
+      expect(totalWhitelistedTokens).to.equal(1);
+    });
+
+    it("should return fundraiser statistics", async function () {
+      const donationAmount = ethers.parseUnits("500", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(1, donationAmount);
+
+      const [
+        totalDonations,
+        averageDonation,
+        totalRefunds,
+        mediaItems,
+        updatesCount,
+        daysActive,
+        goalProgress
+      ] = await dao.getFundraiserStats(1);
+
+      expect(totalDonations).to.equal(donationAmount);
+      expect(averageDonation).to.equal(donationAmount);
+      expect(totalRefunds).to.equal(0);
+      expect(mediaItems).to.equal(1);
+      expect(updatesCount).to.equal(1);
+      expect(goalProgress).to.equal(5000); // 50% * 100 (basis points)
+    });
   });
 
-  it("should handle zero ID queries", async function () {
-    await expect(dao.getProposal(0)).to.be.revertedWith("Invalid proposal");
-    await expect(dao.getFundraiser(0)).to.be.revertedWith("Invalid fundraiser");
-    expect(await dao.timeLeftOnProposal(0)).to.equal(0);
-    expect(await dao.timeLeftOnFundraiser(0)).to.equal(0);
+  describe("Data Retrieval", function () {
+    it("should return all IDs correctly", async function () {
+      const proposalIds = await dao.getAllProposalIds();
+      const fundraiserIds = await dao.getAllFundraiserIds();
+      const whitelistedTokens = await dao.getWhitelistedTokens();
+
+      expect(proposalIds).to.have.lengthOf(2);
+      expect(fundraiserIds).to.have.lengthOf(1);
+      expect(whitelistedTokens).to.have.lengthOf(1);
+    });
+
+    it("should handle pagination correctly", async function () {
+      // Add more updates for pagination testing
+      await dao.postUpdate(1, "Second update");
+      await dao.postUpdate(1, "Third update");
+
+      const [updates1, total1] = await dao.getFundraiserUpdates(1, 0, 2);
+      expect(updates1).to.have.lengthOf(2);
+      expect(total1).to.equal(3);
+
+      const [updates2, total2] = await dao.getFundraiserUpdates(1, 2, 2);
+      expect(updates2).to.have.lengthOf(1);
+      expect(total2).to.equal(3);
+    });
+
+    it("should return correct counts", async function () {
+      expect(await dao.getFundraiserCount()).to.equal(1);
+      expect(await dao.getProposalCount()).to.equal(2);
+      expect(await dao.getUpdateCount()).to.equal(1);
+    });
   });
 
-  it("should return correct hasVoted status", async function () {
-    await dao.createProposal("Test vote", 3600);
-    
-    expect(await dao.hasVoted(1, user1.address)).to.be.false;
-    expect(await dao.hasVoted(999, user1.address)).to.be.false;
-    
-    await dao.connect(user1).vote(1, true);
-    expect(await dao.hasVoted(1, user1.address)).to.be.true;
+  describe("Search Functions", function () {
+    it("should find fundraisers by status", async function () {
+      const [activeIds, total] = await dao.getFundraisersByStatus(0, 0, 10); // ACTIVE
+      expect(activeIds).to.have.lengthOf(1);
+      expect(total).to.equal(1);
+      expect(activeIds[0]).to.equal(1);
+    });
+
+    it("should find fundraisers by creator", async function () {
+      const [creatorIds, total] = await dao.getFundraisersByCreator(owner.address, 0, 10);
+      expect(creatorIds).to.have.lengthOf(1);
+      expect(total).to.equal(1);
+      expect(creatorIds[0]).to.equal(1);
+    });
+
+    it("should find fundraisers by token", async function () {
+      const [tokenIds, total] = await dao.getFundraisersByToken(await mockToken.getAddress(), 0, 10);
+      expect(tokenIds).to.have.lengthOf(1);
+      expect(total).to.equal(1);
+      expect(tokenIds[0]).to.equal(1);
+    });
+
+    it("should find suspended fundraisers", async function () {
+      await dao.suspendFundraiser(1, "Test suspension");
+      
+      const [suspendedIds, total] = await dao.getSuspendedFundraisers(0, 10);
+      expect(suspendedIds).to.have.lengthOf(1);
+      expect(total).to.equal(1);
+      expect(suspendedIds[0]).to.equal(1);
+    });
   });
 
-  it("should return correct donation amounts", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const amount = ethers.parseUnits("500", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    expect(await dao.donationOf(1, user1.address)).to.equal(amount);
-    expect(await dao.donationOf(1, user2.address)).to.equal(0);
-    expect(await dao.donationOf(999, user1.address)).to.equal(0);
-  });
+  describe("Refund Eligibility", function () {
+    it("should check refund eligibility", async function () {
+      const donationAmount = ethers.parseUnits("500", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(1, donationAmount);
 
-  it("should return media capacity information", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const [canAdd, reason] = await dao.canAddMedia(1, 0, 5);
-    expect(canAdd).to.be.true;
-    expect(reason).to.equal("Can add media");
+      const [canRefund1, reason1] = await dao.canRefund(1, user1.address);
+      expect(canRefund1).to.be.false;
+      expect(reason1).to.equal("Not in refund period");
 
-    const [cannotAdd, limitReason] = await dao.canAddMedia(1, 0, 25);
-    expect(cannotAdd).to.be.false;
-    expect(limitReason).to.equal("Batch size too large (20 max)");
-  });
+      const [canRefund2, reason2] = await dao.canRefund(1, user2.address);
+      expect(canRefund2).to.be.false;
+      expect(reason2).to.equal("No donation found");
 
-  it("should return correct media type limits", async function () {
-    expect(await dao.getMediaTypeLimit(0)).to.equal(100);
-    expect(await dao.getMediaTypeLimit(1)).to.equal(30);
-    expect(await dao.getMediaTypeLimit(2)).to.equal(20);
-    expect(await dao.getMediaTypeLimit(3)).to.equal(50);
+      // Test suspended fundraiser refund eligibility
+      await dao.suspendFundraiser(1, "Test suspension");
+      
+      const [canRefund3, reason3] = await dao.canRefund(1, user1.address);
+      expect(canRefund3).to.be.true;
+      expect(reason3).to.equal("Suspended fundraiser - unlimited refund");
+    });
   });
 });
 
@@ -1147,337 +1533,224 @@ describe("🔍 View Functions & Data Retrieval", function () {
 // INTEGRATION TESTS
 // ==============================
 
-describe("🎯 Integration & Lifecycle Tests", function () {
-  it("should handle complete fundraising lifecycle", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const amount = ethers.parseUnits("1000", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    const creatorBalanceBefore = await mockToken.balanceOf(owner.address);
-    await dao.withdraw(1);
-    const creatorBalanceAfter = await mockToken.balanceOf(owner.address);
-    
-    expect(creatorBalanceAfter - creatorBalanceBefore).to.equal(amount);
-    
-    const [, , , , raised, , withdrawn] = await dao.getFundraiser(1);
-    expect(raised).to.equal(0);
-    expect(withdrawn).to.be.true;
+describe("🎯 Integration & Complex Scenarios", function () {
+  describe("Complete Fundraising Lifecycle", function () {
+    it("should handle successful fundraiser lifecycle", async function () {
+      // Create fundraiser
+      const creationData = {
+        title: "Integration Test Fundraiser",
+        description: "Complete lifecycle test",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: ["QmImage1"],
+        initialVideos: ["QmVideo1"],
+        metadataHash: "QmMeta123",
+        location: "Integration City"
+      };
+      await dao.createFundraiser(creationData);
+
+      // Add multimedia
+      const mediaItems = [
+        {
+          ipfsHash: "QmAdditionalImage",
+          mediaType: 0,
+          filename: "additional.jpg",
+          fileSize: 2048,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Additional image"
+        }
+      ];
+      await dao.addMultimediaToFundraiser(1, mediaItems);
+
+      // Post update with multimedia
+      const updateAttachments = [
+        {
+          ipfsHash: "QmUpdateImage",
+          mediaType: 0,
+          filename: "progress.jpg",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Progress image"
+        }
+      ];
+      await dao.postUpdateWithMultimedia(1, "Great progress update!", 1, updateAttachments);
+
+      // Make donations
+      const donation1 = ethers.parseUnits("600", 6);
+      const donation2 = ethers.parseUnits("400", 6);
+      
+      await mockToken.connect(user1).approve(await dao.getAddress(), donation1);
+      await dao.connect(user1).donate(1, donation1);
+      
+      await mockToken.connect(user2).approve(await dao.getAddress(), donation2);
+      await dao.connect(user2).donate(1, donation2);
+
+      // Check status changed to successful
+      const [, , , , , status] = await dao.getFundraiserDetails(1);
+      expect(status).to.equal(1); // SUCCESSFUL
+
+      // Withdraw funds
+      const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
+      await dao.withdrawFunds(1);
+      const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
+      
+      expect(ownerBalanceAfter).to.be.gt(ownerBalanceBefore);
+
+      // Verify final state
+      const [, , , , , finalStatus, , , , , fundsWithdrawn] = await dao.getFundraiserDetails(1);
+      expect(finalStatus).to.equal(4); // COMPLETED
+      expect(fundsWithdrawn).to.be.true;
+    });
+
+    it("should handle failed fundraiser with refunds", async function () {
+      // Create fundraiser with short duration
+      const creationData = {
+        title: "Failed Fundraiser Test",
+        description: "Will fail and need refunds",
+        endDate: Math.floor(Date.now() / 1000) + 10,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("2000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Failure City"
+      };
+      await dao.createFundraiser(creationData);
+
+      // Make partial donations
+      const donationAmount = ethers.parseUnits("800", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(1, donationAmount);
+
+      // Wait for expiration
+      await ethers.provider.send("evm_increaseTime", [15]);
+      await ethers.provider.send("evm_mine");
+
+      // Update status and initiate closure
+      await dao.updateFundraiserStatus(1);
+      await dao.initiateClosure(1);
+
+      // Process refund
+      const user1BalanceBefore = await mockToken.balanceOf(user1.address);
+      await dao.connect(user1).refund(1);
+      const user1BalanceAfter = await mockToken.balanceOf(user1.address);
+
+      expect(user1BalanceAfter).to.be.gt(user1BalanceBefore);
+    });
   });
 
-  it("should handle failed fundraiser with refunds", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 2000, 10, false);
-    
-    const amount = ethers.parseUnits("1000", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    await ethers.provider.send("evm_increaseTime", [11]);
-    await ethers.provider.send("evm_mine");
-    
-    await dao.initiateClosure(1);
-    
-    const balanceBefore = await mockToken.balanceOf(user1.address);
-    await dao.connect(user1).refund(1);
-    const balanceAfter = await mockToken.balanceOf(user1.address);
-    
-    expect(balanceAfter - balanceBefore).to.equal(amount);
+  describe("Multi-Fundraiser Management", function () {
+    it("should handle multiple fundraisers with different configurations", async function () {
+      // Create WITH_GOAL fundraiser
+      const withGoalData = {
+        title: "With Goal Fundraiser",
+        description: "Has a specific goal",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Goal City"
+      };
+      await dao.createFundraiser(withGoalData);
+
+      // Create WITHOUT_GOAL fundraiser
+      const withoutGoalData = {
+        title: "Flexible Fundraiser",
+        description: "Flexible funding",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 1,
+        token: await mockToken.getAddress(),
+        goalAmount: 0,
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Flexible City"
+      };
+      await dao.createFundraiser(withoutGoalData);
+
+      expect(await dao.getFundraiserCount()).to.equal(2);
+
+      // Test different behaviors
+      const donation = ethers.parseUnits("500", 6);
+      
+      // Donate to both
+      await mockToken.connect(user1).approve(await dao.getAddress(), donation * 2n);
+      await dao.connect(user1).batchDonate([1, 2], [donation, donation]);
+
+      // Flexible fundraiser should allow immediate withdrawal
+      const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
+      await dao.withdrawFunds(2);
+      const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
+      
+      expect(ownerBalanceAfter).to.be.gt(ownerBalanceBefore);
+
+      // Goal-based fundraiser should not be complete yet
+      const [, , , , , status1] = await dao.getFundraiserDetails(1);
+      expect(status1).to.equal(0); // Still ACTIVE
+    });
   });
 
-  it("should handle complete governance lifecycle with authorization", async function () {
-    await dao.createProposal("Should we authorize more proposers?", 3600);
-    
-    await dao.connect(user1).vote(1, true);
-    await dao.connect(user2).vote(1, true);
-    await dao.connect(user3).vote(1, false);
-    
-    const [, , yesVotes, noVotes] = await dao.getProposal(1);
-    expect(yesVotes).to.equal(2);
-    expect(noVotes).to.equal(1);
-    
-    await dao.authorizeProposer(user1.address);
-    await dao.connect(user1).createProposal("Implementation details", 3600);
-    
-    expect(await dao.getProposalCount()).to.equal(2);
-    expect(await dao.getProposalCreator(1)).to.equal(owner.address);
-    expect(await dao.getProposalCreator(2)).to.equal(user1.address);
-  });
+  describe("Authorization and Permission Management", function () {
+    it("should handle complex authorization scenarios", async function () {
+      const creationData = {
+        title: "Authorization Test",
+        description: "Testing permissions",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Auth City"
+      };
+      await dao.createFundraiser(creationData);
 
-  it("should handle mixed fundraiser types and governance", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    await dao.createFundraiser(await mockToken.getAddress(), 0, 3600, true);
-    
-    await dao.createProposal("Should we increase commission rates?", 3600);
-    
-    const amount = ethers.parseUnits("500", 18);
-    
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(1, amount);
-    
-    await mockToken.connect(user2).approve(await dao.getAddress(), amount);
-    await dao.connect(user2).donate(2, amount);
-    
-    await dao.connect(user1).vote(1, false);
-    await dao.connect(user2).vote(1, false);
-    
-    const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
-    await dao.withdraw(2);
-    const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
-    
-    expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(amount);
-    
-    const [, , yesVotes, noVotes] = await dao.getProposal(1);
-    expect(yesVotes).to.equal(0);
-    expect(noVotes).to.equal(2);
-    
-    const [, , , , raised1] = await dao.getFundraiser(1);
-    const [, , , , raised2] = await dao.getFundraiser(2);
-    
-    expect(raised1).to.equal(amount);
-    expect(raised2).to.equal(0);
-  });
+      // Authorize different roles
+      await dao.authorizeProposer(user1.address);
+      await dao.authorizeUpdater(1, user2.address);
+      await dao.authorizeMediaManager(1, user3.address);
 
-  it("should handle authorization changes during active proposals", async function () {
-    await dao.authorizeProposer(user1.address);
-    await dao.connect(user1).createProposal("User1 proposal", 3600);
-    
-    await dao.revokeProposer(user1.address);
-    
-    await expect(dao.connect(user1).createProposal("Should fail", 3600))
-      .to.be.revertedWithCustomError(dao, "NotAuthorized");
-    
-    await dao.connect(user2).vote(1, true);
-    
-    const [, , yesVotes] = await dao.getProposal(1);
-    expect(yesVotes).to.equal(1);
-  });
+      // Test authorized operations
+      await dao.connect(user1).createProposal("Authorized proposal", 3600);
+      await dao.connect(user2).postUpdate(1, "Authorized update");
+      
+      const mediaItems = [
+        {
+          ipfsHash: "QmAuthMedia",
+          mediaType: 0,
+          filename: "auth.jpg",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Authorized media"
+        }
+      ];
+      await dao.connect(user3).addMultimediaToFundraiser(1, mediaItems);
 
-  it("should handle complete multimedia fundraiser lifecycle", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    await dao.setDonationCommission(500); // 5%
-    await dao.setSuccessCommission(300);   // 3%
-    
-    const mediaItems = [
-      { ipfsHash: "QmProjectImg", mediaType: 0, filename: "project.jpg", fileSize: 2048, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Main image" },
-      { ipfsHash: "QmProjectVid", mediaType: 1, filename: "demo.mp4", fileSize: 10240, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Demo video" }
-    ];
-    await dao.addMultimediaToFundraiser(1, mediaItems);
-    
-    await dao.authorizeMediaManager(1, user1.address);
-    await dao.authorizeUpdater(1, user2.address);
-    
-    const additionalMedia = [{ ipfsHash: "QmManagerImg", mediaType: 0, filename: "manager.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Manager added" }];
-    await dao.connect(user1).addMultimediaToFundraiser(1, additionalMedia);
-    
-    const updateAttachments = [{ ipfsHash: "QmUpdateImg", mediaType: 0, filename: "progress.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Progress update" }];
-    await dao.connect(user2).postUpdateWithMultimedia(1, "Great progress!", 1, updateAttachments);
-    
-    await dao.pinUpdate(1);
-    
-    const donationAmount = ethers.parseUnits("1000", 18);
-    await mockToken.connect(user3).approve(await dao.getAddress(), donationAmount);
-    await dao.connect(user3).donate(1, donationAmount);
-    
-    // Verify standard commission was applied (5% - no multimedia bonus)
-    const [, , , , raisedAfterDonation] = await dao.getFundraiser(1);
-    const expectedAfterDonation = donationAmount * 95n / 100n; // 95% after 5% commission
-    expect(raisedAfterDonation).to.equal(expectedAfterDonation);
-    
-    const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
-    const commissionBalanceBefore = await mockToken.balanceOf(user3.address);
-    
-    await dao.withdraw(1);
-    
-    const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
-    const commissionBalanceAfter = await mockToken.balanceOf(user3.address);
-    
-    // Verify standard commission was applied (3% - no multimedia bonus)
-    const expectedWithdrawCommission = raisedAfterDonation * 3n / 100n; // 3%
-    const expectedOwnerReceived = raisedAfterDonation - expectedWithdrawCommission;
-    
-    expect(commissionBalanceAfter - commissionBalanceBefore).to.equal(expectedWithdrawCommission);
-    expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(expectedOwnerReceived);
-    
-    const summary = await dao.getFundraiserSummary(1);
-    expect(summary.mediaCount).to.equal(3);
-    expect(summary.updateCount).to.equal(1);
-    expect(summary.pinnedUpdateId).to.equal(1);
-    expect(await dao.hasMultimedia(1)).to.be.true;
-    
-    const [images, videos, audio, documents, total] = await dao.getMediaStatistics(1);
-    expect(images).to.equal(2);
-    expect(videos).to.equal(1);
-    expect(audio).to.equal(0);
-    expect(documents).to.equal(0);
-    expect(total).to.equal(3);
-    
-    const update = await dao.getUpdateWithAttachments(1);
-    expect(update.content).to.equal("Great progress!");
-    expect(update.updateType).to.equal(1);
-    expect(update.isPinned).to.be.true;
-    expect(update.attachments).to.have.lengthOf(1);
-    expect(update.attachments[0].ipfsHash).to.equal("QmUpdateImg");
-  });
-});
+      // Revoke permissions
+      await dao.revokeProposer(user1.address);
+      await dao.revokeUpdater(1, user2.address);
+      await dao.revokeMediaManager(1, user3.address);
 
-// ==============================
-// ADMINISTRATIVE FUNCTIONS
-// ==============================
-
-describe("🏛️ Administrative Functions", function () {
-  it("should handle all pause toggles correctly", async function () {
-    expect(await dao.votingPaused()).to.be.false;
-    await dao.toggleVotingPause();
-    expect(await dao.votingPaused()).to.be.true;
-    await dao.toggleVotingPause();
-    expect(await dao.votingPaused()).to.be.false;
-    
-    expect(await dao.donationsPaused()).to.be.false;
-    await dao.toggleDonationsPause();
-    expect(await dao.donationsPaused()).to.be.true;
-    await dao.toggleDonationsPause();
-    expect(await dao.donationsPaused()).to.be.false;
-    
-    expect(await dao.withdrawalsPaused()).to.be.false;
-    await dao.toggleWithdrawalsPause();
-    expect(await dao.withdrawalsPaused()).to.be.true;
-    await dao.toggleWithdrawalsPause();
-    expect(await dao.withdrawalsPaused()).to.be.false;
-    
-    expect(await dao.mediaPaused()).to.be.false;
-    await dao.toggleMediaPause();
-    expect(await dao.mediaPaused()).to.be.true;
-    await dao.toggleMediaPause();
-    expect(await dao.mediaPaused()).to.be.false;
-  });
-
-  it("should emit events for all administrative actions", async function () {
-    await expect(dao.toggleVotingPause())
-      .to.emit(dao, "VotingPauseToggled")
-      .withArgs(true);
-    
-    await expect(dao.toggleDonationsPause())
-      .to.emit(dao, "DonationsPauseToggled")
-      .withArgs(true);
-    
-    await expect(dao.toggleWithdrawalsPause())
-      .to.emit(dao, "WithdrawalsPauseToggled")
-      .withArgs(true);
-    
-    await expect(dao.toggleMediaPause())
-      .to.emit(dao, "MediaPauseToggled")
-      .withArgs(true);
-    
-    const newLimit = ethers.parseUnits("2000000", 18);
-    await expect(dao.setMaxDailyDonations(newLimit))
-      .to.emit(dao, "MaxDailyDonationsSet")
-      .withArgs(newLimit);
-  });
-
-  it("should handle commission settings comprehensively", async function () {
-    await dao.setDonationCommission(250);  // 2.5%
-    await dao.setSuccessCommission(500);   // 5%
-    await dao.setRefundCommission(150);    // 1.5%
-    
-    expect(await dao.donationCommission()).to.equal(250);
-    expect(await dao.successCommission()).to.equal(500);
-    expect(await dao.refundCommission()).to.equal(150);
-    
-    await dao.setDonationCommission(0);
-    expect(await dao.donationCommission()).to.equal(0);
-    
-    await dao.setSuccessCommission(10000);
-    expect(await dao.successCommission()).to.equal(10000);
-  });
-
-  it("should handle commission wallet changes", async function () {
-    await expect(dao.setCommissionWallet(user4.address))
-      .to.emit(dao, "CommissionWalletChanged")
-      .withArgs(user3.address, user4.address);
-    
-    await expect(dao.setCommissionWallet(ethers.ZeroAddress))
-      .to.be.revertedWithCustomError(dao, "InvalidRecipient");
-  });
-
-  it("should handle emergency withdrawals", async function () {
-    // Send some tokens to the contract
-    const amount = ethers.parseUnits("100", 18);
-    await mockToken.connect(owner).transfer(await dao.getAddress(), amount);
-    
-    await expect(dao.emergencyWithdraw(await mockToken.getAddress(), owner.address, amount))
-      .to.emit(dao, "EmergencyWithdraw")
-      .withArgs(await mockToken.getAddress(), owner.address, amount);
-    
-    // Only owner should be able to do emergency withdrawals
-    await expect(dao.connect(user1).emergencyWithdraw(await mockToken.getAddress(), user1.address, amount))
-      .to.be.reverted;
-  });
-});
-
-// ==============================
-// MULTIMEDIA GALLERY FUNCTIONS
-// ==============================
-
-describe("🖼️ Multimedia Gallery Functions", function () {
-  beforeEach(async () => {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-  });
-
-  it("should handle gallery pagination correctly", async function () {
-    const mediaItems = [];
-    for (let i = 0; i < 5; i++) {
-      mediaItems.push({
-        ipfsHash: `QmTest${i}`,
-        mediaType: 0,
-        filename: `test${i}.jpg`,
-        fileSize: 1024,
-        uploadTime: 0,
-        uploader: ethers.ZeroAddress,
-        description: `Test image ${i}`
-      });
-    }
-    
-    await dao.addMultimediaToFundraiser(1, mediaItems);
-    
-    // Test pagination
-    const [page1, total1] = await dao.getFundraiserGallery(1, 0, 3);
-    expect(page1).to.have.lengthOf(3);
-    expect(total1).to.equal(5);
-    expect(page1[0].ipfsHash).to.equal("QmTest0");
-    
-    const [page2, total2] = await dao.getFundraiserGallery(1, 3, 3);
-    expect(page2).to.have.lengthOf(2);
-    expect(total2).to.equal(5);
-    expect(page2[0].ipfsHash).to.equal("QmTest3");
-    
-    // Test out of bounds
-    const [empty, total3] = await dao.getFundraiserGallery(1, 10, 3);
-    expect(empty).to.have.lengthOf(0);
-    expect(total3).to.equal(5);
-  });
-
-  it("should handle donor pagination correctly", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 5000, 3600, false);
-    
-    // Add multiple donors
-    const amount = ethers.parseUnits("100", 18);
-    await mockToken.connect(user1).approve(await dao.getAddress(), amount);
-    await dao.connect(user1).donate(2, amount);
-    
-    await mockToken.connect(user2).approve(await dao.getAddress(), amount);
-    await dao.connect(user2).donate(2, amount);
-    
-    await mockToken.connect(user4).approve(await dao.getAddress(), amount);
-    await dao.connect(user4).donate(2, amount);
-    
-    const [donors, total] = await dao.getDonorsPaginated(2, 0, 2);
-    expect(donors).to.have.lengthOf(2);
-    expect(total).to.equal(3);
-    
-    const donorsCount = await dao.getDonorsCount(2);
-    expect(donorsCount).to.equal(3);
+      // Test revoked operations fail
+      await expect(dao.connect(user1).createProposal("Should fail", 3600))
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
+      
+      await expect(dao.connect(user2).postUpdate(1, "Should fail"))
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
+      
+      await expect(dao.connect(user3).addMultimediaToFundraiser(1, mediaItems))
+        .to.be.revertedWithCustomError(dao, "UnauthorizedAccess");
+    });
   });
 });
 
@@ -1485,102 +1758,276 @@ describe("🖼️ Multimedia Gallery Functions", function () {
 // ERROR HANDLING AND EDGE CASES
 // ==============================
 
-describe("⚠️ Error Handling and Edge Cases", function () {
-  it("should handle invalid fundraiser IDs gracefully", async function () {
-    await expect(dao.addMultimediaToFundraiser(999, []))
-      .to.be.revertedWithCustomError(dao, "InvalidUpdateId");
-    
-    await expect(dao.postUpdate(999, "test"))
-      .to.be.revertedWithCustomError(dao, "InvalidUpdateId");
-    
-    await expect(dao.authorizeUpdater(999, user1.address))
-      .to.be.revertedWithCustomError(dao, "InvalidUpdateId");
+describe("⚠️ Error Handling & Edge Cases", function () {
+  describe("Invalid Operations", function () {
+    it("should handle operations on non-existent entities", async function () {
+      await expect(dao.getFundraiserDetails(999))
+        .to.be.revertedWithCustomError(dao, "FundraiserNotFound");
+
+      await expect(dao.getProposal(999))
+        .to.be.revertedWith("Invalid proposal");
+
+      await expect(dao.getUpdate(999))
+        .to.be.revertedWith("Invalid update");
+
+      await expect(dao.vote(999, true))
+        .to.be.revertedWith("Invalid proposal");
+
+      await expect(dao.donate(999, ethers.parseUnits("100", 6)))
+        .to.be.revertedWithCustomError(dao, "FundraiserNotFound");
+    });
+
+    it("should handle zero amounts and empty data", async function () {
+      const creationData = {
+        title: "Zero Test",
+        description: "Testing zeros",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Zero City"
+      };
+      await dao.createFundraiser(creationData);
+
+      await expect(dao.connect(user1).donate(1, 0))
+        .to.be.revertedWithCustomError(dao, "InsufficientAmount");
+
+      await expect(dao.postUpdate(1, ""))
+        .to.be.revertedWith("Invalid content");
+
+      const emptyMediaItems = [
+        {
+          ipfsHash: "",
+          mediaType: 0,
+          filename: "test.jpg",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Empty hash"
+        }
+      ];
+
+      await expect(dao.addMultimediaToFundraiser(1, emptyMediaItems))
+        .to.be.revertedWith("Empty IPFS hash");
+    });
+
+    it("should handle boundary conditions", async function () {
+      // Test maximum values
+      const creationData = {
+        title: "a".repeat(100), // Maximum title length
+        description: "a".repeat(2000), // Maximum description length
+        endDate: Math.floor(Date.now() / 1000) + (365 * 24 * 3600), // Maximum duration
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: Array(10).fill("QmTest"), // Maximum initial images
+        initialVideos: ["QmVideo"], // Maximum initial videos
+        metadataHash: "a".repeat(100), // Maximum metadata hash
+        location: "a".repeat(200) // Maximum location length
+      };
+
+      await dao.createFundraiser(creationData);
+
+      // Test beyond maximum values
+      const tooLongData = {
+        title: "a".repeat(101),
+        description: "Valid description",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Valid location"
+      };
+
+      await expect(dao.createFundraiser(tooLongData))
+        .to.be.revertedWith("Invalid title");
+    });
   });
 
-  it("should handle empty media arrays", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    // Empty array should not emit MultimediaActivated
-    await dao.addMultimediaToFundraiser(1, []);
-    expect(await dao.hasMultimedia(1)).to.be.false;
-  });
+  describe("State Consistency", function () {
+    it("should maintain consistent state during complex operations", async function () {
+      const creationData = {
+        title: "Consistency Test",
+        description: "Testing state consistency",
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: 0,
+        token: await mockToken.getAddress(),
+        goalAmount: ethers.parseUnits("1000", 6),
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: "Consistent City"
+      };
+      await dao.createFundraiser(creationData);
 
-  it("should handle update content validation", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const longContent = "a".repeat(1001);
-    await expect(dao.postUpdate(1, longContent))
-      .to.be.revertedWithCustomError(dao, "UpdateTooLong");
-    
-    const tooManyAttachments = Array(11).fill().map((_, i) => ({
-      ipfsHash: `QmAttach${i}`,
-      mediaType: 0,
-      filename: `attach${i}.jpg`,
-      fileSize: 1024,
-      uploadTime: 0,
-      uploader: ethers.ZeroAddress,
-      description: `Attachment ${i}`
-    }));
-    
-    await expect(dao.postUpdateWithMultimedia(1, "test", 0, tooManyAttachments))
-      .to.be.revertedWithCustomError(dao, "MediaLimitExceeded");
-  });
+      // Multiple operations that should maintain consistency
+      const donationAmount = ethers.parseUnits("300", 6);
+      await mockToken.connect(user1).approve(await dao.getAddress(), donationAmount);
+      await dao.connect(user1).donate(1, donationAmount);
 
-  it("should handle pin/unpin edge cases", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    // Try to pin non-existent update
-    await expect(dao.pinUpdate(999))
-      .to.be.revertedWith("Invalid update");
-    
-    // Try to unpin when nothing is pinned
-    await expect(dao.unpinUpdate(1))
-      .to.be.revertedWith("No pinned update");
-  });
+      await dao.postUpdate(1, "First update");
+      
+      const mediaItems = [
+        {
+          ipfsHash: "QmConsistency",
+          mediaType: 0,
+          filename: "consistency.jpg",
+          fileSize: 1024,
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: "Consistency test"
+        }
+      ];
+      await dao.addMultimediaToFundraiser(1, mediaItems);
 
-  it("should validate media removal bounds", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    const mediaItems = [
-      { ipfsHash: "QmTest", mediaType: 0, filename: "test.jpg", fileSize: 1024, uploadTime: 0, uploader: ethers.ZeroAddress, description: "Test" }
-    ];
-    await dao.addMultimediaToFundraiser(1, mediaItems);
-    
-    // Try to remove invalid index
-    await expect(dao.removeMediaFromFundraiser(1, 5))
-      .to.be.revertedWith("Invalid media index");
+      // Verify state consistency
+      const [raised] = await dao.getFundraiserProgress(1);
+      expect(raised).to.equal(donationAmount);
+
+      const updateCount = await dao.getUpdateCount();
+      expect(updateCount).to.equal(1);
+
+      const [, galleryTotal] = await dao.getFundraiserGallery(1, 0, 10);
+      expect(galleryTotal).to.equal(1);
+    });
+
+    it("should handle batch operations correctly", async function () {
+      // Create multiple fundraisers for batch testing
+      for (let i = 0; i < 3; i++) {
+        const creationData = {
+          title: `Batch Test ${i + 1}`,
+          description: `Batch test fundraiser ${i + 1}`,
+          endDate: Math.floor(Date.now() / 1000) + 7200,
+          fundraiserType: 0,
+          token: await mockToken.getAddress(),
+          goalAmount: ethers.parseUnits("500", 6),
+          initialImages: [],
+          initialVideos: [],
+          metadataHash: "",
+          location: `Batch City ${i + 1}`
+        };
+        await dao.createFundraiser(creationData);
+      }
+
+      // Batch update statuses
+      await dao.batchUpdateStatuses([1, 2, 3]);
+
+      // Verify all are still active
+      for (let i = 1; i <= 3; i++) {
+        const [, , , , , status] = await dao.getFundraiserDetails(i);
+        expect(status).to.equal(0); // ACTIVE
+      }
+    });
   });
 });
 
 // ==============================
-// UTILITY AND HELPER TESTS
+// PERFORMANCE AND GAS TESTS
 // ==============================
 
-describe("🔧 Utility Functions", function () {
-  it("should return correct counts", async function () {
-    await dao.createProposal("Test 1", 3600);
-    await dao.createProposal("Test 2", 3600);
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    await dao.postUpdate(1, "Update 1");
-    
-    expect(await dao.getProposalCount()).to.equal(2);
-    expect(await dao.getFundraiserCount()).to.equal(1);
-    expect(await dao.getUpdateCount()).to.equal(1);
+describe("⚡ Performance & Gas Optimization", function () {
+  it("should handle large numbers of entities efficiently", async function () {
+    // Create multiple proposals
+    for (let i = 0; i < 5; i++) {
+      await dao.createProposal(`Proposal ${i + 1}`, 3600);
+    }
+
+    // Create multiple fundraisers
+    for (let i = 0; i < 5; i++) {
+      const creationData = {
+        title: `Performance Test ${i + 1}`,
+        description: `Performance test fundraiser ${i + 1}`,
+        endDate: Math.floor(Date.now() / 1000) + 7200,
+        fundraiserType: i % 2, // Alternate types
+        token: await mockToken.getAddress(),
+        goalAmount: i % 2 === 0 ? ethers.parseUnits("1000", 6) : 0,
+        initialImages: [],
+        initialVideos: [],
+        metadataHash: "",
+        location: `Performance City ${i + 1}`
+      };
+      await dao.createFundraiser(creationData);
+    }
+
+    // Verify counts
+    expect(await dao.getProposalCount()).to.equal(5);
+    expect(await dao.getFundraiserCount()).to.equal(5);
+
+    // Test batch operations
+    const fundraiserIds = [1, 2, 3];
+    const amounts = [
+      ethers.parseUnits("100", 6),
+      ethers.parseUnits("200", 6),
+      ethers.parseUnits("300", 6)
+    ];
+    const totalAmount = amounts.reduce((a, b) => a + b, 0n);
+
+    await mockToken.connect(user1).approve(await dao.getAddress(), totalAmount);
+    await dao.connect(user1).batchDonate(fundraiserIds, amounts);
+
+    // Verify donations were processed correctly
+    for (let i = 0; i < fundraiserIds.length; i++) {
+      const [raised] = await dao.getFundraiserProgress(fundraiserIds[i]);
+      expect(raised).to.equal(amounts[i]);
+    }
   });
 
-  it("should handle authorization checks correctly", async function () {
-    await dao.createFundraiser(await mockToken.getAddress(), 1000, 3600, false);
-    
-    // Initial state
-    expect(await dao.canManageMedia(1, owner.address)).to.be.true;
-    expect(await dao.canManageMedia(1, user1.address)).to.be.false;
-    
-    // After authorization
-    await dao.authorizeUpdater(1, user1.address);
-    expect(await dao.canManageMedia(1, user1.address)).to.be.true;
-    
-    await dao.authorizeMediaManager(1, user2.address);
-    expect(await dao.canManageMedia(1, user2.address)).to.be.true;
+  it("should handle media operations efficiently", async function () {
+    const creationData = {
+      title: "Media Performance Test",
+      description: "Testing media performance",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Media City"
+    };
+    await dao.createFundraiser(creationData);
+
+    // Add multiple media items in batches
+    const batchSize = 10;
+    for (let batch = 0; batch < 3; batch++) {
+      const mediaItems = [];
+      for (let i = 0; i < batchSize; i++) {
+        mediaItems.push({
+          ipfsHash: `QmMedia${batch}_${i}`,
+          mediaType: i % 4, // Cycle through media types
+          filename: `media${batch}_${i}.jpg`,
+          fileSize: 1024 * (i + 1),
+          uploadTime: 0,
+          uploader: ethers.ZeroAddress,
+          description: `Media item ${batch}_${i}`
+        });
+      }
+      await dao.addMultimediaToFundraiser(1, mediaItems);
+    }
+
+    const [, total] = await dao.getFundraiserGallery(1, 0, 100);
+    expect(total).to.equal(30);
+  });
+});
+
+// ==============================
+// CLEANUP AND UTILITIES
+// ==============================
+
+describe("🧹 Utility Functions", function () {
+  it("should provide correct utility information", async function () {
+    // Test media type limits
+    expect(await dao.getMediaTypeLimit(0)).to.equal(100); // Images
+    expect(await dao.getMediaTypeLimit(1)).to.equal(30);  // Videos
+    expect(await dao.getMediaTypeLimit(2)).to.equal(20);  // Audio
+    expect(await dao.getMediaTypeLimit(3)).to.equal(50);  // Documents
+    expect(await dao.getMediaTypeLimit(4)).to.equal(0);   // Invalid type
   });
 
   it("should handle contract receive function", async function () {
@@ -1590,8 +2037,37 @@ describe("🔧 Utility Functions", function () {
       value: ethers.parseEther("1")
     });
     await tx.wait();
-    
+
     const balance = await ethers.provider.getBalance(await dao.getAddress());
     expect(balance).to.equal(ethers.parseEther("1"));
+  });
+
+  it("should provide correct authorization checks", async function () {
+    const creationData = {
+      title: "Auth Check Test",
+      description: "Testing auth checks",
+      endDate: Math.floor(Date.now() / 1000) + 7200,
+      fundraiserType: 0,
+      token: await mockToken.getAddress(),
+      goalAmount: ethers.parseUnits("1000", 6),
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "Auth City"
+    };
+    await dao.createFundraiser(creationData);
+
+    // Initial state
+    expect(await dao.canPropose(owner.address)).to.be.true;
+    expect(await dao.canPropose(user1.address)).to.be.false;
+    expect(await dao.canUpdate(1, owner.address)).to.be.true;
+    expect(await dao.canUpdate(1, user1.address)).to.be.false;
+
+    // After authorization
+    await dao.authorizeProposer(user1.address);
+    await dao.authorizeUpdater(1, user1.address);
+
+    expect(await dao.canPropose(user1.address)).to.be.true;
+    expect(await dao.canUpdate(1, user1.address)).to.be.true;
   });
 });

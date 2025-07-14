@@ -37,7 +37,8 @@ contract ReentrancyAttackMock {
         hasAttacked = false; // Reset attack flag
 
         if (_attackWithdraw) {
-            dao.withdraw(_fundraiserId);
+            // POPRAWKA: Zmiana z dao.withdraw na dao.withdrawFunds
+            dao.withdrawFunds(_fundraiserId);
         } else {
             dao.refund(_fundraiserId);
         }
@@ -84,7 +85,8 @@ contract ReentrancyAttackMock {
         require(msg.sender == address(this), "Internal call only");
         
         if (attackWithdraw) {
-            dao.withdraw(targetFundraiser);
+            // POPRAWKA: Zmiana z dao.withdraw na dao.withdrawFunds
+            dao.withdrawFunds(targetFundraiser);
         } else {
             dao.refund(targetFundraiser);
         }

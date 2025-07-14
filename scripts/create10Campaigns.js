@@ -24,7 +24,7 @@ async function main() {
   console.log("💰 Account balance:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)), "ETH\n");
 
   // Contract addresses
-  const DAO_ADDRESS = "0xec0d7574E6f4A269Eea62011Af02b85D86d4c171";
+  const DAO_ADDRESS = "0x408589993d926C71292764843eeF0D77160BfD39";
   
   // Get contract instance
   const dao = new ethers.Contract(DAO_ADDRESS, DAO_ABI, deployer);

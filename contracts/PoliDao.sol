@@ -2,82 +2,145 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/Multicall.sol";
 
-/// @title PoliDAO v3.5 - Enhanced Governance & Fundraising Platform with Multimedia
-/// @notice Smart contract with authorization-only governance, ERC20 fundraising, and multimedia support
-/// @dev All original functionalities preserved + multimedia support added after fundraiser creation
-/// @author PoliDAO Team
-/// @custom:security-contact security@polidao.io
-contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
-    // ========== CUSTOM ERRORS ==========
+/// @title PoliDAO - Ultra Modern Fundraising Platform (Gas Optimized & Security Enhanced)
+/// @notice Supports EIP-2612 Permit, Account Abstraction, Multicall, Suspension & Location
+contract PoliDAO is Ownable, Pausable, EIP712, Multicall {
+    using ECDSA for bytes32;
+
+    // ========== CUSTOM ERRORS (Gas Optimization) ==========
     
-    error NotAuthorized();
-    error InvalidDuration(uint256 duration);
-    error QuestionTooLong(uint256 length);
-    error EmptyQuestion();
-    error InvalidToken(address token);
-    error NotAContract(address token);
-    error DailyLimitExceeded(uint256 requested, uint256 limit);
-    error InvalidRecipient(address recipient);
-    error TransferFailed();
-    error PaginationError(uint256 offset, uint256 total);
-    error UpdateTooLong(uint256 length);
-    error EmptyUpdate();
-    error InvalidUpdateId(uint256 updateId);
-    error NotFundraiserCreator();
-    error InvalidIPFSHash(string hash);
-    error MediaLimitExceeded(uint256 provided, uint256 limit);
+    error FundraiserNotFound(uint256 id);
+    error InsufficientAmount(uint256 provided, uint256 required);
+    error UnauthorizedAccess(address caller, address required);
+    error FundraiserSuspendedError(uint256 id); // Renamed to avoid conflict with event
+    error DeadlineExpired(uint256 deadline, uint256 current);
+    error InvalidTokenAddress(address token);
+    error AlreadyRefunded(address donor, uint256 fundraiserId);
+    error InvalidFundraiserStatus(uint8 current, uint8 required);
+    error DailyLimitExceeded(uint256 amount, uint256 limit);
+    error ArrayLengthMismatch(uint256 length1, uint256 length2);
+    error BatchAlreadyExecuted(bytes32 batchId);
     error InvalidMediaType(uint8 mediaType);
+    error MediaLimitExceeded(uint256 current, uint256 limit);
+    error ReentrantCall();
 
-    // ========== CONSTANTS ==========
+    // ========== OPTIMIZED CONSTANTS ==========
+    
+    bytes32 private constant DONATION_TYPEHASH = keccak256(
+        "Donation(address donor,uint256 fundraiserId,uint256 amount,uint256 nonce,uint256 deadline)"
+    );
     
     uint256 public constant MAX_DURATION = 365 days;
+    uint256 public constant MIN_EXTENSION_NOTICE = 7 days;
+    uint256 public constant EXTENSION_FEE = 20e6; // $20 USDC
+    uint256 public constant MAX_EXTENSION_DAYS = 90;
+    uint256 public constant FAILED_FUNDRAISER_CLAIM_PERIOD = 7 days;
     uint256 public constant MAX_QUESTION_LENGTH = 500;
     uint256 public constant MAX_UPDATE_LENGTH = 1000;
+    uint256 public constant MAX_TITLE_LENGTH = 100;
+    uint256 public constant MAX_DESCRIPTION_LENGTH = 2000;
     uint256 public constant MAX_IPFS_HASH_LENGTH = 100;
-    uint256 public constant RECLAIM_PERIOD = 14 days;
-    uint256 public constant MAX_DONORS_BATCH = 100;
-    uint256 public constant MAX_UPDATES_BATCH = 50;
-    uint256 private constant PRECISION = 10_000; // For basis points calculations
-    uint256 private constant MAX_COMMISSION = 10_000; // 100% in basis points
+    uint256 public constant MAX_LOCATION_LENGTH = 200;
+    uint256 private constant PRECISION = 10_000;
+    uint256 private constant MAX_COMMISSION = 10_000;
     
-    // MULTIMEDIA LIMITS (FREE for everyone)
-    uint256 public constant MAX_MEDIA_BATCH = 20;              // 20 files at once
-    uint256 public constant MAX_TOTAL_MEDIA = 200;             // 200 total per fundraiser
-    uint256 public constant MAX_IMAGES = 100;                  // 100 images
-    uint256 public constant MAX_VIDEOS = 30;                   // 30 videos 
-    uint256 public constant MAX_AUDIO = 20;                    // 20 audio files
-    uint256 public constant MAX_DOCUMENTS = 50;                // 50 documents
+    // MULTIMEDIA LIMITS
+    uint256 public constant MAX_INITIAL_IMAGES = 10;
+    uint256 public constant MAX_INITIAL_VIDEOS = 1;
+    uint256 public constant MAX_MEDIA_BATCH = 20;
+    uint256 public constant MAX_TOTAL_MEDIA = 200;
+    uint256 public constant MAX_MEDIA_PER_UPDATE = 5;
 
-    // ========== MULTIMEDIA STRUCTURES ==========
+    // REENTRANCY GUARD OPTIMIZATION
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
 
-    /// @notice Media item structure for IPFS integration
-    struct MediaItem {
-        string ipfsHash;        // IPFS file hash
-        uint8 mediaType;        // 0=image, 1=video, 2=audio, 3=document
-        string filename;        // Original filename
-        uint256 fileSize;       // Size in bytes
-        uint256 uploadTime;     // When added
-        address uploader;       // Who added it
-        string description;     // File description
+    // ========== PACKED STRUCTURES (Gas Optimization) ==========
+
+    enum FundraiserType { WITH_GOAL, WITHOUT_GOAL }
+    enum FundraiserStatus { 
+        ACTIVE, 
+        SUCCESSFUL, 
+        FAILED, 
+        REFUND_PERIOD, 
+        COMPLETED, 
+        SUSPENDED
     }
 
-    /// @notice Update with multimedia support
+    // Packed struct to save gas
+    struct PackedFundraiserData {
+        uint128 goalAmount;      // 16 bytes
+        uint128 raisedAmount;    // 16 bytes
+        uint64 endDate;          // 8 bytes
+        uint64 originalEndDate;  // 8 bytes
+        uint32 id;               // 4 bytes
+        uint32 suspensionTime;   // 4 bytes (sufficient for timestamp delta)
+        uint16 extensionCount;   // 2 bytes
+        uint8 fundraiserType;    // 1 byte
+        uint8 status;            // 1 byte
+        bool isSuspended;        // 1 byte
+        bool fundsWithdrawn;     // 1 byte
+        // Total: 62 bytes (fits in 2 storage slots)
+    }
+
+    struct MediaItem {
+        string ipfsHash;
+        uint8 mediaType;
+        string filename;
+        uint256 fileSize;
+        uint256 uploadTime;
+        address uploader;
+        string description;
+    }
+
+    struct FundraiserCreationData {
+        string title;
+        string description;
+        uint256 endDate;
+        FundraiserType fundraiserType;
+        address token;
+        uint256 goalAmount;
+        string[] initialImages;
+        string[] initialVideos;
+        string metadataHash;
+        string location;
+    }
+
+    struct Fundraiser {
+        PackedFundraiserData packed;
+        address creator;
+        address token;
+        string title;
+        string description;
+        string location;
+        string metadataHash;
+        string suspensionReason;
+        uint256 refundDeadline;
+        MediaItem[] gallery;
+        address[] donors;
+        mapping(address => uint256) donations;
+        mapping(address => bool) hasRefunded;
+        uint256[] updateIds;
+        uint256 pinnedUpdateId;
+    }
+
     struct FundraiserUpdate {
         uint256 id;
         uint256 fundraiserId;
         address author;
-        string content;         // Update content
+        string content;
+        MediaItem[] attachments;
         uint256 timestamp;
+        uint8 updateType;
         bool isPinned;
-        uint8 updateType;       // 0=general, 1=milestone, 2=urgent, 3=final
-        MediaItem[] attachments; // Attached multimedia
     }
-
-    // ========== ENHANCED STRUCTURES ==========
 
     struct Proposal {
         uint256 id;
@@ -86,60 +149,16 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         uint256 noVotes;
         uint256 endTime;
         address creator;
-        string metadataHash;    // IPFS hash for additional data
+        string metadataHash;
         mapping(address => bool) hasVoted;
     }
 
-    struct ProposalSummary {
-        uint256 id;
-        string question;
-        uint256 yesVotes;
-        uint256 noVotes;
-        uint256 endTime;
-        address creator;
-        string metadataHash;
-    }
-
-    struct Fundraiser {
-        uint256 id;
-        address creator;
-        address token;
-        uint256 target;
-        uint256 raised;
-        uint256 endTime;
-        bool withdrawn;
-        bool isFlexible;
-        uint256 reclaimDeadline;
-        bool closureInitiated;
-        string metadataHash;    // IPFS hash for metadata
-        MediaItem[] gallery;    // Multimedia gallery
-        mapping(address => uint256) donations;
-        mapping(address => bool) refunded;
-        address[] donors;
-        uint256[] updateIds;    // Update IDs
-        uint256 pinnedUpdateId; // Pinned update ID
-    }
-
-    struct FundraiserSummary {
-        uint256 id;
-        address creator;
-        address token;
-        uint256 target;
-        uint256 raised;
-        uint256 endTime;
-        bool isFlexible;
-        bool closureInitiated;
-        uint256 updateCount;
-        uint256 pinnedUpdateId;
-        uint256 mediaCount;
-        string metadataHash;
-    }
-
-    // ========== STORAGE ==========
+    // ========== OPTIMIZED STORAGE ==========
 
     uint256 public proposalCount;
     uint256 public fundraiserCount;
     uint256 public updateCount;
+    uint256 private _status = _NOT_ENTERED; // Reentrancy guard
 
     mapping(uint256 => Proposal) private proposals;
     mapping(uint256 => Fundraiser) private fundraisers;
@@ -147,6 +166,12 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
 
     uint256[] private proposalIds;
     uint256[] private fundraiserIds;
+
+    // Meta-transaction support
+    mapping(address => uint256) public nonces;
+    
+    // Batch operations tracking
+    mapping(bytes32 => bool) public executedBatches;
 
     // Media tracking per fundraiser [images, videos, audio, documents]
     mapping(uint256 => uint256[4]) public mediaTypeCounts;
@@ -156,24 +181,27 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     address[] public whitelistedTokens;
     mapping(address => uint256) private tokenIndex;
 
-    // Commission system (ONLY standard commissions - NO multimedia bonus)
-    uint256 public donationCommission;      // Donation commission
-    uint256 public successCommission;       // Withdrawal commission
-    uint256 public refundCommission;        // Refund commission
+    // Commission system
+    uint256 public donationCommission;
+    uint256 public successCommission;
+    uint256 public refundCommission;
     address public commissionWallet;
+    address public feeToken;
 
     // Refund tracking
     mapping(address => mapping(uint256 => uint256)) public monthlyRefundCount;
 
-    // Circuit breaker - ✅ FIX: Better number formatting
+    // Circuit breaker with user limits
     uint256 public maxDailyDonations = 1_000_000 * 10**18;
+    uint256 public maxUserDailyDonation = 100_000 * 10**6; // $100k USDC per user
     mapping(uint256 => uint256) public dailyDonationCount;
+    mapping(address => mapping(uint256 => uint256)) public userDailyDonations;
 
-    // Selective pausing - ✅ FIX: Explicit initialization
+    // Selective pausing
     bool public votingPaused = false;
     bool public donationsPaused = false;
     bool public withdrawalsPaused = false;
-    bool public updatesPaused = false;      // ✅ FIX: Initialize to false
+    bool public updatesPaused = false;
     bool public mediaPaused = false;
 
     // Authorization system
@@ -181,123 +209,115 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
     mapping(uint256 => mapping(address => bool)) public authorizedUpdaters;
     mapping(uint256 => mapping(address => bool)) public authorizedMediaManagers;
 
-    // Multimedia flags
-    mapping(uint256 => bool) public hasMultimedia;
+    // ========== OPTIMIZED EVENTS ==========
 
-    // ========== EVENTS ==========
-
-    // Original events
-    event ProposalCreated(uint256 indexed id, string question, uint256 endTime, address indexed creator);
-    event Voted(address indexed voter, uint256 indexed proposalId, bool support);
-    event FundraiserCreated(uint256 indexed id, address indexed creator, address token, uint256 target, uint256 endTime, bool isFlexible);
-    event DonationMade(uint256 indexed id, address indexed donor, uint256 amount);
-    event DonationRefunded(uint256 indexed id, address indexed donor, uint256 amountReturned, uint256 commissionTaken);
-    event FundsWithdrawn(uint256 indexed id, address indexed creator, uint256 amountAfterCommission);
-    event TokenWhitelisted(address indexed token);
-    event TokenRemoved(address indexed token);
-    event ClosureInitiated(uint256 indexed id, uint256 reclaimDeadline);
-    event DonationCommissionSet(uint256 newCommission);
-    event SuccessCommissionSet(uint256 newCommission);
-    event RefundCommissionSet(uint256 newCommission);
-    event MaxDailyDonationsSet(uint256 newLimit);
-    event VotingPauseToggled(bool paused);
-    event DonationsPauseToggled(bool paused);
-    event WithdrawalsPauseToggled(bool paused);
-    event ProposerAuthorized(address indexed proposer);
-    event ProposerRevoked(address indexed proposer);
-    event CommissionWalletChanged(address indexed oldWallet, address indexed newWallet);
-    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
+    event FundraiserCreated(uint256 indexed id, address indexed creator, address indexed token, 
+                           string title, uint8 fundraiserType, uint256 goalAmount, uint256 endDate, string location);
+    event FundraiserExtended(uint256 indexed id, uint256 newEndDate, uint256 extensionDays, uint256 feePaid);
+    event FundraiserStatusChanged(uint256 indexed id, uint8 oldStatus, uint8 newStatus);
     
-    // New multimedia events
+    event FundraiserSuspended(uint256 indexed id, address indexed suspendedBy, string reason, uint256 timestamp);
+    event FundraiserUnsuspended(uint256 indexed id, address indexed unsuspendedBy, uint256 timestamp);
+    event LocationUpdated(uint256 indexed id, string oldLocation, string newLocation);
+    
+    // Optimized donation events with indexed parameters
+    event DonationMade(uint256 indexed fundraiserId, address indexed donor, address indexed token, uint256 amount, uint256 netAmount);
+    event DonationMadeWithPermit(uint256 indexed fundraiserId, address indexed donor, address indexed token, uint256 amount);
+    event DonationMadeWithMetaTx(uint256 indexed fundraiserId, address indexed donor, address indexed relayer, uint256 amount);
+    event BatchDonationExecuted(bytes32 indexed batchId, address indexed donor, uint256 totalAmount);
+    
+    event DonationRefunded(uint256 indexed fundraiserId, address indexed donor, uint256 amountReturned, uint256 commissionTaken);
+    event FundsWithdrawn(uint256 indexed fundraiserId, address indexed creator, uint256 amountAfterCommission);
+    event ClosureInitiated(uint256 indexed fundraiserId, uint256 reclaimDeadline);
+    
     event UpdatePosted(uint256 indexed updateId, uint256 indexed fundraiserId, address indexed author, string content, uint8 updateType);
     event UpdatePinned(uint256 indexed updateId, uint256 indexed fundraiserId);
     event UpdateUnpinned(uint256 indexed fundraiserId, uint256 indexed oldUpdateId);
     event MediaAdded(uint256 indexed fundraiserId, string ipfsHash, uint8 mediaType, string filename, address uploader);
     event MediaRemoved(uint256 indexed fundraiserId, uint256 mediaIndex, string ipfsHash);
     event MultimediaActivated(uint256 indexed fundraiserId);
+    
+    event TokenWhitelisted(address indexed token);
+    event TokenRemoved(address indexed token);
+    event DonationCommissionSet(uint256 newCommission);
+    event SuccessCommissionSet(uint256 newCommission);
+    event RefundCommissionSet(uint256 newCommission);
+    event CommissionWalletChanged(address indexed oldWallet, address indexed newWallet);
+    event FeeTokenSet(address indexed oldToken, address indexed newToken);
+    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
+    
+    event ProposalCreated(uint256 indexed id, string question, uint256 endTime, address indexed creator);
+    event Voted(address indexed voter, uint256 indexed proposalId, bool support);
+    event ProposerAuthorized(address indexed proposer);
+    event ProposerRevoked(address indexed proposer);
     event UpdaterAuthorized(uint256 indexed fundraiserId, address indexed updater);
     event UpdaterRevoked(uint256 indexed fundraiserId, address indexed updater);
     event MediaManagerAuthorized(uint256 indexed fundraiserId, address indexed manager);
     event MediaManagerRevoked(uint256 indexed fundraiserId, address indexed manager);
-    event MediaPauseToggled(bool paused);
 
-    // ========== MODIFIERS ==========
+    // ========== OPTIMIZED MODIFIERS ==========
 
-    modifier whenVotingNotPaused() {
-        require(!votingPaused, "Voting paused");
-        _;
+    modifier whenVotingNotPaused() { 
+        if (votingPaused) revert("Voting paused");
+        _; 
     }
-
-    modifier whenDonationsNotPaused() {
-        require(!donationsPaused, "Donations paused");
-        _;
+    
+    modifier whenDonationsNotPaused() { 
+        if (donationsPaused) revert("Donations paused");
+        _; 
     }
-
-    modifier whenWithdrawalsNotPaused() {
-        require(!withdrawalsPaused, "Withdrawals paused");
-        _;
+    
+    modifier whenWithdrawalsNotPaused() { 
+        if (withdrawalsPaused) revert("Withdrawals paused");
+        _; 
     }
-
-    modifier whenUpdatesNotPaused() {
-        require(!updatesPaused, "Updates paused");
-        _;
+    
+    modifier whenUpdatesNotPaused() { 
+        if (updatesPaused) revert("Updates paused");
+        _; 
     }
-
-    modifier whenMediaNotPaused() {
-        require(!mediaPaused, "Media operations paused");
-        _;
+    
+    modifier whenMediaNotPaused() { 
+        if (mediaPaused) revert("Media operations paused");
+        _; 
     }
 
     modifier onlyAuthorizedProposer() {
         if (msg.sender != owner() && !authorizedProposers[msg.sender]) {
-            revert NotAuthorized();
+            revert UnauthorizedAccess(msg.sender, owner());
         }
         _;
     }
 
     modifier onlyFundraiserCreatorOrAuthorized(uint256 fundraiserId) {
-        if (fundraiserId > fundraiserCount || fundraiserId == 0) {
-            revert InvalidUpdateId(fundraiserId);
+        if (fundraiserId == 0 || fundraiserId > fundraiserCount) {
+            revert FundraiserNotFound(fundraiserId);
         }
         
         Fundraiser storage f = fundraisers[fundraiserId];
         if (msg.sender != f.creator && !authorizedUpdaters[fundraiserId][msg.sender]) {
-            revert NotFundraiserCreator();
+            revert UnauthorizedAccess(msg.sender, f.creator);
         }
         _;
     }
 
     modifier onlyMediaManager(uint256 fundraiserId) {
-        if (fundraiserId > fundraiserCount || fundraiserId == 0) {
-            revert InvalidUpdateId(fundraiserId);
+        if (fundraiserId == 0 || fundraiserId > fundraiserCount) {
+            revert FundraiserNotFound(fundraiserId);
         }
         
         Fundraiser storage f = fundraisers[fundraiserId];
         if (msg.sender != f.creator && 
             !authorizedUpdaters[fundraiserId][msg.sender] && 
             !authorizedMediaManagers[fundraiserId][msg.sender]) {
-            revert NotFundraiserCreator();
+            revert UnauthorizedAccess(msg.sender, f.creator);
         }
         _;
     }
 
     modifier validFundraiserId(uint256 fundraiserId) {
-        if (fundraiserId > fundraiserCount || fundraiserId == 0) {
-            revert InvalidUpdateId(fundraiserId);
-        }
-        _;
-    }
-
-    modifier validIPFSHash(string memory hash) {
-        if (bytes(hash).length > MAX_IPFS_HASH_LENGTH) {
-            revert InvalidIPFSHash(hash);
-        }
-        _;
-    }
-
-    modifier validMediaType(uint8 mediaType) {
-        if (mediaType > 3) {
-            revert InvalidMediaType(mediaType);
+        if (fundraiserId == 0 || fundraiserId > fundraiserCount) {
+            revert FundraiserNotFound(fundraiserId);
         }
         _;
     }
@@ -306,219 +326,882 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         if (amount > maxDailyDonations / 10) {
             uint256 today = block.timestamp / 1 days;
             if (dailyDonationCount[today] + amount > maxDailyDonations) {
-                revert DailyLimitExceeded(dailyDonationCount[today] + amount, maxDailyDonations);
+                revert DailyLimitExceeded(amount, maxDailyDonations);
             }
             dailyDonationCount[today] += amount;
         }
         _;
     }
 
-    modifier validAddress(address addr) {
-        if (addr == address(0)) revert InvalidRecipient(addr);
+    modifier donationLimit(uint256 amount) {
+        uint256 today = block.timestamp / 1 days;
+        userDailyDonations[msg.sender][today] += amount;
+        if (userDailyDonations[msg.sender][today] > maxUserDailyDonation) {
+            revert DailyLimitExceeded(amount, maxUserDailyDonation);
+        }
         _;
+    }
+
+    modifier validAddress(address addr) {
+        if (addr == address(0)) revert InvalidTokenAddress(addr);
+        _;
+    }
+
+    modifier autoUpdateStatus(uint256 fundraiserId) {
+        _;
+        _updateFundraiserStatus(fundraiserId);
+    }
+
+    modifier whenFundraiserNotSuspended(uint256 fundraiserId) {
+        if (fundraisers[fundraiserId].packed.isSuspended) {
+            revert FundraiserSuspendedError(fundraiserId);
+        }
+        _;
+    }
+
+    // Optimized reentrancy guard
+    modifier nonReentrant() {
+        if (_status == _ENTERED) revert ReentrantCall();
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
     }
 
     // ========== CONSTRUCTOR ==========
 
-    /// @notice Initializes the PoliDAO contract
-    /// @param initialOwner Address that will own the contract
-    /// @param _commissionWallet Address that will receive commission payments
-    constructor(address initialOwner, address _commissionWallet) 
+    constructor(
+        address initialOwner,
+        address _commissionWallet,
+        address _feeToken
+    ) 
         Ownable(initialOwner) 
+        EIP712("PoliDAO", "1")
         validAddress(initialOwner)
         validAddress(_commissionWallet)
+        validAddress(_feeToken)
     {
         commissionWallet = _commissionWallet;
+        feeToken = _feeToken;
     }
 
     // ========== ADMIN FUNCTIONS ==========
 
-    /// @notice Pauses all contract operations
-    function pause() external onlyOwner {
-        _pause();
-    }
-
-    /// @notice Unpauses all contract operations
-    function unpause() external onlyOwner {
-        _unpause();
-    }
-
-    /// @notice Toggles voting functionality
-    function toggleVotingPause() external onlyOwner {
-        votingPaused = !votingPaused;
-        emit VotingPauseToggled(votingPaused);
-    }
-
-    /// @notice Toggles donation functionality
-    function toggleDonationsPause() external onlyOwner {
-        donationsPaused = !donationsPaused;
-        emit DonationsPauseToggled(donationsPaused);
-    }
-
-    /// @notice Toggles withdrawal functionality
-    function toggleWithdrawalsPause() external onlyOwner {
-        withdrawalsPaused = !withdrawalsPaused;
-        emit WithdrawalsPauseToggled(withdrawalsPaused);
-    }
-
-    /// @notice Toggle multimedia operations
-    function toggleMediaPause() external onlyOwner {
-        mediaPaused = !mediaPaused;
-        emit MediaPauseToggled(mediaPaused);
-    }
-
-    /// @notice Emergency pause for all operations
-    function emergencyPauseAll() external onlyOwner {
+    function pause() external onlyOwner { _pause(); }
+    function unpause() external onlyOwner { _unpause(); }
+    
+    function toggleVotingPause() external onlyOwner { votingPaused = !votingPaused; }
+    function toggleDonationsPause() external onlyOwner { donationsPaused = !donationsPaused; }
+    function toggleWithdrawalsPause() external onlyOwner { withdrawalsPaused = !withdrawalsPaused; }
+    function toggleUpdatesPause() external onlyOwner { updatesPaused = !updatesPaused; }
+    function toggleMediaPause() external onlyOwner { mediaPaused = !mediaPaused; }
+    
+    function emergencyPauseAll() public onlyOwner {
         _pause();
         votingPaused = true;
         donationsPaused = true;
         withdrawalsPaused = true;
+        updatesPaused = true;
         mediaPaused = true;
+    }
+
+    // ========== INTERNAL UTILITY FUNCTIONS ==========
+
+    function _toString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) return "0";
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    function _updateFundraiserStatus(uint256 fundraiserId) internal {
+        Fundraiser storage f = fundraisers[fundraiserId];
         
-        emit VotingPauseToggled(true);
-        emit DonationsPauseToggled(true);
-        emit WithdrawalsPauseToggled(true);
-        emit MediaPauseToggled(true);
+        if (f.packed.status == uint8(FundraiserStatus.COMPLETED) || f.packed.isSuspended) return;
+        
+        uint8 oldStatus = f.packed.status;
+        
+        if (f.packed.fundraiserType == uint8(FundraiserType.WITH_GOAL)) {
+            if (f.packed.status == uint8(FundraiserStatus.ACTIVE)) {
+                if (f.packed.raisedAmount >= f.packed.goalAmount) {
+                    f.packed.status = uint8(FundraiserStatus.SUCCESSFUL);
+                } else if (block.timestamp > f.packed.endDate) {
+                    f.packed.status = uint8(FundraiserStatus.FAILED);
+                }
+            }
+        }
+        
+        if (oldStatus != f.packed.status) {
+            emit FundraiserStatusChanged(fundraiserId, oldStatus, f.packed.status);
+        }
     }
 
-    /// @notice Changes the commission wallet address
-    /// @param newWallet New wallet address for receiving commissions
-    function setCommissionWallet(address newWallet) external onlyOwner validAddress(newWallet) {
-        address oldWallet = commissionWallet;
-        commissionWallet = newWallet;
-        emit CommissionWalletChanged(oldWallet, newWallet);
+    function _executeDonation(uint256 fundraiserId, uint256 amount) internal returns (uint256 netAmount) {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (f.packed.status != uint8(FundraiserStatus.ACTIVE)) {
+            revert InvalidFundraiserStatus(f.packed.status, uint8(FundraiserStatus.ACTIVE));
+        }
+        if (amount == 0) revert InsufficientAmount(amount, 1);
+        
+        IERC20 token = IERC20(f.token);
+        
+        uint256 commission = (amount * donationCommission) / PRECISION;
+        netAmount = amount - commission;
+        
+        if (!token.transferFrom(msg.sender, address(this), amount)) revert("Transfer failed");
+        
+        if (f.donations[msg.sender] == 0) {
+            f.donors.push(msg.sender);
+        }
+        f.donations[msg.sender] += netAmount;
+        f.packed.raisedAmount += uint128(netAmount);
+        
+        if (f.packed.fundraiserType == uint8(FundraiserType.WITH_GOAL) && 
+            f.packed.raisedAmount >= f.packed.goalAmount && 
+            f.packed.status == uint8(FundraiserStatus.ACTIVE)) {
+            f.packed.status = uint8(FundraiserStatus.SUCCESSFUL);
+            emit FundraiserStatusChanged(fundraiserId, uint8(FundraiserStatus.ACTIVE), uint8(FundraiserStatus.SUCCESSFUL));
+        }
+        
+        if (commission > 0) {
+            if (!token.transfer(commissionWallet, commission)) revert("Commission transfer failed");
+        }
     }
 
-    /// @notice Emergency function to withdraw stuck tokens
-    /// @param token Token address (address(0) for ETH)
-    /// @param to Recipient address
-    /// @param amount Amount to withdraw
-    function emergencyWithdraw(address token, address to, uint256 amount) 
+    function _createInitialUpdate(uint256 fundraiserId, string memory description) internal {
+        updateCount++;
+        FundraiserUpdate storage update = fundraiserUpdates[updateCount];
+        update.id = updateCount;
+        update.fundraiserId = fundraiserId;
+        update.author = msg.sender;
+        update.content = description;
+        update.timestamp = block.timestamp;
+        update.updateType = 0;
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        for (uint256 i = 0; i < f.gallery.length; i++) {
+            update.attachments.push(f.gallery[i]);
+        }
+        
+        f.updateIds.push(updateCount);
+        f.pinnedUpdateId = updateCount;
+        
+        emit UpdatePosted(updateCount, fundraiserId, msg.sender, description, 0);
+        emit UpdatePinned(updateCount, fundraiserId);
+    }
+
+    // Internal helper for updates to avoid code duplication
+    function _postUpdateInternal(
+        uint256 fundraiserId,
+        string calldata content,
+        uint8 updateType,
+        MediaItem[] memory attachments
+    ) internal {
+        if (bytes(content).length == 0 || bytes(content).length > MAX_UPDATE_LENGTH) {
+            revert("Invalid content");
+        }
+        if (attachments.length > MAX_MEDIA_PER_UPDATE) revert("Too many attachments");
+
+        updateCount++;
+        FundraiserUpdate storage update = fundraiserUpdates[updateCount];
+        update.id = updateCount;
+        update.fundraiserId = fundraiserId;
+        update.author = msg.sender;
+        update.content = content;
+        update.timestamp = block.timestamp;
+        update.updateType = updateType;
+
+        for (uint256 i = 0; i < attachments.length; i++) {
+            MediaItem memory attachment = attachments[i];
+            attachment.uploadTime = block.timestamp;
+            attachment.uploader = msg.sender;
+            update.attachments.push(attachment);
+            
+            fundraisers[fundraiserId].gallery.push(attachment);
+            mediaTypeCounts[fundraiserId][attachment.mediaType]++;
+            
+            emit MediaAdded(fundraiserId, attachment.ipfsHash, attachment.mediaType, attachment.filename, msg.sender);
+        }
+
+        Fundraiser storage f = fundraisers[fundraiserId];
+        f.updateIds.push(updateCount);
+
+        if (updateType == 1 || updateType == 2) {
+            if (f.pinnedUpdateId != 0) {
+                fundraiserUpdates[f.pinnedUpdateId].isPinned = false;
+                emit UpdateUnpinned(fundraiserId, f.pinnedUpdateId);
+            }
+            f.pinnedUpdateId = updateCount;
+            update.isPinned = true;
+            emit UpdatePinned(updateCount, fundraiserId);
+        }
+
+        emit UpdatePosted(updateCount, fundraiserId, msg.sender, content, updateType);
+    }
+
+    // ========== SUSPENSION SYSTEM ==========
+
+    function suspendFundraiser(uint256 fundraiserId, string calldata reason) 
+        external 
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != owner() && msg.sender != f.creator) {
+            revert UnauthorizedAccess(msg.sender, f.creator);
+        }
+        if (f.packed.isSuspended) revert("Already suspended");
+        if (f.packed.status == uint8(FundraiserStatus.COMPLETED)) revert("Cannot suspend completed fundraiser");
+        if (bytes(reason).length == 0) revert("Suspension reason required");
+
+        f.packed.isSuspended = true;
+        f.packed.suspensionTime = uint32(block.timestamp);
+        f.suspensionReason = reason;
+        
+        uint8 oldStatus = f.packed.status;
+        f.packed.status = uint8(FundraiserStatus.SUSPENDED);
+
+        emit FundraiserSuspended(fundraiserId, msg.sender, reason, block.timestamp);
+        emit FundraiserStatusChanged(fundraiserId, oldStatus, uint8(FundraiserStatus.SUSPENDED));
+    }
+
+    function unsuspendFundraiser(uint256 fundraiserId) 
         external 
         onlyOwner 
-        validAddress(to) 
+        validFundraiserId(fundraiserId)
     {
-        if (token == address(0)) {
-            // ETH withdrawal
-            (bool success, ) = to.call{value: amount}("");
-            if (!success) revert TransferFailed();
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (!f.packed.isSuspended) revert("Not suspended");
+
+        f.packed.isSuspended = false;
+        f.packed.suspensionTime = 0;
+        f.suspensionReason = "";
+        
+        uint8 newStatus;
+        if (f.packed.fundraiserType == uint8(FundraiserType.WITHOUT_GOAL)) {
+            newStatus = uint8(FundraiserStatus.ACTIVE);
         } else {
-            // ✅ FIX: Add return value check for ERC20 transfer
-            require(IERC20(token).transfer(to, amount), "Emergency transfer failed");
+            if (f.packed.raisedAmount >= f.packed.goalAmount) {
+                newStatus = uint8(FundraiserStatus.SUCCESSFUL);
+            } else if (block.timestamp > f.packed.endDate) {
+                newStatus = uint8(FundraiserStatus.FAILED);
+            } else {
+                newStatus = uint8(FundraiserStatus.ACTIVE);
+            }
         }
         
-        emit EmergencyWithdraw(token, to, amount);
+        f.packed.status = newStatus;
+
+        emit FundraiserUnsuspended(fundraiserId, msg.sender, block.timestamp);
+        emit FundraiserStatusChanged(fundraiserId, uint8(FundraiserStatus.SUSPENDED), newStatus);
     }
 
-    /// @notice Authorize address to create proposals
-    /// @param proposer Address to authorize
-    function authorizeProposer(address proposer) external onlyOwner validAddress(proposer) {
-        authorizedProposers[proposer] = true;
-        emit ProposerAuthorized(proposer);
+    function refundFromSuspended(uint256 fundraiserId) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (!f.packed.isSuspended) revert("Fundraiser not suspended");
+        if (f.hasRefunded[msg.sender]) revert AlreadyRefunded(msg.sender, fundraiserId);
+
+        uint256 donated = f.donations[msg.sender];
+        if (donated == 0) revert("No donation found");
+
+        f.hasRefunded[msg.sender] = true;
+        f.packed.raisedAmount -= uint128(donated);
+        f.donations[msg.sender] = 0;
+
+        IERC20 token = IERC20(f.token);
+        if (!token.transfer(msg.sender, donated)) revert("Refund failed");
+
+        emit DonationRefunded(fundraiserId, msg.sender, donated, 0);
     }
 
-    /// @notice Revoke proposal creation authorization
-    /// @param proposer Address to revoke authorization from
-    function revokeProposer(address proposer) external onlyOwner {
-        authorizedProposers[proposer] = false;
-        emit ProposerRevoked(proposer);
+    // ========== LOCATION MANAGEMENT ==========
+
+    function updateLocation(uint256 fundraiserId, string calldata newLocation) 
+        external 
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator) revert UnauthorizedAccess(msg.sender, f.creator);
+        if (bytes(newLocation).length == 0 || bytes(newLocation).length > MAX_LOCATION_LENGTH) {
+            revert("Invalid location");
+        }
+
+        string memory oldLocation = f.location;
+        f.location = newLocation;
+
+        emit LocationUpdated(fundraiserId, oldLocation, newLocation);
     }
 
-    /// @notice Set maximum daily donation limit
-    /// @param newLimit New daily limit
-    function setMaxDailyDonations(uint256 newLimit) external onlyOwner {
-        maxDailyDonations = newLimit;
-        emit MaxDailyDonationsSet(newLimit);
+    // ========== MODERN DONATION METHODS ==========
+
+    function donate(uint256 fundraiserId, uint256 amount) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+        whenDonationsNotPaused 
+        circuitBreaker(amount)
+        donationLimit(amount)
+        validFundraiserId(fundraiserId)
+        whenFundraiserNotSuspended(fundraiserId)
+        autoUpdateStatus(fundraiserId)
+    {
+        uint256 netAmount = _executeDonation(fundraiserId, amount);
+        Fundraiser storage f = fundraisers[fundraiserId];
+        emit DonationMade(fundraiserId, msg.sender, f.token, amount, netAmount);
     }
 
-    /// @notice Set donation commission rate
-    /// @param bps Commission rate in basis points (1 bps = 0.01%)
-    function setDonationCommission(uint256 bps) external onlyOwner {
-        require(bps <= MAX_COMMISSION, "Max 100%");
-        donationCommission = bps;
-        emit DonationCommissionSet(bps);
-    }
-
-    /// @notice Set success commission rate
-    /// @param bps Commission rate in basis points (1 bps = 0.01%)
-    function setSuccessCommission(uint256 bps) external onlyOwner {
-        require(bps <= MAX_COMMISSION, "Max 100%");
-        successCommission = bps;
-        emit SuccessCommissionSet(bps);
-    }
-
-    /// @notice Set refund commission rate
-    /// @param bps Commission rate in basis points (1 bps = 0.01%)
-    function setRefundCommission(uint256 bps) external onlyOwner {
-        require(bps <= MAX_COMMISSION, "Max 100%");
-        refundCommission = bps;
-        emit RefundCommissionSet(bps);
-    }
-
-    /// @notice Add token to whitelist
-    /// @param token ERC20 token address to whitelist
-    function whitelistToken(address token) external onlyOwner {
-        if (token == address(0)) revert InvalidToken(token);
-        if (token.code.length == 0) revert NotAContract(token);
+    function donateWithPermit(
+        uint256 fundraiserId,
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+        whenDonationsNotPaused 
+        circuitBreaker(amount)
+        donationLimit(amount)
+        validFundraiserId(fundraiserId)
+        whenFundraiserNotSuspended(fundraiserId)
+        autoUpdateStatus(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
         
-        // ✅ FIX: Proper try-catch for return value with supply validation
-        try IERC20(token).totalSupply() returns (uint256 supply) {
-            // Token is ERC20 compatible, supply check passed
-            require(supply > 0, "Token has zero supply");
+        IERC20Permit(f.token).permit(
+            msg.sender, 
+            address(this), 
+            amount, 
+            deadline, 
+            v, 
+            r, 
+            s
+        );
+        
+        _executeDonation(fundraiserId, amount);
+        emit DonationMadeWithPermit(fundraiserId, msg.sender, f.token, amount);
+    }
+
+    function donateWithMetaTransaction(
+        address donor,
+        uint256 fundraiserId,
+        uint256 amount,
+        uint256 deadline,
+        bytes calldata signature
+    ) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+        whenDonationsNotPaused 
+        circuitBreaker(amount)
+        validFundraiserId(fundraiserId)
+        whenFundraiserNotSuspended(fundraiserId)
+        autoUpdateStatus(fundraiserId)
+    {
+        if (block.timestamp > deadline) revert DeadlineExpired(deadline, block.timestamp);
+        
+        bytes32 structHash = keccak256(
+            abi.encode(
+                DONATION_TYPEHASH,
+                donor,
+                fundraiserId,
+                amount,
+                nonces[donor]++,
+                deadline
+            )
+        );
+        
+        bytes32 hash = _hashTypedDataV4(structHash);
+        address signer = hash.recover(signature);
+        if (signer != donor) revert("Invalid signature");
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        IERC20 token = IERC20(f.token);
+        
+        uint256 commission = (amount * donationCommission) / PRECISION;
+        uint256 netAmount = amount - commission;
+        
+        if (!token.transferFrom(donor, address(this), amount)) revert("Transfer failed");
+        
+        if (f.donations[donor] == 0) {
+            f.donors.push(donor);
+        }
+        f.donations[donor] += netAmount;
+        f.packed.raisedAmount += uint128(netAmount);
+        
+        if (f.packed.fundraiserType == uint8(FundraiserType.WITH_GOAL) && 
+            f.packed.raisedAmount >= f.packed.goalAmount && 
+            f.packed.status == uint8(FundraiserStatus.ACTIVE)) {
+            f.packed.status = uint8(FundraiserStatus.SUCCESSFUL);
+            emit FundraiserStatusChanged(fundraiserId, uint8(FundraiserStatus.ACTIVE), uint8(FundraiserStatus.SUCCESSFUL));
+        }
+        
+        if (commission > 0) {
+            if (!token.transfer(commissionWallet, commission)) revert("Commission transfer failed");
+        }
+        
+        emit DonationMadeWithMetaTx(fundraiserId, donor, msg.sender, netAmount);
+    }
+
+    function batchDonate(
+        uint256[] calldata _fundraiserIds,
+        uint256[] calldata amounts
+    ) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+        whenDonationsNotPaused 
+    {
+        if (_fundraiserIds.length != amounts.length) {
+            revert ArrayLengthMismatch(_fundraiserIds.length, amounts.length);
+        }
+        if (_fundraiserIds.length > 10) revert("Too many donations in batch");
+        
+        bytes32 batchId = keccak256(abi.encodePacked(msg.sender, block.timestamp, _fundraiserIds, amounts));
+        if (executedBatches[batchId]) revert BatchAlreadyExecuted(batchId);
+        executedBatches[batchId] = true;
+        
+        uint256 totalAmount = 0;
+        for (uint256 i = 0; i < _fundraiserIds.length; i++) {
+            if (_fundraiserIds[i] == 0 || _fundraiserIds[i] > fundraiserCount) {
+                revert FundraiserNotFound(_fundraiserIds[i]);
+            }
+            if (fundraisers[_fundraiserIds[i]].packed.isSuspended) {
+                revert FundraiserSuspendedError(_fundraiserIds[i]);
+            }
+            totalAmount += amounts[i];
+            _executeDonation(_fundraiserIds[i], amounts[i]);
+        }
+        
+        emit BatchDonationExecuted(batchId, msg.sender, totalAmount);
+    }
+
+    // ========== ONE-CLICK FUNDRAISER CREATION ==========
+
+    function createFundraiser(FundraiserCreationData calldata data) 
+        external 
+        whenNotPaused 
+        whenDonationsNotPaused 
+        returns (uint256 fundraiserId)
+    {
+        if (bytes(data.title).length == 0 || bytes(data.title).length > MAX_TITLE_LENGTH) revert("Invalid title");
+        if (bytes(data.description).length == 0 || bytes(data.description).length > MAX_DESCRIPTION_LENGTH) revert("Invalid description");
+        if (bytes(data.location).length == 0 || bytes(data.location).length > MAX_LOCATION_LENGTH) revert("Invalid location");
+        if (data.endDate <= block.timestamp) revert("End date must be in future");
+        if (data.endDate > block.timestamp + MAX_DURATION) revert("End date too far");
+        if (!isTokenWhitelisted[data.token]) revert InvalidTokenAddress(data.token);
+        if (data.initialImages.length > MAX_INITIAL_IMAGES) revert("Too many initial images");
+        if (data.initialVideos.length > MAX_INITIAL_VIDEOS) revert("Too many initial videos");
+        
+        if (data.fundraiserType == FundraiserType.WITH_GOAL && data.goalAmount == 0) {
+            revert("Goal amount required for WITH_GOAL type");
+        }
+        
+        fundraiserCount++;
+        fundraiserId = fundraiserCount;
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        f.packed = PackedFundraiserData({
+            id: uint32(fundraiserId),
+            goalAmount: uint128(data.goalAmount),
+            raisedAmount: 0,
+            endDate: uint64(data.endDate),
+            originalEndDate: uint64(data.endDate),
+            extensionCount: 0,
+            fundraiserType: uint8(data.fundraiserType),
+            status: uint8(FundraiserStatus.ACTIVE),
+            isSuspended: false,
+            fundsWithdrawn: false,
+            suspensionTime: 0
+        });
+        
+        f.creator = msg.sender;
+        f.token = data.token;
+        f.title = data.title;
+        f.description = data.description;
+        f.location = data.location;
+        f.metadataHash = data.metadataHash;
+        
+        uint256[4] storage typeCounts = mediaTypeCounts[fundraiserId];
+        
+        // Add images
+        for (uint256 i = 0; i < data.initialImages.length; i++) {
+            if (bytes(data.initialImages[i]).length == 0) revert("Empty image hash");
+            
+            MediaItem memory newImage = MediaItem({
+                ipfsHash: data.initialImages[i],
+                mediaType: 0,
+                filename: string.concat("image_", _toString(i), ".jpg"),
+                fileSize: 0,
+                uploadTime: block.timestamp,
+                uploader: msg.sender,
+                description: "Initial fundraiser image"
+            });
+            
+            f.gallery.push(newImage);
+            typeCounts[0]++;
+            
+            emit MediaAdded(fundraiserId, data.initialImages[i], 0, newImage.filename, msg.sender);
+        }
+        
+        // Add videos
+        for (uint256 i = 0; i < data.initialVideos.length; i++) {
+            if (bytes(data.initialVideos[i]).length == 0) revert("Empty video hash");
+            
+            MediaItem memory newVideo = MediaItem({
+                ipfsHash: data.initialVideos[i],
+                mediaType: 1,
+                filename: string.concat("video_", _toString(i), ".mp4"),
+                fileSize: 0,
+                uploadTime: block.timestamp,
+                uploader: msg.sender,
+                description: "Initial fundraiser video"
+            });
+            
+            f.gallery.push(newVideo);
+            typeCounts[1]++;
+            
+            emit MediaAdded(fundraiserId, data.initialVideos[i], 1, newVideo.filename, msg.sender);
+        }
+        
+        if (data.initialImages.length > 0 || data.initialVideos.length > 0) {
+            emit MultimediaActivated(fundraiserId);
+        }
+        
+        _createInitialUpdate(fundraiserId, data.description);
+        
+        fundraiserIds.push(fundraiserId);
+        
+        emit FundraiserCreated(
+            fundraiserId, msg.sender, data.token, data.title, uint8(data.fundraiserType),
+            data.goalAmount, data.endDate, data.location
+        );
+        
+        return fundraiserId;
+    }
+
+    // ========== MODERN UTILITY FUNCTIONS ==========
+
+    function supportsPermit(address token) external view returns (bool) {
+        try IERC20Permit(token).DOMAIN_SEPARATOR() returns (bytes32) {
+            return true;
         } catch {
-            revert InvalidToken(token);
+            return false;
+        }
+    }
+
+    function getNonce(address user) external view returns (uint256) {
+        return nonces[user];
+    }
+
+    function verifyDonationSignature(
+        address donor,
+        uint256 fundraiserId,
+        uint256 amount,
+        uint256 deadline,
+        bytes calldata signature
+    ) external view returns (bool) {
+        if (block.timestamp > deadline) return false;
+        
+        bytes32 structHash = keccak256(
+            abi.encode(
+                DONATION_TYPEHASH,
+                donor,
+                fundraiserId,
+                amount,
+                nonces[donor],
+                deadline
+            )
+        );
+        
+        bytes32 hash = _hashTypedDataV4(structHash);
+        address signer = hash.recover(signature);
+        return signer == donor;
+    }
+
+    // ========== WITHDRAWAL & REFUND SYSTEM ==========
+
+    function withdrawFunds(uint256 fundraiserId) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+        whenWithdrawalsNotPaused 
+        validFundraiserId(fundraiserId)
+        whenFundraiserNotSuspended(fundraiserId)
+        autoUpdateStatus(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator) revert UnauthorizedAccess(msg.sender, f.creator);
+        if (f.packed.fundsWithdrawn) revert("Already withdrawn");
+        if (f.packed.raisedAmount == 0) revert("No funds to withdraw");
+        
+        bool canWithdraw = false;
+        
+        if (f.packed.fundraiserType == uint8(FundraiserType.WITHOUT_GOAL)) {
+            canWithdraw = true;
+        } else {
+            if (f.packed.status == uint8(FundraiserStatus.SUCCESSFUL)) {
+                canWithdraw = true;
+            } else if (f.packed.status == uint8(FundraiserStatus.FAILED) && 
+                      block.timestamp > f.refundDeadline) {
+                canWithdraw = true;
+            }
         }
         
-        require(!isTokenWhitelisted[token], "Already whitelisted");
+        if (!canWithdraw) revert("Cannot withdraw yet");
         
-        isTokenWhitelisted[token] = true;
-        tokenIndex[token] = whitelistedTokens.length;
-        whitelistedTokens.push(token);
+        uint256 amount = f.packed.raisedAmount;
+        f.packed.fundsWithdrawn = true;
+        f.packed.raisedAmount = 0;
+        f.packed.status = uint8(FundraiserStatus.COMPLETED);
         
-        emit TokenWhitelisted(token);
+        uint256 commission = (amount * successCommission) / PRECISION;
+        uint256 netAmount = amount - commission;
+        
+        IERC20 token = IERC20(f.token);
+        
+        if (commission > 0) {
+            if (!token.transfer(commissionWallet, commission)) revert("Commission failed");
+        }
+        if (!token.transfer(f.creator, netAmount)) revert("Withdrawal failed");
+        
+        emit FundsWithdrawn(fundraiserId, f.creator, netAmount);
+        emit FundraiserStatusChanged(fundraiserId, f.packed.status, uint8(FundraiserStatus.COMPLETED));
     }
 
-    /// @notice Remove token from whitelist
-    /// @param token Token address to remove
-    function removeWhitelistToken(address token) external onlyOwner {
-        require(isTokenWhitelisted[token], "Not whitelisted");
-        
-        isTokenWhitelisted[token] = false;
-        
-        uint256 index = tokenIndex[token];
-        address lastToken = whitelistedTokens[whitelistedTokens.length - 1];
-        
-        // Swap with last element and pop
-        whitelistedTokens[index] = lastToken;
-        tokenIndex[lastToken] = index;
-        
-        whitelistedTokens.pop();
-        delete tokenIndex[token];
-        
-        emit TokenRemoved(token);
+    function refund(uint256 fundraiserId) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+        validFundraiserId(fundraiserId)
+        autoUpdateStatus(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (f.packed.fundraiserType != uint8(FundraiserType.WITH_GOAL)) {
+            revert("Only WITH_GOAL campaigns allow refunds");
+        }
+        if (f.hasRefunded[msg.sender]) revert AlreadyRefunded(msg.sender, fundraiserId);
+
+        uint256 donated = f.donations[msg.sender];
+        if (donated == 0) revert("No donation found");
+
+        if (f.packed.status != uint8(FundraiserStatus.REFUND_PERIOD) ||
+            block.timestamp > f.refundDeadline) {
+            revert("Not in refund period");
+        }
+
+        uint256 period = block.timestamp / 30 days;
+        monthlyRefundCount[msg.sender][period]++;
+
+        uint256 commissionAmount = 0;
+        if (monthlyRefundCount[msg.sender][period] > 1 && refundCommission > 0) {
+            commissionAmount = (donated * refundCommission) / PRECISION;
+        }
+
+        f.hasRefunded[msg.sender] = true;
+        f.packed.raisedAmount -= uint128(donated);
+        f.donations[msg.sender] = 0;
+
+        uint256 refundAmount = donated - commissionAmount;
+
+        IERC20 token = IERC20(f.token);
+
+        if (commissionAmount > 0) {
+            if (!token.transfer(commissionWallet, commissionAmount)) revert("Commission failed");
+        }
+        if (!token.transfer(msg.sender, refundAmount)) revert("Refund failed");
+
+        emit DonationRefunded(fundraiserId, msg.sender, refundAmount, commissionAmount);
     }
 
-    // ========== GOVERNANCE ==========
+    function initiateClosure(uint256 fundraiserId) 
+        external 
+        whenNotPaused 
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator) revert UnauthorizedAccess(msg.sender, f.creator);
+        if (f.packed.fundraiserType != uint8(FundraiserType.WITH_GOAL)) {
+            revert("Only WITH_GOAL campaigns");
+        }
+        if (f.packed.status != uint8(FundraiserStatus.FAILED)) revert("Must be failed first");
 
-    /// @notice Create new proposal (authorization required)
-    /// @param question Proposal question (1-500 characters)
-    /// @param duration Voting duration in seconds (max 365 days)
-    /// @dev Functions using block.timestamp for time comparisons
-    /// Note: block.timestamp has ~15 second tolerance by miners
-    /// This is acceptable for fundraiser durations (hours/days)
+        f.packed.status = uint8(FundraiserStatus.REFUND_PERIOD);
+        f.refundDeadline = block.timestamp + FAILED_FUNDRAISER_CLAIM_PERIOD;
+
+        emit ClosureInitiated(fundraiserId, f.refundDeadline);
+        emit FundraiserStatusChanged(fundraiserId, uint8(FundraiserStatus.FAILED), uint8(FundraiserStatus.REFUND_PERIOD));
+    }
+
+    // ========== MULTIMEDIA MANAGEMENT ==========
+
+    function addMultimediaToFundraiser(uint256 fundraiserId, MediaItem[] calldata mediaItems)
+        external
+        whenNotPaused
+        whenMediaNotPaused
+        validFundraiserId(fundraiserId)
+        onlyMediaManager(fundraiserId)
+    {
+        if (mediaItems.length > MAX_MEDIA_BATCH) revert("Too many media files");
+
+        Fundraiser storage f = fundraisers[fundraiserId];
+        uint256[4] storage typeCounts = mediaTypeCounts[fundraiserId];
+        uint256 totalCurrent = f.gallery.length;
+        
+        if (totalCurrent + mediaItems.length > MAX_TOTAL_MEDIA) {
+            revert MediaLimitExceeded(totalCurrent + mediaItems.length, MAX_TOTAL_MEDIA);
+        }
+
+        for (uint256 i = 0; i < mediaItems.length; i++) {
+            MediaItem memory item = mediaItems[i];
+            
+            if (item.mediaType > 3) revert InvalidMediaType(item.mediaType);
+            if (bytes(item.ipfsHash).length == 0) revert("Empty IPFS hash");
+            
+            uint256 typeLimit = getMediaTypeLimit(item.mediaType);
+            if (typeCounts[item.mediaType] + 1 > typeLimit) {
+                revert MediaLimitExceeded(typeCounts[item.mediaType] + 1, typeLimit);
+            }
+            
+            MediaItem memory newItem = MediaItem({
+                ipfsHash: item.ipfsHash,
+                mediaType: item.mediaType,
+                filename: item.filename,
+                fileSize: item.fileSize,
+                uploadTime: block.timestamp,
+                uploader: msg.sender,
+                description: item.description
+            });
+            
+            f.gallery.push(newItem);
+            typeCounts[item.mediaType]++;
+            
+            emit MediaAdded(fundraiserId, item.ipfsHash, item.mediaType, item.filename, msg.sender);
+        }
+    }
+
+    function removeMediaFromFundraiser(uint256 fundraiserId, uint256 mediaIndex)
+        external
+        whenNotPaused
+        whenMediaNotPaused
+        validFundraiserId(fundraiserId)
+        onlyMediaManager(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (mediaIndex >= f.gallery.length) revert("Invalid media index");
+        
+        MediaItem storage mediaToRemove = f.gallery[mediaIndex];
+        uint8 mediaType = mediaToRemove.mediaType;
+        string memory ipfsHash = mediaToRemove.ipfsHash;
+        
+        mediaTypeCounts[fundraiserId][mediaType]--;
+        
+        f.gallery[mediaIndex] = f.gallery[f.gallery.length - 1];
+        f.gallery.pop();
+        
+        emit MediaRemoved(fundraiserId, mediaIndex, ipfsHash);
+    }
+
+    // ========== UPDATE SYSTEM ==========
+
+    function postUpdateWithMultimedia(
+        uint256 fundraiserId,
+        string calldata content,
+        uint8 updateType,
+        MediaItem[] calldata attachments
+    ) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+        validFundraiserId(fundraiserId)
+        onlyFundraiserCreatorOrAuthorized(fundraiserId)
+    {
+        MediaItem[] memory attachmentsMemory = new MediaItem[](attachments.length);
+        for (uint256 i = 0; i < attachments.length; i++) {
+            attachmentsMemory[i] = attachments[i];
+        }
+        _postUpdateInternal(fundraiserId, content, updateType, attachmentsMemory);
+    }
+
+    function postUpdate(uint256 fundraiserId, string calldata content) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+        validFundraiserId(fundraiserId)
+        onlyFundraiserCreatorOrAuthorized(fundraiserId)
+    {
+        MediaItem[] memory emptyAttachments = new MediaItem[](0);
+        _postUpdateInternal(fundraiserId, content, 0, emptyAttachments);
+    }
+
+    function pinUpdate(uint256 updateId) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+    {
+        if (updateId == 0 || updateId > updateCount) revert("Invalid update");
+        
+        FundraiserUpdate storage update = fundraiserUpdates[updateId];
+        uint256 fundraiserId = update.fundraiserId;
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator) revert UnauthorizedAccess(msg.sender, f.creator);
+
+        if (f.pinnedUpdateId != 0 && f.pinnedUpdateId != updateId) {
+            fundraiserUpdates[f.pinnedUpdateId].isPinned = false;
+            emit UpdateUnpinned(fundraiserId, f.pinnedUpdateId);
+        }
+
+        f.pinnedUpdateId = updateId;
+        update.isPinned = true;
+
+        emit UpdatePinned(updateId, fundraiserId);
+    }
+
+    function unpinUpdate(uint256 fundraiserId) 
+        external 
+        whenNotPaused 
+        whenUpdatesNotPaused 
+        validFundraiserId(fundraiserId)
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator) revert UnauthorizedAccess(msg.sender, f.creator);
+        if (f.pinnedUpdateId == 0) revert("No pinned update");
+
+        uint256 oldPinnedId = f.pinnedUpdateId;
+        f.pinnedUpdateId = 0;
+        fundraiserUpdates[oldPinnedId].isPinned = false;
+
+        emit UpdateUnpinned(fundraiserId, oldPinnedId);
+    }
+
+    // ========== GOVERNANCE SYSTEM ==========
+
     function createProposal(string calldata question, uint256 duration) 
         external 
         whenNotPaused 
         whenVotingNotPaused 
         onlyAuthorizedProposer
     {
-        if (bytes(question).length == 0) revert EmptyQuestion();
-        if (bytes(question).length > MAX_QUESTION_LENGTH) {
-            revert QuestionTooLong(bytes(question).length);
+        if (bytes(question).length == 0 || bytes(question).length > MAX_QUESTION_LENGTH) {
+            revert("Invalid question");
         }
-        if (duration > MAX_DURATION) {
-            revert InvalidDuration(duration);
-        }
+        if (duration > MAX_DURATION) revert("Duration too long");
 
         proposalCount++;
         Proposal storage p = proposals[proposalCount];
@@ -526,27 +1209,22 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         p.question = question;
         p.endTime = block.timestamp + duration;
         p.creator = msg.sender;
-        p.metadataHash = ""; // Empty by default
+        p.metadataHash = "";
 
         proposalIds.push(proposalCount);
 
         emit ProposalCreated(p.id, question, p.endTime, msg.sender);
     }
 
-    /// @notice Vote on a proposal
-    /// @param proposalId ID of the proposal
-    /// @param support True for "yes", false for "no"
     function vote(uint256 proposalId, bool support) 
         external 
         whenNotPaused 
         whenVotingNotPaused 
     {
         Proposal storage p = proposals[proposalId];
-        
-        require(proposalId <= proposalCount && proposalId > 0, "Invalid proposal");
-        // ✅ DOCUMENTED: 15s tolerance acceptable for voting periods
-        require(block.timestamp <= p.endTime, "Voting ended");
-        require(!p.hasVoted[msg.sender], "Already voted");
+        if (proposalId == 0 || proposalId > proposalCount) revert("Invalid proposal");
+        if (block.timestamp > p.endTime) revert("Voting ended");
+        if (p.hasVoted[msg.sender]) revert("Already voted");
 
         p.hasVoted[msg.sender] = true;
         if (support) {
@@ -558,503 +1236,273 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         emit Voted(msg.sender, proposalId, support);
     }
 
-    // ========== FUNDRAISING ==========
+    // ========== FUNDRAISER EXTENSION ==========
 
-    /// @notice Create new fundraiser
-    /// @param token Whitelisted ERC20 token address
-    /// @param target Target amount (0 for flexible fundraiser)
-    /// @param duration Duration in seconds
-    /// @param isFlexible True for flexible mode, false for target mode
-    function createFundraiser(address token, uint256 target, uint256 duration, bool isFlexible)
-        external
-        whenNotPaused
-    {
-        require(isTokenWhitelisted[token], "Token not allowed");
-        if (duration > MAX_DURATION) {
-            revert InvalidDuration(duration);
-        }
-
-        fundraiserCount++;
-        Fundraiser storage f = fundraisers[fundraiserCount];
-        f.id = fundraiserCount;
-        f.creator = msg.sender;
-        f.token = token;
-        f.target = target;
-        f.endTime = block.timestamp + duration;
-        f.isFlexible = isFlexible;
-        f.metadataHash = ""; // Empty by default
-
-        fundraiserIds.push(fundraiserCount);
-
-        emit FundraiserCreated(f.id, msg.sender, token, target, f.endTime, isFlexible);
-    }
-
-    /// @notice Donation with standard commission (NO multimedia bonus)
-    /// @param id Fundraiser ID
-    /// @param amount Amount to donate
-    function donate(uint256 id, uint256 amount) 
+    function extendFundraiser(uint256 fundraiserId, uint256 additionalDays) 
         external 
         nonReentrant 
         whenNotPaused 
-        whenDonationsNotPaused 
-        circuitBreaker(amount)
+        validFundraiserId(fundraiserId)
+        whenFundraiserNotSuspended(fundraiserId)
     {
-        Fundraiser storage f = fundraisers[id];
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        require(block.timestamp <= f.endTime, "Fundraiser ended");
-        require(amount > 0, "Zero amount");
-
-        IERC20 token = IERC20(f.token);
+        Fundraiser storage f = fundraisers[fundraiserId];
+        if (msg.sender != f.creator) revert UnauthorizedAccess(msg.sender, f.creator);
+        if (f.packed.status != uint8(FundraiserStatus.ACTIVE)) revert("Can only extend active fundraisers");
+        if (additionalDays == 0 || additionalDays > MAX_EXTENSION_DAYS) revert("Invalid extension period");
         
-        // ✅ FIX: Calculate commission before external calls
-        uint256 commission = (amount * donationCommission) / PRECISION;
-        uint256 netAmount = amount - commission;
-
-        // External call
-        require(token.transferFrom(msg.sender, address(this), amount), "Transfer failed");
-
-        // ✅ FIX: Update state after calculating but before commission transfer
-        f.raised += netAmount;
-        if (f.donations[msg.sender] == 0) {
-            f.donors.push(msg.sender);
+        uint256 timeLeft = f.packed.endDate > block.timestamp ? f.packed.endDate - block.timestamp : 0;
+        if (timeLeft < MIN_EXTENSION_NOTICE) revert("Must extend at least 7 days before end");
+        
+        IERC20 paymentToken = IERC20(feeToken);
+        if (!paymentToken.transferFrom(msg.sender, commissionWallet, EXTENSION_FEE)) {
+            revert("Extension fee payment failed");
         }
-        f.donations[msg.sender] += netAmount;
-
-        // Send commission after state updates
-        if (commission > 0) {
-            require(token.transfer(commissionWallet, commission), "Commission transfer failed");
-        }
-
-        emit DonationMade(id, msg.sender, netAmount);
+        
+        f.packed.endDate += uint64(additionalDays * 1 days);
+        f.packed.extensionCount++;
+        
+        emit FundraiserExtended(fundraiserId, f.packed.endDate, additionalDays, EXTENSION_FEE);
     }
 
-    /// @notice Refund donation
-    /// @param id Fundraiser ID
-    function refund(uint256 id) external nonReentrant whenNotPaused {
-        Fundraiser storage f = fundraisers[id];
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        require(!f.refunded[msg.sender], "Already refunded");
+    // ========== COMMISSION MANAGEMENT ==========
 
-        uint256 donated = f.donations[msg.sender];
-        require(donated > 0, "No donation found");
-
-        if (!f.isFlexible) {
-            require(block.timestamp > f.endTime, "Fundraiser still active");
-            require(f.raised < f.target || f.closureInitiated, "No refunds available");
-            if (f.closureInitiated) {
-                require(block.timestamp <= f.reclaimDeadline, "Reclaim period ended");
-            }
-        }
-
-        uint256 period = block.timestamp / 30 days;
-        monthlyRefundCount[msg.sender][period]++;
-
-        uint256 commissionAmount = 0;
-        if (monthlyRefundCount[msg.sender][period] > 1 && refundCommission > 0) {
-            commissionAmount = (donated * refundCommission) / PRECISION;
-        }
-
-        f.refunded[msg.sender] = true;
-        f.raised -= donated;
-        f.donations[msg.sender] = 0;
-
-        IERC20 token = IERC20(f.token);
-        if (commissionAmount > 0) {
-            require(token.transfer(commissionWallet, commissionAmount), "Commission transfer failed");
-        }
-        require(token.transfer(msg.sender, donated - commissionAmount), "Refund transfer failed");
-
-        emit DonationRefunded(id, msg.sender, donated - commissionAmount, commissionAmount);
+    function setCommissionWallet(address newWallet) external onlyOwner validAddress(newWallet) {
+        address oldWallet = commissionWallet;
+        commissionWallet = newWallet;
+        emit CommissionWalletChanged(oldWallet, newWallet);
+    }
+    
+    function setFeeToken(address newToken) external onlyOwner validAddress(newToken) {
+        address oldToken = feeToken;
+        feeToken = newToken;
+        emit FeeTokenSet(oldToken, newToken);
+    }
+    
+    function setDonationCommission(uint256 bps) external onlyOwner {
+        if (bps > MAX_COMMISSION) revert("Max 100%");
+        donationCommission = bps;
+        emit DonationCommissionSet(bps);
+    }
+    
+    function setSuccessCommission(uint256 bps) external onlyOwner {
+        if (bps > MAX_COMMISSION) revert("Max 100%");
+        successCommission = bps;
+        emit SuccessCommissionSet(bps);
+    }
+    
+    function setRefundCommission(uint256 bps) external onlyOwner {
+        if (bps > MAX_COMMISSION) revert("Max 100%");
+        refundCommission = bps;
+        emit RefundCommissionSet(bps);
+    }
+    
+    function setMaxDailyDonations(uint256 newLimit) external onlyOwner {
+        maxDailyDonations = newLimit;
     }
 
-    /// @notice Withdraw with standard commission (NO multimedia bonus)
-    /// @param id Fundraiser ID
-    function withdraw(uint256 id) 
+    function setMaxUserDailyDonation(uint256 newLimit) external onlyOwner {
+        maxUserDailyDonation = newLimit;
+    }
+
+    // ========== TOKEN MANAGEMENT ==========
+
+    function whitelistToken(address token) external onlyOwner {
+        if (token == address(0)) revert InvalidTokenAddress(token);
+        if (token.code.length == 0) revert("Not a contract");
+        
+        try IERC20(token).totalSupply() returns (uint256 supply) {
+            if (supply == 0) revert("Token has zero supply");
+        } catch {
+            revert("Invalid ERC20 token");
+        }
+        
+        if (isTokenWhitelisted[token]) revert("Already whitelisted");
+        
+        isTokenWhitelisted[token] = true;
+        tokenIndex[token] = whitelistedTokens.length;
+        whitelistedTokens.push(token);
+        
+        emit TokenWhitelisted(token);
+    }
+
+    function removeWhitelistToken(address token) external onlyOwner {
+        if (!isTokenWhitelisted[token]) revert("Not whitelisted");
+        
+        isTokenWhitelisted[token] = false;
+        
+        uint256 index = tokenIndex[token];
+        address lastToken = whitelistedTokens[whitelistedTokens.length - 1];
+        
+        whitelistedTokens[index] = lastToken;
+        tokenIndex[lastToken] = index;
+        whitelistedTokens.pop();
+        delete tokenIndex[token];
+        
+        emit TokenRemoved(token);
+    }
+
+    function emergencyWithdraw(address token, address to, uint256 amount) 
         external 
-        nonReentrant 
-        whenNotPaused 
-        whenWithdrawalsNotPaused 
+        onlyOwner 
+        validAddress(to) 
     {
-        Fundraiser storage f = fundraisers[id];
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        require(msg.sender == f.creator, "Not creator");
-        require(!f.withdrawn || f.isFlexible, "Already withdrawn");
-
-        IERC20 token = IERC20(f.token);
-
-        if (f.isFlexible) {
-            uint256 amount = f.raised;
-            require(amount > 0, "No funds");
-            f.raised = 0;
-            require(token.transfer(f.creator, amount), "Transfer failed");
-            emit FundsWithdrawn(id, f.creator, amount);
-            return;
-        }
-
-        if (f.raised >= f.target) {
-            require(!f.withdrawn, "Already withdrawn");
-            f.withdrawn = true;
+        if (token == address(0)) {
+            (bool success, ) = to.call{value: amount}("");
+            if (!success) revert("ETH transfer failed");
         } else {
-            require(block.timestamp > f.endTime, "Too early");
-            require(f.closureInitiated && block.timestamp >= f.reclaimDeadline, "Not ready");
-            f.withdrawn = true;
+            if (!IERC20(token).transfer(to, amount)) revert("Token transfer failed");
         }
-
-        // Calculate ONLY standard success commission - NO multimedia bonus
-        uint256 commission = (f.raised * successCommission) / PRECISION;
-        uint256 netAmount = f.raised - commission;
-        f.raised = 0;
-
-        if (commission > 0) {
-            require(token.transfer(commissionWallet, commission), "Commission transfer failed");
-        }
-        require(token.transfer(f.creator, netAmount), "Transfer failed");
-
-        emit FundsWithdrawn(id, f.creator, netAmount);
-    }
-
-    /// @notice Initiate closure period for failed fundraiser
-    /// @param id Fundraiser ID
-    function initiateClosure(uint256 id) external whenNotPaused {
-        Fundraiser storage f = fundraisers[id];
-        require(msg.sender == f.creator, "Not creator");
-        require(!f.isFlexible, "Only non-flexible fundraisers");
-        require(block.timestamp > f.endTime, "Too early");
-        require(!f.closureInitiated, "Already initiated");
-
-        f.closureInitiated = true;
-        f.reclaimDeadline = block.timestamp + RECLAIM_PERIOD;
-
-        emit ClosureInitiated(id, f.reclaimDeadline);
-    }
-
-    // ========== MULTIMEDIA MANAGEMENT ==========
-
-    /// @notice Add multimedia to existing fundraiser
-    /// @param fundraiserId ID of fundraiser
-    /// @param mediaItems Array of media to add
-    function addMultimediaToFundraiser(uint256 fundraiserId, MediaItem[] calldata mediaItems)
-        external
-        whenNotPaused
-        whenMediaNotPaused
-        validFundraiserId(fundraiserId)
-        onlyMediaManager(fundraiserId)
-    {
-        if (mediaItems.length > MAX_MEDIA_BATCH) {
-            revert MediaLimitExceeded(mediaItems.length, MAX_MEDIA_BATCH);
-        }
-
-        Fundraiser storage f = fundraisers[fundraiserId];
-        uint256[4] storage typeCounts = mediaTypeCounts[fundraiserId];
-        uint256 totalCurrent = f.gallery.length;
         
-        // Check total limit
-        if (totalCurrent + mediaItems.length > MAX_TOTAL_MEDIA) {
-            revert MediaLimitExceeded(totalCurrent + mediaItems.length, MAX_TOTAL_MEDIA);
-        }
-
-        bool wasEmpty = (totalCurrent == 0);
-
-        for (uint256 i = 0; i < mediaItems.length; i++) {
-            MediaItem memory item = mediaItems[i];
-            
-            // Validate media type
-            if (item.mediaType > 3) {
-                revert InvalidMediaType(item.mediaType);
-            }
-            
-            // Validate IPFS hash
-            if (bytes(item.ipfsHash).length == 0) {
-                revert InvalidIPFSHash(item.ipfsHash);
-            }
-            
-            // Check type-specific limits
-            uint256 typeLimit = getMediaTypeLimit(item.mediaType);
-            if (typeCounts[item.mediaType] + 1 > typeLimit) {
-                revert MediaLimitExceeded(typeCounts[item.mediaType] + 1, typeLimit);
-            }
-            
-            // Create media item with metadata
-            MediaItem memory newItem = MediaItem({
-                ipfsHash: item.ipfsHash,
-                mediaType: item.mediaType,
-                filename: item.filename,
-                fileSize: item.fileSize,
-                uploadTime: block.timestamp,
-                uploader: msg.sender,
-                description: item.description
-            });
-            
-            // Add to gallery
-            f.gallery.push(newItem);
-            typeCounts[item.mediaType]++;
-            
-            emit MediaAdded(fundraiserId, item.ipfsHash, item.mediaType, item.filename, msg.sender);
-        }
-
-        // Mark as multimedia fundraiser (for tracking purposes only)
-        if (wasEmpty && mediaItems.length > 0) {
-            hasMultimedia[fundraiserId] = true;
-            emit MultimediaActivated(fundraiserId);
-        }
+        emit EmergencyWithdraw(token, to, amount);
     }
 
-    /// @notice Remove media from fundraiser
-    /// @param fundraiserId ID of fundraiser
-    /// @param mediaIndex Index of media to remove
-    function removeMediaFromFundraiser(uint256 fundraiserId, uint256 mediaIndex)
-        external
-        whenNotPaused
-        whenMediaNotPaused
-        validFundraiserId(fundraiserId)
-        onlyMediaManager(fundraiserId)
-    {
-        Fundraiser storage f = fundraisers[fundraiserId];
-        require(mediaIndex < f.gallery.length, "Invalid media index");
-        
-        MediaItem storage mediaToRemove = f.gallery[mediaIndex];
-        uint8 mediaType = mediaToRemove.mediaType;
-        string memory ipfsHash = mediaToRemove.ipfsHash;
-        
-        // Update counters
-        mediaTypeCounts[fundraiserId][mediaType]--;
-        
-        // Remove from array (swap with last and pop)
-        f.gallery[mediaIndex] = f.gallery[f.gallery.length - 1];
-        f.gallery.pop();
-        
-        emit MediaRemoved(fundraiserId, mediaIndex, ipfsHash);
+    // ========== AUTHORIZATION MANAGEMENT ==========
+
+    function authorizeProposer(address proposer) external onlyOwner validAddress(proposer) {
+        authorizedProposers[proposer] = true;
+        emit ProposerAuthorized(proposer);
     }
 
-    /// @notice Authorize address to manage media for fundraiser
-    /// @param fundraiserId ID of fundraiser
-    /// @param manager Address to authorize
-    function authorizeMediaManager(uint256 fundraiserId, address manager)
-        external
-        whenNotPaused
-        validFundraiserId(fundraiserId)
-        validAddress(manager)
-    {
-        Fundraiser storage f = fundraisers[fundraiserId];
-        require(msg.sender == f.creator, "Not creator");
-        
-        authorizedMediaManagers[fundraiserId][manager] = true;
-        emit MediaManagerAuthorized(fundraiserId, manager);
+    function revokeProposer(address proposer) external onlyOwner {
+        authorizedProposers[proposer] = false;
+        emit ProposerRevoked(proposer);
     }
 
-    /// @notice Revoke media management authorization
-    /// @param fundraiserId ID of fundraiser
-    /// @param manager Address to revoke
-    function revokeMediaManager(uint256 fundraiserId, address manager)
-        external
-        whenNotPaused
-        validFundraiserId(fundraiserId)
-    {
-        Fundraiser storage f = fundraisers[fundraiserId];
-        require(msg.sender == f.creator, "Not creator");
-        
-        authorizedMediaManagers[fundraiserId][manager] = false;
-        emit MediaManagerRevoked(fundraiserId, manager);
-    }
-
-    // ========== UPDATE SYSTEM WITH MULTIMEDIA ==========
-
-    /// @notice Post update with multimedia attachments
-    /// @param fundraiserId Fundraiser ID
-    /// @param content Text content
-    /// @param updateType Type of update
-    /// @param attachments Multimedia attachments
-    function postUpdateWithMultimedia(
-        uint256 fundraiserId, 
-        string calldata content,
-        uint8 updateType,
-        MediaItem[] calldata attachments
-    ) 
-        external 
-        whenNotPaused 
-        whenUpdatesNotPaused 
-        validFundraiserId(fundraiserId)
-        onlyFundraiserCreatorOrAuthorized(fundraiserId)
-    {
-        if (bytes(content).length > MAX_UPDATE_LENGTH) {
-            revert UpdateTooLong(bytes(content).length);
-        }
-        if (attachments.length > 10) { // Max 10 attachments per update
-            revert MediaLimitExceeded(attachments.length, 10);
-        }
-
-        updateCount++;
-        FundraiserUpdate storage update = fundraiserUpdates[updateCount];
-        update.id = updateCount;
-        update.fundraiserId = fundraiserId;
-        update.author = msg.sender;
-        update.content = content;
-        update.timestamp = block.timestamp;
-        update.updateType = updateType;
-
-        // Add attachments
-        for (uint256 i = 0; i < attachments.length; i++) {
-            MediaItem memory attachment = attachments[i];
-            attachment.uploadTime = block.timestamp;
-            attachment.uploader = msg.sender;
-            update.attachments.push(attachment);
-        }
-
-        Fundraiser storage f = fundraisers[fundraiserId];
-        f.updateIds.push(updateCount);
-
-        emit UpdatePosted(updateCount, fundraiserId, msg.sender, content, updateType);
-    }
-
-    /// @notice Post simple text update (legacy support)
-    function postUpdate(uint256 fundraiserId, string calldata content) 
-        external 
-        whenNotPaused 
-        whenUpdatesNotPaused 
-        validFundraiserId(fundraiserId)
-        onlyFundraiserCreatorOrAuthorized(fundraiserId)
-    {
-        if (bytes(content).length > MAX_UPDATE_LENGTH) {
-            revert UpdateTooLong(bytes(content).length);
-        }
-
-        updateCount++;
-        FundraiserUpdate storage update = fundraiserUpdates[updateCount];
-        update.id = updateCount;
-        update.fundraiserId = fundraiserId;
-        update.author = msg.sender;
-        update.content = content;
-        update.timestamp = block.timestamp;
-        update.updateType = 0; // general update
-
-        Fundraiser storage f = fundraisers[fundraiserId];
-        f.updateIds.push(updateCount);
-
-        emit UpdatePosted(updateCount, fundraiserId, msg.sender, content, 0);
-    }
-
-    /// @notice Pin update to top
-    function pinUpdate(uint256 updateId) 
-        external 
-        whenNotPaused 
-        whenUpdatesNotPaused 
-    {
-        require(updateId <= updateCount && updateId > 0, "Invalid update");
-        
-        FundraiserUpdate storage update = fundraiserUpdates[updateId];
-        uint256 fundraiserId = update.fundraiserId;
-        
-        Fundraiser storage f = fundraisers[fundraiserId];
-        require(msg.sender == f.creator, "Not creator");
-
-        uint256 oldPinnedId = f.pinnedUpdateId;
-        if (oldPinnedId != 0) {
-            fundraiserUpdates[oldPinnedId].isPinned = false;
-            emit UpdateUnpinned(fundraiserId, oldPinnedId);
-        }
-
-        f.pinnedUpdateId = updateId;
-        update.isPinned = true;
-
-        emit UpdatePinned(updateId, fundraiserId);
-    }
-
-    /// @notice Unpin current pinned update
-    function unpinUpdate(uint256 fundraiserId) 
-        external 
-        whenNotPaused 
-        whenUpdatesNotPaused 
-        validFundraiserId(fundraiserId)
-    {
-        Fundraiser storage f = fundraisers[fundraiserId];
-        require(msg.sender == f.creator, "Not creator");
-        require(f.pinnedUpdateId != 0, "No pinned update");
-
-        uint256 oldPinnedId = f.pinnedUpdateId;
-        f.pinnedUpdateId = 0;
-        fundraiserUpdates[oldPinnedId].isPinned = false;
-
-        emit UpdateUnpinned(fundraiserId, oldPinnedId);
-    }
-
-    /// @notice Authorize updater
     function authorizeUpdater(uint256 fundraiserId, address updater) 
         external 
-        whenNotPaused 
         validFundraiserId(fundraiserId)
         validAddress(updater)
     {
-        Fundraiser storage f = fundraisers[fundraiserId];
-        require(msg.sender == f.creator, "Not creator");
-        
+        if (msg.sender != fundraisers[fundraiserId].creator) {
+            revert UnauthorizedAccess(msg.sender, fundraisers[fundraiserId].creator);
+        }
         authorizedUpdaters[fundraiserId][updater] = true;
         emit UpdaterAuthorized(fundraiserId, updater);
     }
 
-    /// @notice Revoke updater authorization
     function revokeUpdater(uint256 fundraiserId, address updater) 
         external 
-        whenNotPaused 
         validFundraiserId(fundraiserId)
     {
-        Fundraiser storage f = fundraisers[fundraiserId];
-        require(msg.sender == f.creator, "Not creator");
-        
+        if (msg.sender != fundraisers[fundraiserId].creator) {
+            revert UnauthorizedAccess(msg.sender, fundraisers[fundraiserId].creator);
+        }
         authorizedUpdaters[fundraiserId][updater] = false;
         emit UpdaterRevoked(fundraiserId, updater);
     }
 
+    function authorizeMediaManager(uint256 fundraiserId, address manager)
+        external
+        validFundraiserId(fundraiserId)
+        validAddress(manager)
+    {
+        if (msg.sender != fundraisers[fundraiserId].creator) {
+            revert UnauthorizedAccess(msg.sender, fundraisers[fundraiserId].creator);
+        }
+        authorizedMediaManagers[fundraiserId][manager] = true;
+        emit MediaManagerAuthorized(fundraiserId, manager);
+    }
+
+    function revokeMediaManager(uint256 fundraiserId, address manager)
+        external
+        validFundraiserId(fundraiserId)
+    {
+        if (msg.sender != fundraisers[fundraiserId].creator) {
+            revert UnauthorizedAccess(msg.sender, fundraisers[fundraiserId].creator);
+        }
+        authorizedMediaManagers[fundraiserId][manager] = false;
+        emit MediaManagerRevoked(fundraiserId, manager);
+    }
+
     // ========== VIEW FUNCTIONS ==========
 
-    /// @notice Get media type limit
     function getMediaTypeLimit(uint8 mediaType) public pure returns (uint256) {
-        if (mediaType == 0) return MAX_IMAGES;      // Images
-        if (mediaType == 1) return MAX_VIDEOS;      // Videos
-        if (mediaType == 2) return MAX_AUDIO;       // Audio
-        if (mediaType == 3) return MAX_DOCUMENTS;   // Documents
+        if (mediaType == 0) return 100;      // Images
+        if (mediaType == 1) return 30;       // Videos
+        if (mediaType == 2) return 20;       // Audio
+        if (mediaType == 3) return 50;       // Documents
         return 0;
     }
 
-    /// @notice Check if can add more media
-    function canAddMedia(uint256 fundraiserId, uint8 mediaType, uint256 quantity) 
-        external view 
-        returns (bool canAdd, string memory reason) 
-    {
-        Fundraiser storage f = fundraisers[fundraiserId];
-        uint256 totalCurrent = f.gallery.length;
-        uint256 typeCurrent = mediaTypeCounts[fundraiserId][mediaType];
-        uint256 typeLimit = getMediaTypeLimit(mediaType);
-        
-        if (totalCurrent + quantity > MAX_TOTAL_MEDIA) {
-            return (false, "Total media limit exceeded (200 max)");
-        }
-        
-        if (typeCurrent + quantity > typeLimit) {
-            return (false, "Media type limit exceeded");
-        }
-        
-        if (quantity > MAX_MEDIA_BATCH) {
-            return (false, "Batch size too large (20 max)");
-        }
-        
-        return (true, "Can add media");
-    }
-
-    /// @notice Get multimedia statistics for fundraiser
-    function getMediaStatistics(uint256 fundraiserId) 
+    function getFundraiserDetails(uint256 fundraiserId) 
         external view 
         validFundraiserId(fundraiserId)
-        returns (uint256 images, uint256 videos, uint256 audio, uint256 documents, uint256 total) 
+        returns (
+            string memory title,
+            string memory description,
+            string memory location,
+            uint256 endDate,
+            uint8 fundraiserType,
+            uint8 status,
+            address token,
+            uint256 goalAmount,
+            uint256 raisedAmount,
+            address creator,
+            uint256 _updateCount,
+            uint256 mediaCount,
+            uint256 extensionCount,
+            bool isSuspended,
+            string memory suspensionReason
+        ) 
     {
-        uint256[4] storage counts = mediaTypeCounts[fundraiserId];
-        images = counts[0];
-        videos = counts[1];
-        audio = counts[2];
-        documents = counts[3];
-        total = fundraisers[fundraiserId].gallery.length;
+        Fundraiser storage f = fundraisers[fundraiserId];
+        return (
+            f.title, f.description, f.location, f.packed.endDate, f.packed.fundraiserType, f.packed.status,
+            f.token, f.packed.goalAmount, f.packed.raisedAmount, f.creator,
+            f.updateIds.length, f.gallery.length, f.packed.extensionCount,
+            f.packed.isSuspended, f.suspensionReason
+        );
     }
 
-    /// @notice Get fundraiser gallery (paginated)
+    function getFundraiserProgress(uint256 fundraiserId) 
+        external view 
+        validFundraiserId(fundraiserId)
+        returns (
+            uint256 raised,
+            uint256 goal,
+            uint256 percentage,
+            uint256 donorsCount,
+            uint256 timeLeft,
+            bool canExtend,
+            uint256 refundDeadline,
+            bool isSuspended,
+            uint256 suspensionTime
+        ) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        
+        percentage = f.packed.goalAmount > 0 ? (f.packed.raisedAmount * 100) / f.packed.goalAmount : 100;
+        if (percentage > 100) percentage = 100;
+        
+        timeLeft = block.timestamp >= f.packed.endDate ? 0 : f.packed.endDate - block.timestamp;
+        
+        return (f.packed.raisedAmount, f.packed.goalAmount, percentage, f.donors.length, timeLeft, 
+                canExtend, f.refundDeadline, f.packed.isSuspended, f.packed.suspensionTime);
+    }
+
+    function getFundraiserUpdates(uint256 fundraiserId, uint256 offset, uint256 limit) 
+        external view 
+        validFundraiserId(fundraiserId)
+        returns (FundraiserUpdate[] memory updates, uint256 total) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        uint256[] storage updateIds = f.updateIds;
+        total = updateIds.length;
+        
+        if (offset >= total) return (new FundraiserUpdate[](0), total);
+        
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        
+        updates = new FundraiserUpdate[](end - offset);
+        
+        for (uint256 i = 0; i < end - offset; i++) {
+            uint256 updateIndex = total - 1 - offset - i;
+            uint256 updateId = updateIds[updateIndex];
+            updates[i] = fundraiserUpdates[updateId];
+        }
+    }
+
     function getFundraiserGallery(uint256 fundraiserId, uint256 offset, uint256 limit) 
         external view 
         validFundraiserId(fundraiserId)
@@ -1063,14 +1511,10 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         Fundraiser storage f = fundraisers[fundraiserId];
         total = f.gallery.length;
         
-        if (offset >= total) {
-            return (new MediaItem[](0), total);
-        }
+        if (offset >= total) return (new MediaItem[](0), total);
         
         uint256 end = offset + limit;
-        if (end > total) {
-            end = total;
-        }
+        if (end > total) end = total;
         
         media = new MediaItem[](end - offset);
         for (uint256 i = offset; i < end; i++) {
@@ -1078,290 +1522,373 @@ contract PoliDAO is Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    /// @notice Get update with attachments
-    function getUpdateWithAttachments(uint256 updateId) 
-        external view 
-        returns (FundraiserUpdate memory) 
-    {
-        require(updateId <= updateCount && updateId > 0, "Invalid update");
-        return fundraiserUpdates[updateId];
-    }
-
-    /// @notice Check if address can create proposals
-    /// @param proposer Address to check
-    /// @return True if address can create proposals
-    function canPropose(address proposer) external view returns (bool) {
-        return proposer == owner() || authorizedProposers[proposer];
-    }
-
-    /// @notice Check if address can manage media for fundraiser
-    function canManageMedia(uint256 fundraiserId, address manager) 
+    function getDonors(uint256 fundraiserId, uint256 offset, uint256 limit) 
         external view 
         validFundraiserId(fundraiserId)
-        returns (bool) 
+        returns (address[] memory donors, uint256[] memory amounts, uint256 total) 
     {
         Fundraiser storage f = fundraisers[fundraiserId];
-        return manager == f.creator || 
-               authorizedUpdaters[fundraiserId][manager] || 
-               authorizedMediaManagers[fundraiserId][manager];
-    }
-
-    /// @notice Get remaining time for proposal voting
-    /// @param proposalId Proposal ID
-    /// @return Remaining time in seconds (0 if ended)
-    function timeLeftOnProposal(uint256 proposalId) external view returns (uint256) {
-        if (proposalId > proposalCount || proposalId == 0) return 0;
-        Proposal storage p = proposals[proposalId];
-        if (block.timestamp >= p.endTime) return 0;
-        return p.endTime - block.timestamp;
-    }
-
-    /// @notice Get remaining time for fundraiser
-    /// @param id Fundraiser ID
-    /// @return Remaining time in seconds (0 if ended)
-    function timeLeftOnFundraiser(uint256 id) external view returns (uint256) {
-        if (id > fundraiserCount || id == 0) return 0;
-        Fundraiser storage f = fundraisers[id];
-        if (block.timestamp >= f.endTime) return 0;
-        return f.endTime - block.timestamp;
-    }
-
-    /// @notice Get all proposal IDs
-    /// @return Array of proposal IDs
-    function getAllProposalIds() external view returns (uint256[] memory) {
-        return proposalIds;
-    }
-
-    /// @notice Get all fundraiser IDs
-    /// @return Array of fundraiser IDs
-    function getAllFundraiserIds() external view returns (uint256[] memory) {
-        return fundraiserIds;
-    }
-
-    /// @notice Get proposal summary
-    /// @param proposalId Proposal ID
-    /// @return Proposal summary struct
-    function getProposalSummary(uint256 proposalId) external view returns (ProposalSummary memory) {
-        require(proposalId <= proposalCount && proposalId > 0, "Invalid proposal");
-        Proposal storage p = proposals[proposalId];
-        
-        return ProposalSummary({
-            id: p.id,
-            question: p.question,
-            yesVotes: p.yesVotes,
-            noVotes: p.noVotes,
-            endTime: p.endTime,
-            creator: p.creator,
-            metadataHash: p.metadataHash
-        });
-    }
-
-    /// @notice Get enhanced fundraiser summary
-    /// @param id Fundraiser ID
-    /// @return Enhanced fundraiser summary struct
-    function getFundraiserSummary(uint256 id) external view returns (FundraiserSummary memory) {
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        Fundraiser storage f = fundraisers[id];
-        
-        return FundraiserSummary({
-            id: f.id,
-            creator: f.creator,
-            token: f.token,
-            target: f.target,
-            raised: f.raised,
-            endTime: f.endTime,
-            isFlexible: f.isFlexible,
-            closureInitiated: f.closureInitiated,
-            updateCount: f.updateIds.length,
-            pinnedUpdateId: f.pinnedUpdateId,
-            mediaCount: f.gallery.length,
-            metadataHash: f.metadataHash
-        });
-    }
-
-    /// @notice Get donors with pagination
-    /// @param id Fundraiser ID
-    /// @param offset Starting index
-    /// @param limit Maximum number of donors to return
-    /// @return donors Array of donor addresses
-    /// @return total Total number of donors
-    function getDonorsPaginated(uint256 id, uint256 offset, uint256 limit) 
-        external view returns (address[] memory donors, uint256 total) 
-    {
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        require(limit <= MAX_DONORS_BATCH, "Limit too high");
-        
-        address[] storage allDonors = fundraisers[id].donors;
+        address[] storage allDonors = f.donors;
         total = allDonors.length;
         
-        if (offset >= total) {
-            return (new address[](0), total);
-        }
+        if (offset >= total) return (new address[](0), new uint256[](0), total);
         
         uint256 end = offset + limit;
-        if (end > total) {
-            end = total;
-        }
+        if (end > total) end = total;
         
         donors = new address[](end - offset);
+        amounts = new uint256[](end - offset);
+        
         for (uint256 i = offset; i < end; i++) {
             donors[i - offset] = allDonors[i];
+            amounts[i - offset] = f.donations[allDonors[i]];
         }
     }
 
-    /// @notice Get total number of donors for a fundraiser
-    /// @param id Fundraiser ID
-    /// @return Number of unique donors
-    function getDonorsCount(uint256 id) external view returns (uint256) {
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        return fundraisers[id].donors.length;
+    function getSuspensionInfo(uint256 fundraiserId) 
+        external view 
+        validFundraiserId(fundraiserId)
+        returns (
+            bool isSuspended,
+            uint256 suspensionTime,
+            string memory suspensionReason
+        ) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        return (f.packed.isSuspended, f.packed.suspensionTime, f.suspensionReason);
     }
 
-    /// @notice Check contract health
-    function healthCheck() external view returns (
-        bool contractNotPaused,
-        bool votingEnabled,
-        bool donationsEnabled,
-        bool withdrawalsEnabled,
-        uint256 totalFundraisers,
-        uint256 totalProposals
-    ) {
-        return (
-            !paused(),
-            !votingPaused,
-            !donationsPaused,
-            !withdrawalsPaused,
-            fundraiserCount,
-            proposalCount
-        );
-    }
-
-    // ========== LEGACY SUPPORT FUNCTIONS ==========
-
-    /// @notice Get proposal data (legacy format)
-    /// @param id Proposal ID
-    /// @return id, question, yesVotes, noVotes, endTime, exists
-    function getProposal(uint256 id) external view returns (
-        uint256, string memory, uint256, uint256, uint256, bool
-    ) {
-        require(id <= proposalCount && id > 0, "Invalid proposal");
-        Proposal storage p = proposals[id];
-        return (p.id, p.question, p.yesVotes, p.noVotes, p.endTime, true);
-    }
-
-    /// @notice Get proposal creator
-    /// @param proposalId Proposal ID
-    /// @return Creator address
-    function getProposalCreator(uint256 proposalId) external view returns (address) {
-        require(proposalId <= proposalCount && proposalId > 0, "Invalid proposal");
-        return proposals[proposalId].creator;
-    }
-
-    /// @notice Get fundraiser data (legacy format)
-    /// @param id Fundraiser ID
-    /// @return id, creator, token, target, raised, endTime, withdrawn, isFlexible, reclaimDeadline, closureInitiated
+    // Legacy compatibility
     function getFundraiser(uint256 id) external view returns (
         uint256, address, address, uint256, uint256,
         uint256, bool, bool, uint256, bool
     ) {
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
+        if (id == 0 || id > fundraiserCount) revert FundraiserNotFound(id);
         Fundraiser storage f = fundraisers[id];
+        
+        bool isFlexible = (f.packed.fundraiserType == uint8(FundraiserType.WITHOUT_GOAL));
+        bool withdrawn = f.packed.fundsWithdrawn;
+        bool closureInitiated = (f.packed.status == uint8(FundraiserStatus.REFUND_PERIOD));
+        
+        return (f.packed.id, f.creator, f.token, f.packed.goalAmount, f.packed.raisedAmount,
+                f.packed.endDate, withdrawn, isFlexible, f.refundDeadline, closureInitiated);
+    }
+
+    function getProposal(uint256 proposalId) external view returns (
+        uint256 id,
+        string memory question,
+        uint256 yesVotes,
+        uint256 noVotes,
+        uint256 endTime,
+        address creator,
+        string memory metadataHash
+    ) {
+        if (proposalId == 0 || proposalId > proposalCount) revert("Invalid proposal");
+        Proposal storage p = proposals[proposalId];
+        return (p.id, p.question, p.yesVotes, p.noVotes, p.endTime, p.creator, p.metadataHash);
+    }
+
+    function getUpdate(uint256 updateId) external view returns (
+        uint256 id,
+        uint256 fundraiserId,
+        address author,
+        string memory content,
+        uint256 timestamp,
+        uint8 updateType,
+        bool isPinned,
+        uint256 attachmentCount
+    ) {
+        if (updateId == 0 || updateId > updateCount) revert("Invalid update");
+        FundraiserUpdate storage update = fundraiserUpdates[updateId];
         return (
-            f.id, f.creator, f.token, f.target, f.raised,
-            f.endTime, f.withdrawn, f.isFlexible, f.reclaimDeadline, f.closureInitiated
+            update.id,
+            update.fundraiserId,
+            update.author,
+            update.content,
+            update.timestamp,
+            update.updateType,
+            update.isPinned,
+            update.attachments.length
         );
     }
 
-    /// @notice Get all donors (legacy function - limited to prevent gas issues)
-    /// @param id Fundraiser ID
-    /// @return Array of donor addresses (first 100 donors only)
-    function getDonors(uint256 id) external view returns (address[] memory) {
-        require(id <= fundraiserCount && id > 0, "Invalid fundraiser");
-        address[] storage allDonors = fundraisers[id].donors;
+    function getUpdateAttachments(uint256 updateId) external view returns (MediaItem[] memory) {
+        if (updateId == 0 || updateId > updateCount) revert("Invalid update");
+        return fundraiserUpdates[updateId].attachments;
+    }
+
+    // ========== SEARCH & FILTER FUNCTIONS ==========
+
+    function getFundraisersByStatus(uint8 status, uint256 offset, uint256 limit) 
+        external view 
+        returns (uint256[] memory ids, uint256 total) 
+    {
+        uint256[] memory matchingIds = new uint256[](fundraiserCount);
+        uint256 count = 0;
         
-        uint256 length = allDonors.length;
-        if (length > MAX_DONORS_BATCH) {
-            length = MAX_DONORS_BATCH;
+        for (uint256 i = 1; i <= fundraiserCount; i++) {
+            if (fundraisers[i].packed.status == status) {
+                matchingIds[count] = i;
+                count++;
+            }
         }
         
-        address[] memory result = new address[](length);
-        for (uint256 i = 0; i < length; i++) {
-            result[i] = allDonors[i];
+        total = count;
+        if (offset >= total) return (new uint256[](0), total);
+        
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        
+        ids = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            ids[i - offset] = matchingIds[i];
+        }
+    }
+
+    function getSuspendedFundraisers(uint256 offset, uint256 limit) 
+        external view 
+        returns (uint256[] memory ids, uint256 total) 
+    {
+        uint256[] memory suspendedIds = new uint256[](fundraiserCount);
+        uint256 count = 0;
+        
+        for (uint256 i = 1; i <= fundraiserCount; i++) {
+            if (fundraisers[i].packed.isSuspended) {
+                suspendedIds[count] = i;
+                count++;
+            }
         }
         
-        return result;
+        total = count;
+        if (offset >= total) return (new uint256[](0), total);
+        
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        
+        ids = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            ids[i - offset] = suspendedIds[i];
+        }
+    }
+
+    function getFundraisersByCreator(address creator, uint256 offset, uint256 limit) 
+        external view 
+        returns (uint256[] memory ids, uint256 total) 
+    {
+        uint256[] memory creatorIds = new uint256[](fundraiserCount);
+        uint256 count = 0;
+        
+        for (uint256 i = 1; i <= fundraiserCount; i++) {
+            if (fundraisers[i].creator == creator) {
+                creatorIds[count] = i;
+                count++;
+            }
+        }
+        
+        total = count;
+        if (offset >= total) return (new uint256[](0), total);
+        
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        
+        ids = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            ids[i - offset] = creatorIds[i];
+        }
+    }
+
+    function getFundraisersByToken(address token, uint256 offset, uint256 limit) 
+        external view 
+        returns (uint256[] memory ids, uint256 total) 
+    {
+        uint256[] memory tokenIds = new uint256[](fundraiserCount);
+        uint256 count = 0;
+        
+        for (uint256 i = 1; i <= fundraiserCount; i++) {
+            if (fundraisers[i].token == token) {
+                tokenIds[count] = i;
+                count++;
+            }
+        }
+        
+        total = count;
+        if (offset >= total) return (new uint256[](0), total);
+        
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        
+        ids = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            ids[i - offset] = tokenIds[i];
+        }
+    }
+
+    // ========== STATISTICS FUNCTIONS ==========
+
+    function getPlatformStats() external view returns (
+        uint256 totalFundraisers,
+        uint256 totalProposals,
+        uint256 totalUpdates,
+        uint256 activeFundraisers,
+        uint256 successfulFundraisers,
+        uint256 suspendedFundraisers,
+        uint256 totalWhitelistedTokens
+    ) {
+        uint256 active = 0;
+        uint256 successful = 0;
+        uint256 suspended = 0;
+        
+        for (uint256 i = 1; i <= fundraiserCount; i++) {
+            if (fundraisers[i].packed.status == uint8(FundraiserStatus.ACTIVE)) active++;
+            if (fundraisers[i].packed.status == uint8(FundraiserStatus.SUCCESSFUL)) successful++;
+            if (fundraisers[i].packed.isSuspended) suspended++;
+        }
+        
+        return (
+            fundraiserCount,
+            proposalCount,
+            updateCount,
+            active,
+            successful,
+            suspended,
+            whitelistedTokens.length
+        );
+    }
+
+    function getFundraiserStats(uint256 fundraiserId) 
+        external view 
+        validFundraiserId(fundraiserId)
+        returns (
+            uint256 totalDonations,
+            uint256 averageDonation,
+            uint256 totalRefunds,
+            uint256 mediaItems,
+            uint256 updatesCount,
+            uint256 daysActive,
+            uint256 goalProgress
+        ) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        
+        totalDonations = f.packed.raisedAmount;
+        averageDonation = f.donors.length > 0 ? f.packed.raisedAmount / f.donors.length : 0;
+        
+        uint256 refundCount = 0;
+        for (uint256 i = 0; i < f.donors.length; i++) {
+            if (f.hasRefunded[f.donors[i]]) {
+                refundCount++;
+            }
+        }
+        totalRefunds = refundCount;
+        
+        mediaItems = f.gallery.length;
+        updatesCount = f.updateIds.length;
+        
+        uint256 startTime = block.timestamp - (f.packed.endDate - f.packed.originalEndDate + MAX_DURATION);
+        daysActive = (block.timestamp - startTime) / 1 days;
+        
+        if (f.packed.goalAmount > 0) {
+            goalProgress = (f.packed.raisedAmount * 10000) / f.packed.goalAmount;
+            if (goalProgress > 10000) goalProgress = 10000;
+        } else {
+            goalProgress = 10000;
+        }
+        
+        return (totalDonations, averageDonation, totalRefunds, mediaItems, updatesCount, daysActive, goalProgress);
+    }
+
+    // ========== SECURITY & EMERGENCY FUNCTIONS ==========
+
+    function emergencyFreeze() external onlyOwner {
+        emergencyPauseAll();
+        
+        for (uint256 i = 1; i <= fundraiserCount; i++) {
+            if (fundraisers[i].packed.status == uint8(FundraiserStatus.ACTIVE) && !fundraisers[i].packed.isSuspended) {
+                fundraisers[i].packed.isSuspended = true;
+                fundraisers[i].packed.suspensionTime = uint32(block.timestamp);
+                fundraisers[i].suspensionReason = "Emergency platform freeze";
+                fundraisers[i].packed.status = uint8(FundraiserStatus.SUSPENDED);
+                
+                emit FundraiserSuspended(i, msg.sender, "Emergency platform freeze", block.timestamp);
+            }
+        }
+    }
+
+    function canRefund(uint256 fundraiserId, address donor) external view returns (bool, string memory reason) {
+        if (fundraiserId == 0 || fundraiserId > fundraiserCount) {
+            return (false, "Invalid fundraiser");
+        }
+        
+        Fundraiser storage f = fundraisers[fundraiserId];
+        
+        if (f.donations[donor] == 0) {
+            return (false, "No donation found");
+        }
+        
+        if (f.hasRefunded[donor]) {
+            return (false, "Already refunded");
+        }
+        
+        if (f.packed.isSuspended) {
+            return (true, "Suspended fundraiser - unlimited refund");
+        }
+        
+        if (f.packed.fundraiserType != uint8(FundraiserType.WITH_GOAL)) {
+            return (false, "No refunds for WITHOUT_GOAL campaigns");
+        }
+        
+        if (f.packed.status != uint8(FundraiserStatus.REFUND_PERIOD)) {
+            return (false, "Not in refund period");
+        }
+        
+        if (block.timestamp > f.refundDeadline) {
+            return (false, "Refund deadline passed");
+        }
+        
+        return (true, "Eligible for refund");
+    }
+
+    function batchUpdateStatuses(uint256[] calldata _fundraiserIds) external {
+        for (uint256 i = 0; i < _fundraiserIds.length; i++) {
+            if (_fundraiserIds[i] <= fundraiserCount && _fundraiserIds[i] > 0) {
+                _updateFundraiserStatus(_fundraiserIds[i]);
+            }
+        }
+    }
+
+    // ========== GETTERS ==========
+    
+    function getAllFundraiserIds() external view returns (uint256[] memory) { return fundraiserIds; }
+    function getAllProposalIds() external view returns (uint256[] memory) { return proposalIds; }
+    function getWhitelistedTokens() external view returns (address[] memory) { return whitelistedTokens; }
+    function getFundraiserCount() external view returns (uint256) { return fundraiserCount; }
+    function getProposalCount() external view returns (uint256) { return proposalCount; }
+    function getUpdateCount() external view returns (uint256) { return updateCount; }
+    
+    function canPropose(address proposer) external view returns (bool) {
+        return proposer == owner() || authorizedProposers[proposer];
+    }
+    
+    function canUpdate(uint256 fundraiserId, address updater) external view validFundraiserId(fundraiserId) returns (bool) {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        return updater == f.creator || authorizedUpdaters[fundraiserId][updater];
+    }
+
+    function hasVoted(uint256 proposalId, address voter) external view returns (bool) {
+        if (proposalId == 0 || proposalId > proposalCount) return false;
+        return proposals[proposalId].hasVoted[voter];
+    }
+
+    function donationOf(uint256 id, address donor) external view returns (uint256) {
+        if (id == 0 || id > fundraiserCount) return 0;
+        return fundraisers[id].donations[donor];
     }
 
     // ========== UTILITY FUNCTIONS ==========
 
-    /// @notice Get total number of proposals
-    /// @return Number of proposals
-    function getProposalCount() external view returns (uint256) {
-        return proposalCount;
+    function updateFundraiserStatus(uint256 fundraiserId) external validFundraiserId(fundraiserId) {
+        _updateFundraiserStatus(fundraiserId);
     }
 
-    /// @notice Get total number of fundraisers
-    /// @return Number of fundraisers
-    function getFundraiserCount() external view returns (uint256) {
-        return fundraiserCount;
-    }
-
-    /// @notice Get total number of updates
-    /// @return Number of updates
-    function getUpdateCount() external view returns (uint256) {
-        return updateCount;
-    }
-
-    /// @notice Check if address has voted on proposal
-    /// @param proposalId Proposal ID
-    /// @param voter Voter address
-    /// @return True if voted
-    function hasVoted(uint256 proposalId, address voter) external view returns (bool) {
-        if (proposalId > proposalCount || proposalId == 0) return false;
-        return proposals[proposalId].hasVoted[voter];
-    }
-
-    /// @notice Get donation amount for address
-    /// @param id Fundraiser ID
-    /// @param donor Donor address
-    /// @return Donation amount
-    function donationOf(uint256 id, address donor) external view returns (uint256) {
-        if (id > fundraiserCount || id == 0) return 0;
-        return fundraisers[id].donations[donor];
-    }
-
-    /// @notice Check if address has been refunded
-    /// @param id Fundraiser ID
-    /// @param donor Donor address
-    /// @return True if refunded
-    function hasRefunded(uint256 id, address donor) external view returns (bool) {
-        if (id > fundraiserCount || id == 0) return false;
-        return fundraisers[id].refunded[donor];
-    }
-
-    /// @notice Get all whitelisted tokens
-    /// @return Array of token addresses
-    function getWhitelistedTokens() external view returns (address[] memory) {
-        return whitelistedTokens;
-    }
-
-    /// @notice Get daily donation count for specific day
-    /// @param day Day timestamp divided by 1 days
-    /// @return Donation count for that day
-    function getDailyDonationCount(uint256 day) external view returns (uint256) {
-        return dailyDonationCount[day];
-    }
-
-    /// @notice Get today's donation count
-    /// @return Today's donation count
-    function getTodayDonationCount() external view returns (uint256) {
-        return dailyDonationCount[block.timestamp / 1 days];
-    }
-
-    // ========== RECEIVE FUNCTION ==========
-
-    /// @notice Receive function to accept ETH (for emergency purposes)
-    receive() external payable {
-        // ETH can be sent to contract for emergency withdrawal
-    }
+    receive() external payable {}
 }
