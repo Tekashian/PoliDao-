@@ -772,7 +772,7 @@ contract PoliDAO is Ownable, Pausable, EIP712, Multicall {
         }
         if (_fundraiserIds.length > 10) revert("Too many donations in batch");
         
-        bytes32 batchId = keccak256(abi.encodePacked(msg.sender, block.timestamp, _fundraiserIds, amounts));
+        bytes32 batchId = keccak256(abi.encode(msg.sender, block.timestamp, _fundraiserIds, amounts));
         if (executedBatches[batchId]) revert BatchAlreadyExecuted(batchId);
         executedBatches[batchId] = true;
         

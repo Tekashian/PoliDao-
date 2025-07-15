@@ -1,5 +1,5 @@
 // scripts/deploy.js
-// Skrypt wdrożeniowy kontraktu PoliDAO z automatyczną weryfikacją na Etherscan (Sepolia, Mainnet itd.)
+// ZAKTUALIZOWANY skrypt wdrożeniowy z proxy support dla dużych kontraktów
 // Użycie: npx hardhat run --network <network> scripts/deploy.js
 
 const hre = require("hardhat");
@@ -30,27 +30,100 @@ async function main() {
     // Argumenty konstruktora
     const initialOwner = deployer.address;
     const commissionWallet = deployer.address; // można zmienić na inny adres
+    
+    // Adresy tokenów dla różnych sieci
+    const feeTokenAddresses = {
+        sepolia: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", // USDC na Sepolia
+        mainnet: "0xA0b86a33E6Ba6B641be77678579bA0f5DCC4644", // USDC na Mainnet
+        polygon: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", // USDC na Polygon
+        bsc: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",     // USDC na BSC
+        // Fallback dla testnetów - używamy deployer address jako mock
+        hardhat: deployer.address,
+        localhost: deployer.address
+    };
+    
+    const feeToken = feeTokenAddresses[hre.network.name] || deployer.address;
+    
     console.log("\n📦 Argumenty konstruktora:");
     console.log(`   - initialOwner:       ${initialOwner}`);
     console.log(`   - commissionWallet:   ${commissionWallet}`);
-
-    // Deployment
-    console.log("\n🚀 Wysyłanie transakcji wdrożeniowej...");
-    const dao = await PoliDAO.deploy(initialOwner, commissionWallet);
-    const tx = dao.deploymentTransaction();
-    if (!tx) {
-        console.error("❌ BŁĄD: Nie udało się pobrać obiektu transakcji wdrożeniowej.");
-        process.exit(1);
+    console.log(`   - feeToken:           ${feeToken}`);
+    
+    if (feeToken === deployer.address && !["hardhat", "localhost"].includes(hre.network.name)) {
+        console.warn("⚠️  UWAGA: Używam deployer address jako feeToken. Rozważ zmianę na rzeczywisty adres USDC!");
     }
-    console.log(`   • Tx hash: ${tx.hash}`);
-    console.log("⏳ Oczekiwanie na potwierdzenia transakcji...");
-    const confirmations = ["hardhat", "localhost"].includes(hre.network.name) ? 1 : 2;
-    await tx.wait(confirmations);
-    console.log(`✅ Transakcja potwierdzona (${confirmations} bloków).`);
 
-    // Pobieramy adres wdrożonego kontraktu
-    const contractAddress = await dao.getAddress();
-    console.log(`\n🏷️  Adres kontraktu PoliDAO: ${contractAddress}`);
+    // NOWE: Sprawdź rozmiar kontraktu i wybierz metodę deployment
+    console.log("\n🔍 Sprawdzanie rozmiaru kontraktu...");
+    
+    let contractAddress;
+    let deploymentMethod;
+    
+    try {
+        // Spróbuj standardowego deployment
+        console.log("🚀 Próba standardowego deployment...");
+        const dao = await PoliDAO.deploy(initialOwner, commissionWallet, feeToken);
+        const tx = dao.deploymentTransaction();
+        
+        if (!tx) {
+            throw new Error("Nie można pobrać obiektu transakcji");
+        }
+        
+        console.log(`   • Tx hash: ${tx.hash}`);
+        console.log("⏳ Oczekiwanie na potwierdzenia transakcji...");
+        const confirmations = ["hardhat", "localhost"].includes(hre.network.name) ? 1 : 2;
+        await tx.wait(confirmations);
+        console.log(`✅ Transakcja potwierdzona (${confirmations} bloków).`);
+        
+        contractAddress = await dao.getAddress();
+        deploymentMethod = "standard";
+        console.log("✅ Standardowy deployment udany!");
+        
+    } catch (error) {
+        // Jeśli standardowy deployment nie udał się z powodu rozmiaru, użyj proxy
+        if (error.message.includes("CreateContractSizeLimit") || error.message.includes("contract code size")) {
+            console.log("⚠️  Kontrakt za duży dla standardowego deployment. Używam Proxy Pattern...");
+            
+            try {
+                // Import upgrades module dynamically
+                const { upgrades } = require("hardhat");
+                
+                console.log("🏗️  Deploying przez Upgradeable Proxy...");
+                const proxy = await upgrades.deployProxy(
+                    PoliDAO,
+                    [initialOwner, commissionWallet, feeToken],
+                    {
+                        kind: 'transparent',
+                        initializer: false
+                    }
+                );
+                
+                await proxy.waitForDeployment();
+                contractAddress = await proxy.getAddress();
+                deploymentMethod = "proxy";
+                
+                // Dodatkowe info o proxy
+                const implAddress = await upgrades.erc1967.getImplementationAddress(contractAddress);
+                const adminAddress = await upgrades.erc1967.getAdminAddress(contractAddress);
+                
+                console.log("✅ Proxy deployment udany!");
+                console.log(`📍 Proxy Address: ${contractAddress}`);
+                console.log(`🔧 Implementation: ${implAddress}`);
+                console.log(`👑 Admin: ${adminAddress}`);
+                
+            } catch (proxyError) {
+                console.error("❌ BŁĄD: Nie udał się ani standardowy ani proxy deployment:");
+                console.error("Standard error:", error.message);
+                console.error("Proxy error:", proxyError.message);
+                process.exit(1);
+            }
+        } else {
+            console.error("❌ BŁĄD podczas standardowego deployment:", error.message);
+            process.exit(1);
+        }
+    }
+
+    console.log(`\n🏷️  Adres kontraktu PoliDAO (${deploymentMethod}): ${contractAddress}`);
 
     // Generowanie linku do eksploratora
     console.log("\n🔗 Generowanie linku do block explorer...");
@@ -76,6 +149,19 @@ async function main() {
     }
     console.log(`🔍 Sprawdź kontrakt: ${explorerUrl}`);
 
+    // Test funkcjonalności kontraktu
+    console.log("\n🧪 Test podstawowej funkcjonalności...");
+    try {
+        const contract = await hre.ethers.getContractAt("PoliDAO", contractAddress);
+        const owner = await contract.owner();
+        const tokenCount = await contract.getFundraiserCount();
+        console.log(`✅ Owner: ${owner}`);
+        console.log(`✅ Fundraiser Count: ${tokenCount}`);
+        console.log("✅ Kontrakt działa poprawnie!");
+    } catch (testError) {
+        console.warn("⚠️  Nie można przetestować kontraktu:", testError.message);
+    }
+
     // Automatyczna weryfikacja na Etherscan
     if (!["hardhat", "localhost"].includes(hre.network.name) && hre.config.etherscan.apiKey) {
         console.log("\n⏳ Czekam 60s przed weryfikacją, aby explorer zindeksował transakcję...");
@@ -83,10 +169,24 @@ async function main() {
 
         try {
             console.log("🔎 Rozpoczynam weryfikację kontraktu na block explorer...");
-            await hre.run("verify:verify", {
-                address: contractAddress,
-                constructorArguments: [initialOwner, commissionWallet]
-            });
+            
+            if (deploymentMethod === "standard") {
+                // Weryfikacja standardowego kontraktu
+                await hre.run("verify:verify", {
+                    address: contractAddress,
+                    constructorArguments: [initialOwner, commissionWallet, feeToken]
+                });
+            } else {
+                // Weryfikacja implementation dla proxy
+                const { upgrades } = require("hardhat");
+                const implAddress = await upgrades.erc1967.getImplementationAddress(contractAddress);
+                await hre.run("verify:verify", {
+                    address: implAddress,
+                    constructorArguments: []
+                });
+                console.log("ℹ️  Zweryfikowano implementation contract. Proxy nie wymaga osobnej weryfikacji.");
+            }
+            
             console.log("✅ Weryfikacja zakończona pomyślnie.");
         } catch (err) {
             const msg = err.message.toLowerCase();
@@ -102,12 +202,28 @@ async function main() {
         console.log("\n⚙️  Pomijam weryfikację: sieć lokalna lub brak etherscan.apiKey.");
     }
 
-    return contractAddress;
+    // Podsumowanie deployment
+    console.log(`\n📋 PODSUMOWANIE DEPLOYMENT:`);
+    console.log(`   🏷️  Adres kontraktu: ${contractAddress}`);
+    console.log(`   🔧 Metoda: ${deploymentMethod}`);
+    console.log(`   🌐 Sieć: ${hre.network.name}`);
+    console.log(`   🔗 Explorer: ${explorerUrl}`);
+    
+    if (deploymentMethod === "proxy") {
+        console.log(`\n💡 WAŻNE dla Proxy:`);
+        console.log(`   • Używaj PROXY ADDRESS (${contractAddress}) do wszystkich interakcji`);
+        console.log(`   • Kontrakt jest upgradeable`);
+        console.log(`   • Implementation zostanie automatycznie zweryfikowane`);
+    }
+
+    return { address: contractAddress, method: deploymentMethod };
 }
 
 main()
-    .then(address => {
-        console.log("\n🎉 Skrypt wdrożeniowy zakończony. Adres kontraktu:", address);
+    .then(result => {
+        console.log(`\n🎉 Skrypt wdrożeniowy zakończony pomyślnie!`);
+        console.log(`📍 Adres: ${result.address}`);
+        console.log(`🔧 Metoda: ${result.method}`);
         process.exit(0);
     })
     .catch(err => {

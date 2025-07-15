@@ -1,3 +1,7 @@
+// =============================================================================
+// PLIK 1: ReentrancyAttackMock.sol (POPRAWIONY)
+// =============================================================================
+
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -10,15 +14,20 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * @dev Używa payable address casting dla kompatybilności z receive() function
  */
 contract ReentrancyAttackMock {
-    PoliDAO public dao;
+    // POPRAWKA: Dodano immutable dla zmiennych które nie zmieniają się po deployment
+    PoliDAO public immutable dao;
+    address public immutable token;
+    address public immutable attacker;
+    
     uint256 public targetFundraiser;
     bool public attackWithdraw;
-    address public token;
     bool public hasAttacked; // Zapobiega nieskończonym pętlom
-    address public attacker;
 
-    // Fix: Use payable address for compatibility with receive() function
+    // POPRAWKA: Dodano walidację zero-address w konstruktorze
     constructor(address payable _dao, address _token) {
+        require(_dao != address(0), "Invalid DAO address");
+        require(_token != address(0), "Invalid token address");
+        
         dao = PoliDAO(_dao);
         token = _token;
         attacker = msg.sender;
@@ -37,7 +46,6 @@ contract ReentrancyAttackMock {
         hasAttacked = false; // Reset attack flag
 
         if (_attackWithdraw) {
-            // POPRAWKA: Zmiana z dao.withdraw na dao.withdrawFunds
             dao.withdrawFunds(_fundraiserId);
         } else {
             dao.refund(_fundraiserId);
@@ -50,13 +58,17 @@ contract ReentrancyAttackMock {
      * @param amount Kwota donacji
      */
     function donateToFundraiser(uint256 _fundraiserId, uint256 amount) external {
-        // Transfer tokens from caller to this contract
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        // POPRAWKA: Sprawdzanie return values z transferów
+        require(
+            IERC20(token).transferFrom(msg.sender, address(this), amount),
+            "Transfer from failed"
+        );
         
-        // Approve DAO contract to spend tokens
-        IERC20(token).approve(address(dao), amount);
+        require(
+            IERC20(token).approve(address(dao), amount),
+            "Approval failed"
+        );
         
-        // Donate to fundraiser
         dao.donate(_fundraiserId, amount);
     }
 
@@ -85,7 +97,6 @@ contract ReentrancyAttackMock {
         require(msg.sender == address(this), "Internal call only");
         
         if (attackWithdraw) {
-            // POPRAWKA: Zmiana z dao.withdraw na dao.withdrawFunds
             dao.withdrawFunds(targetFundraiser);
         } else {
             dao.refund(targetFundraiser);
@@ -132,7 +143,13 @@ contract ReentrancyAttackMock {
      */
     function emergencyWithdrawTokens(address to, uint256 amount) external {
         require(msg.sender == attacker, "Only attacker");
-        IERC20(token).transfer(to, amount);
+        require(to != address(0), "Invalid recipient"); // POPRAWKA: Zero address check
+        
+        // POPRAWKA: Sprawdzanie return value
+        require(
+            IERC20(token).transfer(to, amount),
+            "Token transfer failed"
+        );
     }
 
     /**
@@ -142,7 +159,11 @@ contract ReentrancyAttackMock {
      */
     function emergencyWithdrawEth(address payable to, uint256 amount) external {
         require(msg.sender == attacker, "Only attacker");
-        to.transfer(amount);
+        require(to != address(0), "Invalid recipient"); // POPRAWKA: Zero address check
+        
+        // POPRAWKA: Lepsze zarządzanie błędami dla ETH transfer
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "ETH transfer failed");
     }
 
     /**
