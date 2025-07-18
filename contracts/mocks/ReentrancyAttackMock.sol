@@ -1,179 +1,382 @@
-// =============================================================================
-// PLIK 1: ReentrancyAttackMock.sol (POPRAWIONY)
-// =============================================================================
-
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
 import "../PoliDao.sol";
+import "../modules/PoliDaoGovernance.sol";
+import "../modules/PoliDaoMedia.sol";
+import "../modules/PoliDaoUpdates.sol";
+import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title ReentrancyAttackMock
- * @notice Kontrakt testowy do symulacji ataku reentrancy na kontrakt PoliDAO v3.1
- * @dev Używa payable address casting dla kompatybilności z receive() function
+ * @notice Kontrakt testowy do symulacji ataku reentrancy na modularną architekturę PoliDAO
+ * @dev ZAKTUALIZOWANY dla nowej architektury bez wrapper functions
  */
-contract ReentrancyAttackMock {
-    // POPRAWKA: Dodano immutable dla zmiennych które nie zmieniają się po deployment
-    PoliDAO public immutable dao;
+contract ReentrancyAttackMock is IPoliDaoStructs {
+    
+    // ========== STORAGE ==========
+    
+    PoliDao public immutable mainContract;
+    PoliDaoGovernance public immutable governanceModule;
+    PoliDaoMedia public immutable mediaModule;
+    PoliDaoUpdates public immutable updatesModule;
+    
     address public immutable token;
     address public immutable attacker;
     
     uint256 public targetFundraiser;
-    bool public attackWithdraw;
-    bool public hasAttacked; // Zapobiega nieskończonym pętlom
-
-    // POPRAWKA: Dodano walidację zero-address w konstruktorze
-    constructor(address payable _dao, address _token) {
-        require(_dao != address(0), "Invalid DAO address");
-        require(_token != address(0), "Invalid token address");
+    uint256 public targetProposal;
+    AttackType public currentAttackType;
+    bool public hasAttacked;
+    uint256 public attackCount;
+    
+    // ========== ENUMS ==========
+    
+    enum AttackType {
+        DONATION,
+        WITHDRAW,
+        GOVERNANCE_VOTE,
+        MEDIA_UPLOAD,
+        UPDATE_POST,
+        DELEGATE_CALL
+    }
+    
+    // ========== EVENTS ==========
+    
+    event AttackInitiated(AttackType attackType, uint256 targetId);
+    event ReentrancyAttempted(AttackType attackType, bool success);
+    event AttackCompleted(AttackType attackType, uint256 attempts);
+    
+    // ========== CONSTRUCTOR ==========
+    
+    constructor(
+        address payable _mainContract,
+        address _governanceModule,
+        address _mediaModule,
+        address _updatesModule,
+        address _token
+    ) {
+        require(_mainContract != address(0), "Invalid main contract");
+        require(_governanceModule != address(0), "Invalid governance module");
+        require(_mediaModule != address(0), "Invalid media module");
+        require(_updatesModule != address(0), "Invalid updates module");
+        require(_token != address(0), "Invalid token");
         
-        dao = PoliDAO(_dao);
+        mainContract = PoliDao(_mainContract);
+        governanceModule = PoliDaoGovernance(_governanceModule);
+        mediaModule = PoliDaoMedia(_mediaModule);
+        updatesModule = PoliDaoUpdates(_updatesModule);
+        
         token = _token;
         attacker = msg.sender;
     }
-
+    
+    // ========== SETUP FUNCTIONS ==========
+    
     /**
-     * @notice Inicjuje atak reentrancy
-     * @param _fundraiserId ID zbiórki do ataku
-     * @param _attackWithdraw True dla ataku na withdraw, false dla refund
+     * @notice Przygotowuje kontrakt do ataku
      */
-    function attack(uint256 _fundraiserId, bool _attackWithdraw) external {
-        require(msg.sender == attacker, "Only attacker can initiate");
+    function setupForAttack(uint256 _fundraiserId, uint256 _amount) external {
+        require(msg.sender == attacker, "Only attacker");
         
-        targetFundraiser = _fundraiserId;
-        attackWithdraw = _attackWithdraw;
-        hasAttacked = false; // Reset attack flag
-
-        if (_attackWithdraw) {
-            dao.withdrawFunds(_fundraiserId);
-        } else {
-            dao.refund(_fundraiserId);
-        }
-    }
-
-    /**
-     * @notice Dokonuje donacji do zbiórki (setup przed atakiem)
-     * @param _fundraiserId ID zbiórki
-     * @param amount Kwota donacji
-     */
-    function donateToFundraiser(uint256 _fundraiserId, uint256 amount) external {
-        // POPRAWKA: Sprawdzanie return values z transferów
+        // Transfer tokens from attacker
         require(
-            IERC20(token).transferFrom(msg.sender, address(this), amount),
+            IERC20(token).transferFrom(msg.sender, address(this), _amount),
             "Transfer from failed"
         );
         
+        // Approve main contract
         require(
-            IERC20(token).approve(address(dao), amount),
+            IERC20(token).approve(address(mainContract), _amount),
             "Approval failed"
         );
         
-        dao.donate(_fundraiserId, amount);
+        // Make initial donation for refund attacks
+        mainContract.donate(_fundraiserId, _amount);
+        
+        targetFundraiser = _fundraiserId;
     }
-
+    
     /**
-     * @notice Fallback function - wykonuje atak reentrancy
-     * @dev Zostanie wywołana podczas transferu tokenów z DAO
+     * @notice Przygotowuje propozycję dla ataku governance - BEZPOŚREDNIO PRZEZ MODUŁ
      */
-    fallback() external {
-        // Prevent infinite recursion
-        if (!hasAttacked) {
-            hasAttacked = true;
-            
-            try this.executeReentrancy() {
-                // Reentrancy attempt
-            } catch {
-                // Reentrancy failed (ReentrancyGuard worked)
-            }
-        }
+    function setupGovernanceAttack(string calldata _question, uint256 _duration) external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        // Create proposal DIRECTLY through governance module
+        governanceModule.createProposal(_question, _duration);
+        targetProposal = governanceModule.getProposalCount();
     }
-
+    
+    // ========== ATTACK FUNCTIONS ==========
+    
     /**
-     * @notice Wykonuje właściwy atak reentrancy
-     * @dev Wydzielone do osobnej funkcji dla lepszej kontroli
+     * @notice Atakuje funkcję donate
+     */
+    function attackDonation(uint256 _fundraiserId, uint256 _amount) external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        _resetAttackState();
+        currentAttackType = AttackType.DONATION;
+        targetFundraiser = _fundraiserId;
+        
+        emit AttackInitiated(AttackType.DONATION, _fundraiserId);
+        
+        // Attack main contract donation
+        mainContract.donate(_fundraiserId, _amount);
+        
+        emit AttackCompleted(AttackType.DONATION, attackCount);
+    }
+    
+    /**
+     * @notice Atakuje funkcję withdraw
+     */
+    function attackWithdraw(uint256 _fundraiserId) external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        _resetAttackState();
+        currentAttackType = AttackType.WITHDRAW;
+        targetFundraiser = _fundraiserId;
+        
+        emit AttackInitiated(AttackType.WITHDRAW, _fundraiserId);
+        
+        try mainContract.withdrawFunds(_fundraiserId) {
+            // Withdrawal succeeded
+        } catch {
+            // Withdrawal failed (expected if not creator)
+        }
+        
+        emit AttackCompleted(AttackType.WITHDRAW, attackCount);
+    }
+    
+    /**
+     * @notice Atakuje system governance - BEZPOŚREDNIO
+     */
+    function attackGovernance(uint256 _proposalId, bool _support) external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        _resetAttackState();
+        currentAttackType = AttackType.GOVERNANCE_VOTE;
+        targetProposal = _proposalId;
+        
+        emit AttackInitiated(AttackType.GOVERNANCE_VOTE, _proposalId);
+        
+        try governanceModule.vote(_proposalId, _support) {
+            // Vote succeeded
+        } catch {
+            // Vote failed
+        }
+        
+        emit AttackCompleted(AttackType.GOVERNANCE_VOTE, attackCount);
+    }
+    
+    /**
+     * @notice Atakuje system media - BEZPOŚREDNIO
+     */
+    function attackMedia(uint256 _fundraiserId) external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        _resetAttackState();
+        currentAttackType = AttackType.MEDIA_UPLOAD;
+        targetFundraiser = _fundraiserId;
+        
+        emit AttackInitiated(AttackType.MEDIA_UPLOAD, _fundraiserId);
+        
+        // Prepare media item
+        MediaItem[] memory mediaItems = new MediaItem[](1);
+        mediaItems[0] = MediaItem({
+            ipfsHash: "QmTestHash123",
+            mediaType: 0,
+            filename: "attack.jpg",
+            uploadTime: block.timestamp,
+            uploader: address(this),
+            description: "Attack test"
+        });
+        
+        try mediaModule.addMediaToFundraiser(_fundraiserId, mediaItems) {
+            // Media upload succeeded
+        } catch {
+            // Media upload failed (expected - not creator)
+        }
+        
+        emit AttackCompleted(AttackType.MEDIA_UPLOAD, attackCount);
+    }
+    
+    /**
+     * @notice Atakuje system updates - BEZPOŚREDNIO
+     */
+    function attackUpdates(uint256 _fundraiserId, string calldata _content) external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        _resetAttackState();
+        currentAttackType = AttackType.UPDATE_POST;
+        targetFundraiser = _fundraiserId;
+        
+        emit AttackInitiated(AttackType.UPDATE_POST, _fundraiserId);
+        
+        try updatesModule.postUpdate(_fundraiserId, _content, address(this)) {
+            // Update succeeded
+        } catch {
+            // Update failed (expected - not creator)
+        }
+        
+        emit AttackCompleted(AttackType.UPDATE_POST, attackCount);
+    }
+    
+    /**
+     * @notice Atakuje delegatecall system
+     */
+    function attackDelegateCall(bytes calldata _data) external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        _resetAttackState();
+        currentAttackType = AttackType.DELEGATE_CALL;
+        
+        emit AttackInitiated(AttackType.DELEGATE_CALL, 0);
+        
+        try mainContract.delegateToGovernance(_data) {
+            // Delegate call succeeded
+        } catch {
+            // Delegate call failed
+        }
+        
+        emit AttackCompleted(AttackType.DELEGATE_CALL, attackCount);
+    }
+    
+    // ========== REENTRANCY CALLBACKS ==========
+    
+    /**
+     * @notice Fallback function - główny punkt reentrancy
+     */
+    fallback() external payable {
+        _attemptReentrancy();
+    }
+    
+    /**
+     * @notice Receive function - alternatywny punkt reentrancy
+     */
+    receive() external payable {
+        _attemptReentrancy();
+    }
+    
+    /**
+     * @notice Token transfer callback (jeśli token obsługuje)
+     */
+    function onTokenTransfer(address, uint256, bytes calldata) external returns (bool) {
+        _attemptReentrancy();
+        return true;
+    }
+    
+    /**
+     * @notice Wykonuje próbę reentrancy na podstawie typu ataku
+     */
+    function _attemptReentrancy() internal {
+        if (hasAttacked || attackCount >= 3) return; // Prevent infinite loops
+        
+        hasAttacked = true;
+        attackCount++;
+        
+        emit ReentrancyAttempted(currentAttackType, false);
+        
+        try this.executeReentrancy() {
+            emit ReentrancyAttempted(currentAttackType, true);
+        } catch {
+            emit ReentrancyAttempted(currentAttackType, false);
+        }
+        
+        hasAttacked = false; // Allow multiple attempts
+    }
+    
+    /**
+     * @notice Wykonuje właściwą logikę reentrancy - ZAKTUALIZOWANE
      */
     function executeReentrancy() external {
         require(msg.sender == address(this), "Internal call only");
         
-        if (attackWithdraw) {
-            dao.withdrawFunds(targetFundraiser);
-        } else {
-            dao.refund(targetFundraiser);
+        if (currentAttackType == AttackType.DONATION) {
+            mainContract.donate(targetFundraiser, 1000);
+        } else if (currentAttackType == AttackType.WITHDRAW) {
+            mainContract.withdrawFunds(targetFundraiser);
+        } else if (currentAttackType == AttackType.GOVERNANCE_VOTE) {
+            // Attack governance module directly
+            governanceModule.vote(targetProposal, true);
+        } else if (currentAttackType == AttackType.MEDIA_UPLOAD) {
+            // Attack media module directly
+            MediaItem[] memory items = new MediaItem[](1);
+            items[0] = MediaItem("QmTest", 0, "test", block.timestamp, address(this), "test");
+            mediaModule.addMediaToFundraiser(targetFundraiser, items);
+        } else if (currentAttackType == AttackType.UPDATE_POST) {
+            // Attack updates module directly
+            updatesModule.postUpdate(targetFundraiser, "Reentrancy attack", address(this));
         }
     }
-
+    
+    // ========== UTILITY FUNCTIONS ==========
+    
     /**
-     * @notice Receive function - alternatywny punkt wejścia dla ataku
-     * @dev Może zostać wywołana jeśli kontrakt otrzyma ETH
+     * @notice Resetuje stan ataku
      */
-    receive() external payable {
-        // Alternative reentrancy vector if contract receives ETH
-        if (!hasAttacked && targetFundraiser > 0) {
-            hasAttacked = true;
-            
-            try this.executeReentrancy() {
-                // Reentrancy attempt via receive
-            } catch {
-                // Reentrancy failed
-            }
-        }
-    }
-
-    /**
-     * @notice Sprawdza saldo tokenów kontraktu
-     * @return Saldo tokenów
-     */
-    function getTokenBalance() external view returns (uint256) {
-        return IERC20(token).balanceOf(address(this));
-    }
-
-    /**
-     * @notice Sprawdza saldo ETH kontraktu
-     * @return Saldo ETH
-     */
-    function getEthBalance() external view returns (uint256) {
-        return address(this).balance;
-    }
-
-    /**
-     * @notice Emergency function to withdraw tokens (for cleanup)
-     * @param to Recipient address
-     * @param amount Amount to withdraw
-     */
-    function emergencyWithdrawTokens(address to, uint256 amount) external {
-        require(msg.sender == attacker, "Only attacker");
-        require(to != address(0), "Invalid recipient"); // POPRAWKA: Zero address check
-        
-        // POPRAWKA: Sprawdzanie return value
-        require(
-            IERC20(token).transfer(to, amount),
-            "Token transfer failed"
-        );
-    }
-
-    /**
-     * @notice Emergency function to withdraw ETH (for cleanup)
-     * @param to Recipient address
-     * @param amount Amount to withdraw
-     */
-    function emergencyWithdrawEth(address payable to, uint256 amount) external {
-        require(msg.sender == attacker, "Only attacker");
-        require(to != address(0), "Invalid recipient"); // POPRAWKA: Zero address check
-        
-        // POPRAWKA: Lepsze zarządzanie błędami dla ETH transfer
-        (bool success, ) = to.call{value: amount}("");
-        require(success, "ETH transfer failed");
-    }
-
-    /**
-     * @notice Reset attack state
-     * @dev Useful for multiple test runs
-     */
-    function resetAttack() external {
-        require(msg.sender == attacker, "Only attacker");
+    function _resetAttackState() internal {
         hasAttacked = false;
+        attackCount = 0;
+    }
+    
+    /**
+     * @notice Sprawdza balanse kontraktu
+     */
+    function getBalances() external view returns (uint256 tokenBalance, uint256 ethBalance) {
+        tokenBalance = IERC20(token).balanceOf(address(this));
+        ethBalance = address(this).balance;
+    }
+    
+    /**
+     * @notice Sprawdza status ataku
+     */
+    function getAttackStatus() external view returns (
+        AttackType attackType,
+        uint256 attempts,
+        bool attacked,
+        uint256 target
+    ) {
+        return (currentAttackType, attackCount, hasAttacked, targetFundraiser);
+    }
+    
+    /**
+     * @notice Emergency cleanup
+     */
+    function emergencyWithdraw() external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        // Withdraw tokens
+        uint256 tokenBalance = IERC20(token).balanceOf(address(this));
+        if (tokenBalance > 0) {
+            IERC20(token).transfer(attacker, tokenBalance);
+        }
+        
+        // Withdraw ETH
+        uint256 ethBalance = address(this).balance;
+        if (ethBalance > 0) {
+            payable(attacker).transfer(ethBalance);
+        }
+    }
+    
+    /**
+     * @notice Reset all attack parameters
+     */
+    function resetAll() external {
+        require(msg.sender == attacker, "Only attacker");
+        
+        _resetAttackState();
         targetFundraiser = 0;
-        attackWithdraw = false;
+        targetProposal = 0;
+        currentAttackType = AttackType.DONATION;
+    }
+    
+    /**
+     * @notice Test delegate call encoding
+     */
+    function testDelegateCallEncoding(string calldata question, uint256 duration) external view returns (bytes memory) {
+        return abi.encodeWithSignature("createProposal(string,uint256)", question, duration);
     }
 }
