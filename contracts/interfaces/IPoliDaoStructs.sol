@@ -56,7 +56,8 @@ interface IPoliDaoStructs {
         uint8 fundraiserType;    
         uint8 status;            
         bool isSuspended;        
-        bool fundsWithdrawn;     
+        bool fundsWithdrawn;
+        bool isFlexible;         // DODANE: Czy zbiórka jest elastyczna
     }
     
     /**
@@ -73,6 +74,7 @@ interface IPoliDaoStructs {
         string[] initialVideos;
         string metadataHash;
         string location;
+        bool isFlexible;         // DODANE: Czy zbiórka ma być elastyczna
     }
     
     /**
@@ -174,6 +176,28 @@ interface IPoliDaoStructs {
         uint256 indexed fundraiserId
     );
     
+    // ========== REFUND EVENTS (DODANE) ==========
+    
+    event RefundProcessed(
+        uint256 indexed fundraiserId,
+        address indexed donor,
+        uint256 amount,
+        uint256 commission
+    );
+    
+    event ClosureInitiated(
+        uint256 indexed fundraiserId,
+        uint256 reclaimDeadline,
+        address indexed initiatedBy
+    );
+    
+    event FlexibleWithdrawal(
+        uint256 indexed fundraiserId,
+        address indexed creator,
+        uint256 amount,
+        uint256 totalWithdrawn
+    );
+    
     // Additional events (moved from main contract to avoid duplication)
     event DonationRefunded(
         uint256 indexed fundraiserId, 
@@ -188,7 +212,28 @@ interface IPoliDaoStructs {
         uint256 amountAfterCommission
     );
     
-    event ModulesInitialized(address governance, address media, address updates);
+    // ========== MODULE MANAGEMENT EVENTS ==========
+    
+    event ModulesInitialized(
+        address governance, 
+        address media, 
+        address updates, 
+        address refunds           // DODANE: refunds module
+    );
+    
+    event RefundsModuleSet(
+        address indexed oldModule, 
+        address indexed newModule
+    );
+    
+    // ========== REFUND SPECIFIC EVENTS ==========
+    
+    event RefundsPausedForFundraiser(uint256 indexed fundraiserId);
+    event RefundsUnpausedForFundraiser(uint256 indexed fundraiserId);
+    event RefundCommissionUpdated(uint256 oldCommission, uint256 newCommission);
+    event RefundsModuleInitialized(address mainContract, address commissionWallet);
+    
+    // ========== OTHER EVENTS ==========
     
     event FundraiserExtended(
         uint256 indexed id, 
@@ -236,11 +281,6 @@ interface IPoliDaoStructs {
         uint256 totalAmount
     );
     
-    event ClosureInitiated(
-        uint256 indexed fundraiserId, 
-        uint256 reclaimDeadline
-    );
-    
     event TokenWhitelisted(address indexed token);
     event TokenRemoved(address indexed token);
     event DonationCommissionSet(uint256 newCommission);
@@ -251,7 +291,6 @@ interface IPoliDaoStructs {
     event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
     
     // ========== COMMON ERRORS ==========
-    // UWAGA: Te errory zostały przeniesione z głównego kontraktu aby uniknąć duplikacji
     
     error FundraiserNotFound(uint256 id);
     error UnauthorizedAccess(address caller, address required);
@@ -271,4 +310,27 @@ interface IPoliDaoStructs {
     error ReentrantCall();
     error ArrayLengthMismatch(uint256 length1, uint256 length2);
     error BatchAlreadyExecuted(bytes32 batchId);
+    
+    // ========== REFUND SPECIFIC ERRORS ==========
+    
+    error RefundNotAvailable(uint256 fundraiserId, address donor);
+    error FlexibleFundraiserRefundDenied(uint256 fundraiserId);
+    error ClosureNotInitiated(uint256 fundraiserId);
+    error ClosureAlreadyInitiated(uint256 fundraiserId);
+    error ReclaimPeriodExpired(uint256 fundraiserId);
+    error RefundsPaused(uint256 fundraiserId);                    // POPRAWKA: Zmieniona nazwa
+    error InvalidRefundCommission(uint256 commission);
+    error RefundsModuleNotSet();
+    error OnlyRefundsModule(address caller);
+    error RefundAlreadyProcessed(uint256 fundraiserId, address donor);
+    error NoFundsToRefund(uint256 fundraiserId, address donor);
+    error FlexibleFundraiserNotAllowed(uint256 fundraiserId);
+    error InvalidFlexibleWithdrawal(uint256 fundraiserId);
+    
+    // ========== MODULE SPECIFIC ERRORS ==========
+    
+    error ModuleNotSet(string moduleName);
+    error InvalidModuleAddress(address moduleAddress);
+    error ModuleCallFailed(string moduleName);
+    error UnauthorizedModuleAccess(address caller, address expectedModule);
 }

@@ -5,11 +5,12 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/IPoliDaoStructs.sol";
+import "./interfaces/IPoliDaoRefunds.sol";
 
 /**
- * @title PoliDao - MINIMALNA WERSJA
- * @notice Tylko podstawowe funkcje fundraisingu + delegacja do modułów
- * @dev USUNIĘTO WSZYSTKIE WRAPPER FUNCTIONS - użytkownicy idą bezpośrednio do modułów
+ * @title PoliDao - CZYSTY GŁÓWNY KONTRAKT
+ * @notice Tylko podstawowy fundraising + delegacja do modułów
+ * @dev Maksymalnie uproszczony - całą logikę refundów obsługuje moduł
  */
 contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
     
@@ -17,7 +18,6 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
     uint256 public constant MAX_DURATION = 365 days;
     uint256 public constant MAX_TITLE_LENGTH = 100;
     uint256 public constant MAX_DESCRIPTION_LENGTH = 2000;
-    uint256 public constant MAX_LOCATION_LENGTH = 200;
     uint256 private constant PRECISION = 10_000;
     uint256 private constant MAX_COMMISSION = 10_000;
 
@@ -49,10 +49,16 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
     address public governanceModule;
     address public mediaModule;
     address public updatesModule;
+    address public refundsModule;
 
     // ========== MODIFIERS ==========
     modifier validFundraiserId(uint256 id) {
         require(id > 0 && id <= fundraiserCount, "Invalid fundraiser");
+        _;
+    }
+
+    modifier onlyRefundsModule() {
+        require(msg.sender == refundsModule, "Only refunds module");
         _;
     }
 
@@ -63,18 +69,21 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
     }
 
     // ========== MODULE SETUP ==========
-    function setModules(address _governance, address _media, address _updates) external onlyOwner {
+    function setModules(
+        address _governance, 
+        address _media, 
+        address _updates, 
+        address _refunds
+    ) external onlyOwner {
         governanceModule = _governance;
         mediaModule = _media;
         updatesModule = _updates;
-        emit ModulesInitialized(_governance, _media, _updates);
+        refundsModule = _refunds;
+        emit ModulesInitialized(_governance, _media, _updates, _refunds);
     }
 
-    // ========== CORE FUNDRAISER FUNCTIONS ==========
+    // ========== PODSTAWOWY FUNDRAISING (bez refundów) ==========
     
-    /**
-     * @notice Tworzy nową zbiórkę - PODSTAWOWA WERSJA
-     */
     function createFundraiser(FundraiserCreationData calldata data) 
         external 
         whenNotPaused 
@@ -94,17 +103,18 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         
         Fundraiser storage f = fundraisers[id];
         f.packed = PackedFundraiserData({
-            id: uint32(id),
             goalAmount: uint128(data.goalAmount),
             raisedAmount: 0,
             endDate: uint64(data.endDate),
             originalEndDate: uint64(data.endDate),
+            id: uint32(id),
+            suspensionTime: 0,
             extensionCount: 0,
             fundraiserType: uint8(data.fundraiserType),
             status: uint8(FundraiserStatus.ACTIVE),
             isSuspended: false,
             fundsWithdrawn: false,
-            suspensionTime: 0
+            isFlexible: data.isFlexible
         });
         
         f.creator = msg.sender;
@@ -113,14 +123,16 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         f.description = data.description;
         f.location = data.location;
         
+        // Zarejestruj w module refunds
+        if (refundsModule != address(0)) {
+            IPoliDaoRefunds(refundsModule).registerFundraiser(id, data.isFlexible);
+        }
+        
         emit FundraiserCreated(id, msg.sender, data.token, data.title, uint8(data.fundraiserType), data.goalAmount, data.endDate, data.location);
         
         return id;
     }
 
-    /**
-     * @notice Donacja - PODSTAWOWA WERSJA
-     */
     function donate(uint256 fundraiserId, uint256 amount) 
         external 
         whenNotPaused 
@@ -162,9 +174,6 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         emit DonationMade(fundraiserId, msg.sender, f.token, amount, netAmount);
     }
 
-    /**
-     * @notice Wypłata środków - PODSTAWOWA WERSJA
-     */
     function withdrawFunds(uint256 fundraiserId) 
         external 
         whenNotPaused 
@@ -174,6 +183,9 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         require(msg.sender == f.creator, "Not creator");
         require(!f.packed.fundsWithdrawn, "Already withdrawn");
         require(f.packed.raisedAmount > 0, "No funds");
+        
+        // TYLKO dla zwykłych zbiórek - elastyczne obsługuje moduł refunds
+        require(!f.packed.isFlexible, "Use refunds module for flexible");
         
         // Check withdrawal conditions
         bool canWithdraw = false;
@@ -201,11 +213,106 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         emit FundsWithdrawn(fundraiserId, f.creator, netAmount);
     }
 
-    // ========== DELEGATION TO MODULES (TYLKO DELEGATECALL - BEZ IMPLEMENTACJI!) ==========
+    // ========== REFUND FUNCTIONS - CZYSTE WRAPPER'Y ==========
     
     /**
-     * @notice Przekaż wywołanie do modułu governance
+     * @notice CZYSTA DELEGACJA - nie ma własnej logiki
      */
+    function refund(uint256 fundraiserId) external {
+        require(refundsModule != address(0), "Refunds module not set");
+        
+        // Przekaż całkowicie do modułu
+        bytes memory data = abi.encodeWithSignature("refund(uint256)", fundraiserId);
+        (bool success, ) = refundsModule.delegatecall(data);
+        require(success, "Refund delegate failed");
+    }
+    
+    function initiateClosure(uint256 fundraiserId) external {
+        require(refundsModule != address(0), "Refunds module not set");
+        
+        bytes memory data = abi.encodeWithSignature("initiateClosure(uint256)", fundraiserId);
+        (bool success, ) = refundsModule.delegatecall(data);
+        require(success, "Closure delegate failed");
+    }
+    
+    function canRefund(uint256 fundraiserId, address donor) external view returns (bool, string memory) {
+        if (refundsModule == address(0)) {
+            return (false, "Refunds module not set");
+        }
+        
+        return IPoliDaoRefunds(refundsModule).canRefund(
+            fundraiserId, donor, 0, 0, 0, false // Moduł sam pobierze dane
+        );
+    }
+
+    function withdrawFlexibleFunds(uint256 fundraiserId) external {
+        require(refundsModule != address(0), "Refunds module not set");
+        
+        bytes memory data = abi.encodeWithSignature("withdrawFlexible(uint256)", fundraiserId);
+        (bool success, ) = refundsModule.delegatecall(data);
+        require(success, "Flexible withdrawal failed");
+    }
+
+    // ========== FUNKCJE HELPER DLA MODUŁÓW ==========
+    
+    function getFundraiserData(uint256 fundraiserId) 
+        external 
+        view 
+        validFundraiserId(fundraiserId) 
+        returns (
+            address creator,
+            address token,
+            uint256 raisedAmount,
+            uint256 goalAmount,
+            uint256 endDate,
+            uint8 status,
+            bool isFlexible
+        ) 
+    {
+        Fundraiser storage f = fundraisers[fundraiserId];
+        return (
+            f.creator,
+            f.token,
+            f.packed.raisedAmount,
+            f.packed.goalAmount,
+            f.packed.endDate,
+            f.packed.status,
+            f.packed.isFlexible
+        );
+    }
+
+    function updateFundraiserState(
+        uint256 fundraiserId, 
+        uint256 newRaisedAmount, 
+        uint8 newStatus
+    ) 
+        external 
+        onlyRefundsModule 
+        validFundraiserId(fundraiserId) 
+    {
+        fundraisers[fundraiserId].packed.raisedAmount = uint128(newRaisedAmount);
+        fundraisers[fundraiserId].packed.status = newStatus;
+    }
+
+    function getDonationAmount(uint256 fundraiserId, address donor) 
+        external 
+        view 
+        validFundraiserId(fundraiserId) 
+        returns (uint256) 
+    {
+        return fundraisers[fundraiserId].donations[donor];
+    }
+
+    function updateDonationAmount(uint256 fundraiserId, address donor, uint256 newAmount) 
+        external 
+        onlyRefundsModule 
+        validFundraiserId(fundraiserId) 
+    {
+        fundraisers[fundraiserId].donations[donor] = newAmount;
+    }
+
+    // ========== DELEGATION TO MODULES ==========
+    
     function delegateToGovernance(bytes calldata data) external returns (bytes memory) {
         require(governanceModule != address(0), "Module not set");
         (bool success, bytes memory result) = governanceModule.delegatecall(data);
@@ -213,9 +320,6 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         return result;
     }
     
-    /**
-     * @notice Przekaż wywołanie do modułu media  
-     */
     function delegateToMedia(bytes calldata data) external returns (bytes memory) {
         require(mediaModule != address(0), "Module not set");
         (bool success, bytes memory result) = mediaModule.delegatecall(data);
@@ -223,9 +327,6 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         return result;
     }
     
-    /**
-     * @notice Przekaż wywołanie do modułu updates
-     */
     function delegateToUpdates(bytes calldata data) external returns (bytes memory) {
         require(updatesModule != address(0), "Module not set");
         (bool success, bytes memory result) = updatesModule.delegatecall(data);
@@ -233,7 +334,14 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         return result;
     }
 
-    // ========== TOKEN MANAGEMENT ==========
+    function delegateToRefunds(bytes calldata data) external returns (bytes memory) {
+        require(refundsModule != address(0), "Module not set");
+        (bool success, bytes memory result) = refundsModule.delegatecall(data);
+        require(success, "Delegate failed");
+        return result;
+    }
+
+    // ========== TOKEN & COMMISSION MANAGEMENT ==========
     function whitelistToken(address token) external onlyOwner {
         require(token != address(0), "Invalid token");
         require(!isTokenWhitelisted[token], "Already whitelisted");
@@ -249,7 +357,6 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         
         isTokenWhitelisted[token] = false;
         
-        // Remove from array (simple version)
         for (uint256 i = 0; i < whitelistedTokens.length; i++) {
             if (whitelistedTokens[i] == token) {
                 whitelistedTokens[i] = whitelistedTokens[whitelistedTokens.length - 1];
@@ -261,7 +368,6 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         emit TokenRemoved(token);
     }
 
-    // ========== COMMISSION MANAGEMENT ==========
     function setCommissions(uint256 _donation, uint256 _success) external onlyOwner {
         require(_donation <= MAX_COMMISSION && _success <= MAX_COMMISSION, "Too high");
         
@@ -279,7 +385,7 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         emit CommissionWalletChanged(oldWallet, newWallet);
     }
 
-    // ========== BASIC VIEW FUNCTIONS ==========
+    // ========== VIEW FUNCTIONS ==========
     
     function getFundraiserBasicInfo(uint256 id) external view validFundraiserId(id) returns (
         string memory title,
@@ -288,10 +394,20 @@ contract PoliDao is Ownable, Pausable, IPoliDaoStructs {
         uint256 raised,
         uint256 goal,
         uint256 endDate,
-        uint8 status
+        uint8 status,
+        bool isFlexible
     ) {
         Fundraiser storage f = fundraisers[id];
-        return (f.title, f.creator, f.token, f.packed.raisedAmount, f.packed.goalAmount, f.packed.endDate, f.packed.status);
+        return (
+            f.title, 
+            f.creator, 
+            f.token, 
+            f.packed.raisedAmount, 
+            f.packed.goalAmount, 
+            f.packed.endDate, 
+            f.packed.status,
+            f.packed.isFlexible
+        );
     }
     
     function donationOf(uint256 fundraiserId, address donor) external view returns (uint256) {
