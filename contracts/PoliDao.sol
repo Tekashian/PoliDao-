@@ -8,11 +8,13 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IPoliDaoStructs.sol";
 import "./interfaces/IPoliDaoRefunds.sol";
 import "./interfaces/IPoliDaoSecurity.sol";
+import "./interfaces/IPoliDaoWeb3.sol";
+import "./interfaces/IPoliDaoAnalytics.sol";
 
 /**
- * @title PoliDao - GŁÓWNY KONTRAKT Z MODUŁEM SECURITY - POPRAWIONE EVENTY
- * @notice Podstawowy fundraising + delegacja do modułów + integracja Security
- * @dev Maksymalnie uproszczony - całą logikę refundów obsługuje moduł, security chroni system
+ * @title PoliDao - GŁÓWNY KONTRAKT Z WSZYSTKIMI MODUŁAMI - ROZSZERZONA WERSJA
+ * @notice Podstawowy fundraising + delegacja do wszystkich modułów + integracja Web3 i Analytics
+ * @dev Maksymalnie uproszczony - całą logikę obsługują moduły
  */
 contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
     
@@ -47,12 +49,14 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
     uint256 public successCommission = 250;   // 2.5%
     address public commissionWallet;
     
-    // Modules
+    // Modules - ROZSZERZONE O WEB3 I ANALYTICS
     address public governanceModule;
     address public mediaModule;
     address public updatesModule;
     address public refundsModule;
     address public securityModule;
+    address public web3Module;        // NOWY MODUŁ
+    address public analyticsModule;   // NOWY MODUŁ
 
     // ========== MODIFIERS ==========
     modifier validFundraiserId(uint256 id) {
@@ -62,6 +66,16 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
 
     modifier onlyRefundsModule() {
         require(msg.sender == refundsModule, "Only refunds module");
+        _;
+    }
+
+    modifier onlyWeb3Module() {
+        require(msg.sender == web3Module, "Only web3 module");
+        _;
+    }
+
+    modifier onlyAnalyticsModule() {
+        require(msg.sender == analyticsModule, "Only analytics module");
         _;
     }
 
@@ -143,22 +157,28 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         commissionWallet = _commissionWallet;
     }
 
-    // ========== MODULE SETUP - POPRAWIONA WERSJA ==========
+    // ========== MODULE SETUP - ROZSZERZONA WERSJA ==========
     function setModules(
         address _governance, 
         address _media, 
         address _updates, 
         address _refunds,
-        address _security
+        address _security,
+        address _web3,        // NOWY PARAMETR
+        address _analytics    // NOWY PARAMETR
     ) external onlyOwner {
         governanceModule = _governance;
         mediaModule = _media;
         updatesModule = _updates;
         refundsModule = _refunds;
         securityModule = _security;
+        web3Module = _web3;
+        analyticsModule = _analytics;
         
         emit ModulesInitialized(_governance, _media, _updates, _refunds);
-        emit SecurityModuleSet(address(0), _security);  // Event z IPoliDaoStructs
+        emit SecurityModuleSet(address(0), _security);
+        emit Web3ModuleSet(address(0), _web3);         // NOWY EVENT
+        emit AnalyticsModuleSet(address(0), _analytics); // NOWY EVENT
     }
 
     /**
@@ -167,7 +187,25 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
     function setSecurityModule(address _security) external onlyOwner {
         address oldModule = securityModule;
         securityModule = _security;
-        emit SecurityModuleSet(oldModule, _security);  // Event z IPoliDaoStructs
+        emit SecurityModuleSet(oldModule, _security);
+    }
+
+    /**
+     * @notice Ustawia tylko web3 module
+     */
+    function setWeb3Module(address _web3) external onlyOwner {
+        address oldModule = web3Module;
+        web3Module = _web3;
+        emit Web3ModuleSet(oldModule, _web3);
+    }
+
+    /**
+     * @notice Ustawia tylko analytics module
+     */
+    function setAnalyticsModule(address _analytics) external onlyOwner {
+        address oldModule = analyticsModule;
+        analyticsModule = _analytics;
+        emit AnalyticsModuleSet(oldModule, _analytics);
     }
 
     // ========== PODSTAWOWY FUNDRAISING (z security) ==========
@@ -319,9 +357,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
 
     // ========== REFUND FUNCTIONS - CZYSTE WRAPPER'Y (z security) ==========
     
-    /**
-     * @notice CZYSTA DELEGACJA - nie ma własnej logiki
-     */
     function refund(uint256 fundraiserId) 
         external 
         nonReentrant
@@ -330,7 +365,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
     {
         require(refundsModule != address(0), "Refunds module not set");
         
-        // Przekaż całkowicie do modułu
         bytes memory data = abi.encodeWithSignature("refund(uint256)", fundraiserId);
         (bool success, ) = refundsModule.delegatecall(data);
         require(success, "Refund delegate failed");
@@ -353,7 +387,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
             return (false, "Refunds module not set");
         }
         
-        // Check fundraiser suspension
         if (securityModule != address(0)) {
             IPoliDaoSecurity security = IPoliDaoSecurity(securityModule);
             (bool isSuspended, ) = security.isFundraiserSuspended(fundraiserId);
@@ -363,7 +396,7 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         }
         
         return IPoliDaoRefunds(refundsModule).canRefund(
-            fundraiserId, donor, 0, 0, 0, false // Moduł sam pobierze dane
+            fundraiserId, donor, 0, 0, 0, false
         );
     }
 
@@ -379,11 +412,185 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         require(success, "Flexible withdrawal failed");
     }
 
-    // ========== SECURITY DELEGATION - CZYSTE WRAPPER'Y ==========
+    // ========== WEB3 FUNCTIONS - CZYSTE WRAPPER'Y ==========
     
     /**
-     * @notice CZYSTA DELEGACJA do Security Module - suspendFundraiser
+     * @notice Donate with EIP-2612 permit - delegacja do Web3 module
      */
+    function donateWithPermit(
+        uint256 fundraiserId,
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        require(web3Module != address(0), "Web3 module not set");
+        
+        bytes memory data = abi.encodeWithSignature(
+            "donateWithPermit(uint256,uint256,uint256,uint8,bytes32,bytes32)",
+            fundraiserId, amount, deadline, v, r, s
+        );
+        (bool success, ) = web3Module.delegatecall(data);
+        require(success, "Permit donation failed");
+    }
+    
+    /**
+     * @notice Meta-transaction donation - delegacja do Web3 module
+     */
+    function donateWithMetaTransaction(
+        address donor,
+        uint256 fundraiserId,
+        uint256 amount,
+        uint256 deadline,
+        bytes calldata signature
+    ) external {
+        require(web3Module != address(0), "Web3 module not set");
+        
+        bytes memory data = abi.encodeWithSignature(
+            "donateWithMetaTransaction(address,uint256,uint256,uint256,bytes)",
+            donor, fundraiserId, amount, deadline, signature
+        );
+        (bool success, ) = web3Module.delegatecall(data);
+        require(success, "Meta-tx donation failed");
+    }
+    
+    /**
+     * @notice Batch donations - delegacja do Web3 module
+     */
+    function batchDonate(
+        uint256[] calldata fundraiserIds,
+        uint256[] calldata amounts
+    ) external {
+        require(web3Module != address(0), "Web3 module not set");
+        
+        bytes memory data = abi.encodeWithSignature(
+            "batchDonate(uint256[],uint256[])",
+            fundraiserIds, amounts
+        );
+        (bool success, ) = web3Module.delegatecall(data);
+        require(success, "Batch donation failed");
+    }
+    
+    /**
+     * @notice Batch donations with permits - delegacja do Web3 module
+     */
+    function batchDonateWithPermits(
+        uint256[] calldata fundraiserIds,
+        uint256[] calldata amounts,
+        uint256[] calldata deadlines,
+        uint8[] calldata vs,
+        bytes32[] calldata rs,
+        bytes32[] calldata ss
+    ) external {
+        require(web3Module != address(0), "Web3 module not set");
+        
+        bytes memory data = abi.encodeWithSignature(
+            "batchDonateWithPermits(uint256[],uint256[],uint256[],uint8[],bytes32[],bytes32[])",
+            fundraiserIds, amounts, deadlines, vs, rs, ss
+        );
+        (bool success, ) = web3Module.delegatecall(data);
+        require(success, "Batch permit donation failed");
+    }
+
+    // ========== WEB3 UTILITY FUNCTIONS ==========
+    
+    function supportsPermit(address token) external view returns (bool) {
+        if (web3Module == address(0)) return false;
+        return IPoliDaoWeb3(web3Module).supportsPermit(token);
+    }
+    
+    function getNonce(address user) external view returns (uint256) {
+        if (web3Module == address(0)) return 0;
+        return IPoliDaoWeb3(web3Module).getNonce(user);
+    }
+    
+    function verifyDonationSignature(
+        address donor,
+        uint256 fundraiserId,
+        uint256 amount,
+        uint256 deadline,
+        bytes calldata signature
+    ) external view returns (bool) {
+        if (web3Module == address(0)) return false;
+        return IPoliDaoWeb3(web3Module).verifyDonationSignature(
+            donor, fundraiserId, amount, deadline, signature
+        );
+    }
+
+    // ========== ANALYTICS FUNCTIONS - CZYSTE WRAPPER'Y ==========
+    
+    /**
+     * @notice Get platform statistics - delegacja do Analytics module
+     */
+    function getPlatformStats() external view returns (
+        uint256 totalFundraisers,
+        uint256 totalProposals,
+        uint256 totalUpdates,
+        uint256 activeFundraisers,
+        uint256 successfulFundraisers,
+        uint256 suspendedFundraisers,
+        uint256 totalWhitelistedTokens
+    ) {
+        if (analyticsModule == address(0)) {
+            return (0, 0, 0, 0, 0, 0, 0);
+        }
+        return IPoliDaoAnalytics(analyticsModule).getPlatformStats();
+    }
+    
+    /**
+     * @notice Get fundraiser analytics - delegacja do Analytics module
+     */
+    function getFundraiserStats(uint256 fundraiserId) external view returns (
+        uint256 totalDonations,
+        uint256 averageDonation,
+        uint256 donorsCount,
+        uint256 refundsCount,
+        uint256 mediaItemsCount,
+        uint256 updatesCount,
+        uint256 daysActive,
+        uint256 goalProgress,
+        uint256 velocity,
+        bool hasReachedGoal
+    ) {
+        if (analyticsModule == address(0)) {
+            return (0, 0, 0, 0, 0, 0, 0, 0, 0, false);
+        }
+        return IPoliDaoAnalytics(analyticsModule).getFundraiserStats(fundraiserId);
+    }
+    
+    /**
+     * @notice Get top fundraisers - delegacja do Analytics module
+     */
+    function getTopFundraisers(uint256 limit) external view returns (
+        uint256[] memory fundraiserIds,
+        uint256[] memory amounts,
+        string[] memory titles
+    ) {
+        if (analyticsModule == address(0)) {
+            return (new uint256[](0), new uint256[](0), new string[](0));
+        }
+        return IPoliDaoAnalytics(analyticsModule).getTopFundraisers(limit);
+    }
+    
+    /**
+     * @notice Get recent activity - delegacja do Analytics module
+     */
+    function getRecentActivity(uint256 timeHours) external view returns (
+        uint256 newFundraisers,
+        uint256 totalDonations,
+        uint256 uniqueDonors,
+        uint256 newProposals,
+        uint256 newUpdates
+    ) {
+        if (analyticsModule == address(0)) {
+            return (0, 0, 0, 0, 0);
+        }
+        return IPoliDaoAnalytics(analyticsModule).getRecentActivity(timeHours);
+    }
+
+    // ========== SECURITY DELEGATION - CZYSTE WRAPPER'Y ==========
+    
     function suspendFundraiser(uint256 fundraiserId, string calldata reason) external {
         require(securityModule != address(0), "Security module not set");
         
@@ -392,9 +599,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         require(success, "Security delegate failed");
     }
 
-    /**
-     * @notice CZYSTA DELEGACJA do Security Module - unsuspendFundraiser
-     */
     function unsuspendFundraiser(uint256 fundraiserId) external {
         require(securityModule != address(0), "Security module not set");
         
@@ -403,9 +607,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         require(success, "Security delegate failed");
     }
 
-    /**
-     * @notice CZYSTA DELEGACJA do Security Module - activateEmergencyPause
-     */
     function activateEmergencyPause(string calldata reason) external {
         require(securityModule != address(0), "Security module not set");
         
@@ -414,9 +615,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         require(success, "Security delegate failed");
     }
 
-    /**
-     * @notice CZYSTA DELEGACJA do Security Module - suspendUser
-     */
     function suspendUser(address user, uint256 duration, string calldata reason) external {
         require(securityModule != address(0), "Security module not set");
         
@@ -425,9 +623,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         require(success, "Security delegate failed");
     }
 
-    /**
-     * @notice CZYSTA DELEGACJA do Security Module - suspendToken
-     */
     function suspendToken(address token, string calldata reason) external {
         require(securityModule != address(0), "Security module not set");
         
@@ -436,9 +631,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         require(success, "Security delegate failed");
     }
 
-    /**
-     * @notice VIEW ONLY - sprawdź status bezpieczeństwa przez Security Module
-     */
     function getSecurityStatus() 
         external 
         view 
@@ -460,9 +652,6 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         (userSuspended, , ) = security.isUserSuspended(msg.sender);
     }
 
-    /**
-     * @notice VIEW ONLY - sprawdź czy fundraiser jest zawieszony
-     */
     function isFundraiserSuspended(uint256 fundraiserId) 
         external 
         view 
@@ -533,7 +722,7 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         fundraisers[fundraiserId].donations[donor] = newAmount;
     }
 
-    // ========== DELEGATION TO MODULES ==========
+    // ========== DELEGATION TO MODULES - ROZSZERZONE ==========
     
     function delegateToGovernance(bytes calldata data) external returns (bytes memory) {
         require(governanceModule != address(0), "Module not set");
@@ -567,6 +756,26 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         require(securityModule != address(0), "Module not set");
         (bool success, bytes memory result) = securityModule.delegatecall(data);
         require(success, "Delegate failed");
+        return result;
+    }
+
+    /**
+     * @notice NOWA FUNKCJA - Delegacja do Web3 module
+     */
+    function delegateToWeb3(bytes calldata data) external returns (bytes memory) {
+        require(web3Module != address(0), "Web3 module not set");
+        (bool success, bytes memory result) = web3Module.delegatecall(data);
+        require(success, "Web3 delegate failed");
+        return result;
+    }
+
+    /**
+     * @notice NOWA FUNKCJA - Delegacja do Analytics module
+     */
+    function delegateToAnalytics(bytes calldata data) external returns (bytes memory) {
+        require(analyticsModule != address(0), "Analytics module not set");
+        (bool success, bytes memory result) = analyticsModule.delegatecall(data);
+        require(success, "Analytics delegate failed");
         return result;
     }
 
@@ -661,6 +870,48 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         return fundraisers[fundraiserId].creator;
     }
 
+    // ========== MODULE VIEW FUNCTIONS - NOWE ==========
+    
+    /**
+     * @notice Pobierz adresy wszystkich modułów
+     */
+    function getAllModules() external view returns (
+        address governance,
+        address media,
+        address updates,
+        address refunds,
+        address security,
+        address web3,
+        address analytics
+    ) {
+        return (
+            governanceModule,
+            mediaModule,
+            updatesModule,
+            refundsModule,
+            securityModule,
+            web3Module,
+            analyticsModule
+        );
+    }
+
+    /**
+     * @notice Sprawdź czy moduł jest ustawiony
+     */
+    function isModuleSet(string calldata moduleType) external view returns (bool) {
+        bytes32 moduleHash = keccak256(bytes(moduleType));
+        
+        if (moduleHash == keccak256(bytes("governance"))) return governanceModule != address(0);
+        if (moduleHash == keccak256(bytes("media"))) return mediaModule != address(0);
+        if (moduleHash == keccak256(bytes("updates"))) return updatesModule != address(0);
+        if (moduleHash == keccak256(bytes("refunds"))) return refundsModule != address(0);
+        if (moduleHash == keccak256(bytes("security"))) return securityModule != address(0);
+        if (moduleHash == keccak256(bytes("web3"))) return web3Module != address(0);
+        if (moduleHash == keccak256(bytes("analytics"))) return analyticsModule != address(0);
+        
+        return false;
+    }
+
     // ========== ADMIN FUNCTIONS (z security) ==========
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
@@ -681,6 +932,42 @@ contract PoliDao is Ownable, Pausable, ReentrancyGuard, IPoliDaoStructs {
         
         emit EmergencyWithdraw(token, to, amount);
     }
+
+    // ========== NOWE EVENTY DLA MODUŁÓW ==========
+    
+    /**
+     * @notice Event for Web3 module setup
+     */
+    event Web3ModuleSet(address indexed oldModule, address indexed newModule);
+    
+    /**
+     * @notice Event for Analytics module setup  
+     */
+    event AnalyticsModuleSet(address indexed oldModule, address indexed newModule);
+
+    /**
+     * @notice Event for module status check
+     */
+    event ModuleStatusChecked(string indexed moduleType, bool isActive);
+
+    /**
+     * @notice Event for batch operation execution
+     */
+    event BatchOperationExecuted(
+        string indexed operationType, 
+        address indexed executor, 
+        uint256 itemCount,
+        uint256 totalAmount
+    );
+
+    /**
+     * @notice Event for analytics query
+     */
+    event AnalyticsQueryExecuted(
+        string indexed queryType,
+        address indexed requester,
+        uint256 timestamp
+    );
 
     receive() external payable {}
 }
