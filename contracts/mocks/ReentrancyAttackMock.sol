@@ -9,7 +9,7 @@ import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
- * @title ReentrancyAttackMock
+ * @title ReentrancyAttackMock - POPRAWIONA WERSJA
  * @notice Kontrakt testowy do symulacji ataku reentrancy na modularną architekturę PoliDAO
  * @dev ZAKTUALIZOWANY dla nowej architektury bez wrapper functions
  */
@@ -375,8 +375,9 @@ contract ReentrancyAttackMock is IPoliDaoStructs {
     
     /**
      * @notice Test delegate call encoding
+     * POPRAWKA: Zmieniono z view na pure, ponieważ funkcja nie czyta stanu kontraktu
      */
-    function testDelegateCallEncoding(string calldata question, uint256 duration) external view returns (bytes memory) {
+    function testDelegateCallEncoding(string calldata question, uint256 duration) external pure returns (bytes memory) {
         return abi.encodeWithSignature("createProposal(string,uint256)", question, duration);
     }
 }

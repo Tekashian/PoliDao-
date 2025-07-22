@@ -7,7 +7,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../interfaces/IPoliDaoStructs.sol";
 
 /**
- * @title PoliDaoRefunds
+ * @title PoliDaoRefunds - POPRAWIONA WERSJA
  * @notice Refunds management module for PoliDAO
  * @dev Handles refund logic, closure periods, and flexible fundraiser withdrawals
  */
@@ -115,10 +115,11 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoStructs {
     /**
      * @notice Validate refund conditions
      * @dev Made external to allow try/catch in view functions
+     * POPRAWKA: Zakomentowano nieużywany parametr fundraiserStatus
      */
     function validateRefundConditions(
         uint256 fundraiserId,
-        uint8 fundraiserStatus,
+        uint256 /* fundraiserStatus */,
         uint256 fundraiserEndTime,
         bool goalReached
     ) external view {
@@ -142,10 +143,11 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoStructs {
     
     /**
      * @notice Internal validation function
+     * POPRAWKA: Zakomentowano nieużywany parametr fundraiserStatus
      */
     function _validateRefundConditionsInternal(
         uint256 fundraiserId,
-        uint8 fundraiserStatus,
+        uint256 /* fundraiserStatus */,
         uint256 fundraiserEndTime,
         bool goalReached
     ) internal view {

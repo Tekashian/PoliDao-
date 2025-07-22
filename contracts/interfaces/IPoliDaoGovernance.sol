@@ -183,9 +183,9 @@ interface IPoliDaoGovernance is IPoliDaoStructs {
     /**
      * @notice Get proposals by creator
      * @param creator The creator address
-     * @return proposalIds Array of proposal IDs
+     * @return creatorProposalIds Array of proposal IDs
      */
-    function getProposalsByCreator(address creator) external view returns (uint256[] memory proposalIds);
+    function getProposalsByCreator(address creator) external view returns (uint256[] memory creatorProposalIds);
     
     /**
      * @notice Get paginated proposals
@@ -235,9 +235,9 @@ interface IPoliDaoGovernance is IPoliDaoStructs {
     
     /**
      * @notice Get all proposal IDs
-     * @return proposalIds Array of all proposal IDs
+     * @return allProposalIds Array of all proposal IDs
      */
-    function getAllProposalIds() external view returns (uint256[] memory proposalIds);
+    function getAllProposalIds() external view returns (uint256[] memory allProposalIds);
     
     /**
      * @notice Get main contract address

@@ -3,24 +3,14 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "../interfaces/IPoliDaoStructs.sol";
 
 /**
- * @title PoliDaoGovernance
- * @notice Governance module for PoliDAO - handles proposals and voting
- * @dev Manages proposal creation, voting mechanism, and proposal results
+ * @title PoliDaoGovernance - POPRAWIONA WERSJA
+ * @notice Enhanced Governance module for PoliDAO with selective pausing and emergency functions
+ * @dev Manages proposal creation, voting mechanism, selective pausing, and emergency governance
  */
-contract PoliDaoGovernance is Ownable, Pausable {
-    
-    // ========== CUSTOM ERRORS ==========
-    
-    error ProposalNotFound(uint256 proposalId);
-    error ProposalNotActive(uint256 proposalId);
-    error AlreadyVoted(address voter, uint256 proposalId);
-    error VotingEnded(uint256 proposalId);
-    error UnauthorizedProposer(address caller);
-    error InvalidProposalDuration(uint256 duration);
-    error EmptyQuestion();
-    error InvalidMainContract();
+contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
     
     // ========== CONSTANTS ==========
     
@@ -44,13 +34,6 @@ contract PoliDaoGovernance is Ownable, Pausable {
         mapping(address => bool) hasVoted;
     }
     
-    enum ProposalStatus {
-        ACTIVE,
-        PASSED,
-        FAILED,
-        EXECUTED
-    }
-    
     // ========== STORAGE ==========
     
     address public mainContract;
@@ -66,44 +49,50 @@ contract PoliDaoGovernance is Ownable, Pausable {
     uint256 public proposalCooldown = 1 days;
     mapping(address => uint256) public lastProposalTime;
     
-    // ========== EVENTS ==========
+    // ========== SELECTIVE PAUSING STATE ==========
     
-    event ProposalCreated(uint256 indexed id, string question, uint256 endTime, address indexed creator);
-    event Voted(address indexed voter, uint256 indexed proposalId, bool support);
+    bool public votingPaused = false;
+    bool public proposalCreationPaused = false;
+    bool public proposalExecutionPaused = false;
+    
+    // ========== ENHANCED EVENTS ==========
+    
+    // NOTE: ProposalCreated and Voted are inherited from IPoliDaoStructs
     event ProposalExecuted(uint256 indexed proposalId, bool passed);
     event ProposerAuthorized(address indexed proposer);
     event ProposerRevoked(address indexed proposer);
     event MainContractUpdated(address indexed oldContract, address indexed newContract);
     event ProposalCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
     
+    // NEW EVENTS
+    event VotingPauseToggled(bool isPaused);
+    event ProposalCreationPauseToggled(bool isPaused);
+    event ProposalExecutionPauseToggled(bool isPaused);
+    event EmergencyGovernanceFreeze(address indexed initiator, uint256 timestamp);
+    event EmergencyGovernanceUnfreeze(address indexed initiator, uint256 timestamp);
+    event BatchProposalsExecuted(uint256[] proposalIdsArray, address indexed executor);
+    event EmergencyProposalClosed(uint256 indexed proposalId, string reason, address indexed closer);
+    
     // ========== MODIFIERS ==========
     
     modifier onlyMainContract() {
-        if (msg.sender != mainContract) revert UnauthorizedProposer(msg.sender);
+        require(msg.sender == mainContract, "Unauthorized proposer");
         _;
     }
     
     modifier onlyAuthorizedProposer() {
-        if (msg.sender != owner() && !authorizedProposers[msg.sender]) {
-            revert UnauthorizedProposer(msg.sender);
-        }
+        require(msg.sender == owner() || authorizedProposers[msg.sender], "Unauthorized proposer");
         _;
     }
     
     modifier validProposal(uint256 proposalId) {
-        if (proposalId == 0 || proposalId > proposalCount) {
-            revert ProposalNotFound(proposalId);
-        }
-        if (!proposals[proposalId].exists) {
-            revert ProposalNotFound(proposalId);
-        }
+        require(proposalId > 0 && proposalId <= proposalCount, "Proposal not found");
+        require(proposals[proposalId].exists, "Proposal not found");
         _;
     }
     
     modifier proposalActive(uint256 proposalId) {
-        if (block.timestamp > proposals[proposalId].endTime) {
-            revert VotingEnded(proposalId);
-        }
+        require(block.timestamp <= proposals[proposalId].endTime, "Voting ended");
         _;
     }
     
@@ -117,10 +106,26 @@ contract PoliDaoGovernance is Ownable, Pausable {
         _;
     }
     
+    // NEW MODIFIERS
+    modifier whenVotingNotPaused() {
+        require(!votingPaused, "Voting paused");
+        _;
+    }
+    
+    modifier whenProposalCreationNotPaused() {
+        require(!proposalCreationPaused, "Proposal creation paused");
+        _;
+    }
+    
+    modifier whenProposalExecutionNotPaused() {
+        require(!proposalExecutionPaused, "Proposal execution paused");
+        _;
+    }
+    
     // ========== CONSTRUCTOR ==========
     
     constructor(address _mainContract) Ownable(msg.sender) {
-        if (_mainContract == address(0)) revert InvalidMainContract();
+        require(_mainContract != address(0), "Invalid main contract");
         mainContract = _mainContract;
     }
     
@@ -135,7 +140,7 @@ contract PoliDaoGovernance is Ownable, Pausable {
     }
     
     function setMainContract(address _newMainContract) external onlyOwner {
-        if (_newMainContract == address(0)) revert InvalidMainContract();
+        require(_newMainContract != address(0), "Invalid main contract");
         address oldContract = mainContract;
         mainContract = _newMainContract;
         emit MainContractUpdated(oldContract, _newMainContract);
@@ -166,24 +171,80 @@ contract PoliDaoGovernance is Ownable, Pausable {
         }
     }
     
-    // ========== PROPOSAL FUNCTIONS ==========
+    // ========== NEW SELECTIVE PAUSING FUNCTIONS ==========
     
     /**
-     * @notice Creates a new proposal
+     * @notice Toggle voting pause - allows disabling voting while keeping proposal creation
+     */
+    function toggleVotingPause() external onlyOwner {
+        votingPaused = !votingPaused;
+        emit VotingPauseToggled(votingPaused);
+    }
+    
+    /**
+     * @notice Toggle proposal creation pause - stops new proposals while allowing voting on existing
+     */
+    function toggleProposalCreationPause() external onlyOwner {
+        proposalCreationPaused = !proposalCreationPaused;
+        emit ProposalCreationPauseToggled(proposalCreationPaused);
+    }
+    
+    /**
+     * @notice Toggle proposal execution pause - stops execution while allowing voting and creation
+     */
+    function toggleProposalExecutionPause() external onlyOwner {
+        proposalExecutionPaused = !proposalExecutionPaused;
+        emit ProposalExecutionPauseToggled(proposalExecutionPaused);
+    }
+    
+    /**
+     * @notice Emergency freeze all governance functions
+     */
+    function emergencyGovernanceFreeze() external onlyOwner {
+        _pause();
+        votingPaused = true;
+        proposalCreationPaused = true;
+        proposalExecutionPaused = true;
+        
+        emit EmergencyGovernanceFreeze(msg.sender, block.timestamp);
+        emit VotingPauseToggled(true);
+        emit ProposalCreationPauseToggled(true);
+        emit ProposalExecutionPauseToggled(true);
+    }
+    
+    /**
+     * @notice Emergency unfreeze all governance functions
+     */
+    function emergencyGovernanceUnfreeze() external onlyOwner {
+        _unpause();
+        votingPaused = false;
+        proposalCreationPaused = false;
+        proposalExecutionPaused = false;
+        
+        emit EmergencyGovernanceUnfreeze(msg.sender, block.timestamp);
+        emit VotingPauseToggled(false);
+        emit ProposalCreationPauseToggled(false);
+        emit ProposalExecutionPauseToggled(false);
+    }
+    
+    // ========== ENHANCED PROPOSAL FUNCTIONS ==========
+    
+    /**
+     * @notice Creates a new proposal - now with selective pausing
      * @param _question The proposal question
      * @param _durationSeconds Voting duration in seconds
      */
     function createProposal(string calldata _question, uint256 _durationSeconds) 
         external 
         whenNotPaused 
+        whenProposalCreationNotPaused
         onlyAuthorizedProposer 
         rateLimited 
+        returns (uint256)
     {
-        if (bytes(_question).length == 0) revert EmptyQuestion();
-        if (bytes(_question).length > MAX_QUESTION_LENGTH) revert("Question too long");
-        if (_durationSeconds < MIN_PROPOSAL_DURATION || _durationSeconds > MAX_PROPOSAL_DURATION) {
-            revert InvalidProposalDuration(_durationSeconds);
-        }
+        require(bytes(_question).length > 0, "Empty question");
+        require(bytes(_question).length <= MAX_QUESTION_LENGTH, "Question too long");
+        require(_durationSeconds >= MIN_PROPOSAL_DURATION && _durationSeconds <= MAX_PROPOSAL_DURATION, "Invalid proposal duration");
         
         proposalCount++;
         uint256 proposalId = proposalCount;
@@ -201,24 +262,25 @@ contract PoliDaoGovernance is Ownable, Pausable {
         lastProposalTime[msg.sender] = block.timestamp;
         
         emit ProposalCreated(proposalId, _question, p.endTime, msg.sender);
+        
+        return proposalId;
     }
     
     /**
-     * @notice Vote on a proposal
+     * @notice Vote on a proposal - now with selective pausing
      * @param _proposalId The proposal ID
      * @param _support Whether to vote yes (true) or no (false)
      */
     function vote(uint256 _proposalId, bool _support) 
         external 
         whenNotPaused 
+        whenVotingNotPaused
         validProposal(_proposalId) 
         proposalActive(_proposalId) 
     {
         Proposal storage p = proposals[_proposalId];
         
-        if (p.hasVoted[msg.sender]) {
-            revert AlreadyVoted(msg.sender, _proposalId);
-        }
+        require(!p.hasVoted[msg.sender], "Already voted");
         
         p.hasVoted[msg.sender] = true;
         
@@ -232,12 +294,13 @@ contract PoliDaoGovernance is Ownable, Pausable {
     }
     
     /**
-     * @notice Execute a proposal (mark as executed)
+     * @notice Execute a proposal - now with selective pausing
      * @param _proposalId The proposal ID
      */
     function executeProposal(uint256 _proposalId) 
         external 
         onlyOwner 
+        whenProposalExecutionNotPaused
         validProposal(_proposalId) 
     {
         Proposal storage p = proposals[_proposalId];
@@ -250,12 +313,162 @@ contract PoliDaoGovernance is Ownable, Pausable {
         emit ProposalExecuted(_proposalId, passed);
     }
     
-    // ========== VIEW FUNCTIONS ==========
+    // ========== NEW BATCH FUNCTIONS ==========
     
     /**
-     * @notice Get proposal details
+     * @notice Batch execute multiple proposals
+     * @param proposalIdsArray Array of proposal IDs to execute
+     */
+    function batchExecuteProposals(uint256[] calldata proposalIdsArray) 
+        external 
+        onlyOwner 
+        whenProposalExecutionNotPaused
+    {
+        require(proposalIdsArray.length > 0, "Empty proposal list");
+        require(proposalIdsArray.length <= 20, "Too many proposals"); // Limit to prevent gas issues
+        
+        for (uint256 i = 0; i < proposalIdsArray.length; i++) {
+            uint256 proposalId = proposalIdsArray[i];
+            
+            if (proposalId == 0 || proposalId > proposalCount) continue;
+            if (!proposals[proposalId].exists) continue;
+            
+            Proposal storage p = proposals[proposalId];
+            if (block.timestamp <= p.endTime) continue; // Skip active proposals
+            if (p.executed) continue; // Skip already executed
+            
+            p.executed = true;
+            bool passed = p.yesVotes > p.noVotes;
+            emit ProposalExecuted(proposalId, passed);
+        }
+        
+        emit BatchProposalsExecuted(proposalIdsArray, msg.sender);
+    }
+    
+    /**
+     * @notice Get proposals that are ready for execution
+     */
+    function getProposalsReadyForExecution() external view returns (uint256[] memory) {
+        uint256[] memory readyIds = new uint256[](proposalCount);
+        uint256 readyCount = 0;
+        
+        for (uint256 i = 1; i <= proposalCount; i++) {
+            if (proposals[i].exists && 
+                !proposals[i].executed && 
+                block.timestamp > proposals[i].endTime) {
+                readyIds[readyCount] = i;
+                readyCount++;
+            }
+        }
+        
+        // Resize array
+        uint256[] memory result = new uint256[](readyCount);
+        for (uint256 i = 0; i < readyCount; i++) {
+            result[i] = readyIds[i];
+        }
+        
+        return result;
+    }
+    
+    // ========== ENHANCED VIEW FUNCTIONS ==========
+    
+    /**
+     * @notice Get detailed governance status
+     */
+    function getGovernanceStatus() external view returns (
+        bool isGloballyPaused,
+        bool isVotingPaused,
+        bool isProposalCreationPaused,
+        bool isProposalExecutionPaused,
+        uint256 totalProposals,
+        uint256 activeProposals,
+        uint256 readyForExecution
+    ) {
+        isGloballyPaused = paused();
+        isVotingPaused = votingPaused;
+        isProposalCreationPaused = proposalCreationPaused;
+        isProposalExecutionPaused = proposalExecutionPaused;
+        totalProposals = proposalCount;
+        
+        // Count active proposals
+        uint256 activeCount = 0;
+        uint256 readyCount = 0;
+        for (uint256 i = 1; i <= proposalCount; i++) {
+            if (proposals[i].exists) {
+                if (block.timestamp <= proposals[i].endTime) {
+                    activeCount++;
+                } else if (!proposals[i].executed) {
+                    readyCount++;
+                }
+            }
+        }
+        
+        activeProposals = activeCount;
+        readyForExecution = readyCount;
+    }
+    
+    /**
+     * @notice Get proposal details with enhanced status info
      * @param proposalId The proposal ID
      */
+    function getProposalWithStatus(uint256 proposalId) 
+        external 
+        view 
+        validProposal(proposalId) 
+        returns (
+            uint256 id,
+            string memory question,
+            uint256 yesVotes,
+            uint256 noVotes,
+            uint256 endTime,
+            address creator,
+            bool exists,
+            bool executed,
+            uint256 createdAt,
+            ProposalStatus status,
+            uint256 timeRemaining,
+            uint256 participationRate
+        ) 
+    {
+        Proposal storage p = proposals[proposalId];
+        
+        // Calculate status
+        ProposalStatus currentStatus;
+        if (p.executed) {
+            currentStatus = ProposalStatus.EXECUTED;
+        } else if (block.timestamp <= p.endTime) {
+            currentStatus = ProposalStatus.ACTIVE;
+        } else {
+            currentStatus = p.yesVotes > p.noVotes ? ProposalStatus.PASSED : ProposalStatus.FAILED;
+        }
+        
+        // Calculate time remaining
+        uint256 remaining = 0;
+        if (block.timestamp < p.endTime) {
+            remaining = p.endTime - block.timestamp;
+        }
+        
+        // Calculate participation rate (total votes)
+        uint256 totalVotes = p.yesVotes + p.noVotes;
+        
+        return (
+            p.id,
+            p.question,
+            p.yesVotes,
+            p.noVotes,
+            p.endTime,
+            p.creator,
+            p.exists,
+            p.executed,
+            p.createdAt,
+            currentStatus,
+            remaining,
+            totalVotes
+        );
+    }
+    
+    // ========== ORIGINAL VIEW FUNCTIONS ==========
+    
     function getProposal(uint256 proposalId) 
         external 
         view 
@@ -286,20 +499,11 @@ contract PoliDaoGovernance is Ownable, Pausable {
         );
     }
     
-    /**
-     * @notice Check if user has voted on a proposal
-     * @param proposalId The proposal ID
-     * @param voter The voter address
-     */
     function hasVoted(uint256 proposalId, address voter) external view returns (bool) {
         if (proposalId == 0 || proposalId > proposalCount) return false;
         return proposals[proposalId].hasVoted[voter];
     }
     
-    /**
-     * @notice Get proposal status
-     * @param proposalId The proposal ID
-     */
     function getProposalStatus(uint256 proposalId) 
         external 
         view 
@@ -319,10 +523,6 @@ contract PoliDaoGovernance is Ownable, Pausable {
         return p.yesVotes > p.noVotes ? ProposalStatus.PASSED : ProposalStatus.FAILED;
     }
     
-    /**
-     * @notice Get proposal results
-     * @param proposalId The proposal ID
-     */
     function getProposalResults(uint256 proposalId) 
         external 
         view 
@@ -345,12 +545,9 @@ contract PoliDaoGovernance is Ownable, Pausable {
             yesPercentage = (yesVotes * 100) / totalVotes;
         }
         
-        passed = yesVotes > noVotes;
+        passed = yesVotes > p.noVotes;
     }
     
-    /**
-     * @notice Get active proposals
-     */
     function getActiveProposals() external view returns (uint256[] memory) {
         uint256[] memory activeIds = new uint256[](proposalCount);
         uint256 activeCount = 0;
@@ -362,7 +559,6 @@ contract PoliDaoGovernance is Ownable, Pausable {
             }
         }
         
-        // Resize array
         uint256[] memory result = new uint256[](activeCount);
         for (uint256 i = 0; i < activeCount; i++) {
             result[i] = activeIds[i];
@@ -371,10 +567,6 @@ contract PoliDaoGovernance is Ownable, Pausable {
         return result;
     }
     
-    /**
-     * @notice Get proposals by creator
-     * @param creator The creator address
-     */
     function getProposalsByCreator(address creator) external view returns (uint256[] memory) {
         uint256[] memory creatorIds = new uint256[](proposalCount);
         uint256 creatorCount = 0;
@@ -386,7 +578,6 @@ contract PoliDaoGovernance is Ownable, Pausable {
             }
         }
         
-        // Resize array
         uint256[] memory result = new uint256[](creatorCount);
         for (uint256 i = 0; i < creatorCount; i++) {
             result[i] = creatorIds[i];
@@ -395,11 +586,6 @@ contract PoliDaoGovernance is Ownable, Pausable {
         return result;
     }
     
-    /**
-     * @notice Get paginated proposals
-     * @param offset Starting index
-     * @param limit Number of proposals to return
-     */
     function getProposals(uint256 offset, uint256 limit) 
         external 
         view 
@@ -422,35 +608,21 @@ contract PoliDaoGovernance is Ownable, Pausable {
         }
     }
     
-    /**
-     * @notice Get proposal count
-     */
     function getProposalCount() external view returns (uint256) {
         return proposalCount;
     }
     
-    /**
-     * @notice Get user's proposal count
-     * @param user The user address
-     */
     function getUserProposalCount(address user) external view returns (uint256) {
         return userProposalCount[user];
     }
     
-    /**
-     * @notice Check if user can create proposal (cooldown check)
-     * @param user The user address
-     */
     function canCreateProposal(address user) external view returns (bool) {
+        if (proposalCreationPaused) return false;
         if (user == owner()) return true;
         if (!authorizedProposers[user]) return false;
         return block.timestamp >= lastProposalTime[user] + proposalCooldown;
     }
     
-    /**
-     * @notice Get remaining cooldown time for user
-     * @param user The user address
-     */
     function getRemainingCooldown(address user) external view returns (uint256) {
         if (user == owner()) return 0;
         if (!authorizedProposers[user]) return type(uint256).max;
@@ -463,19 +635,36 @@ contract PoliDaoGovernance is Ownable, Pausable {
         return nextAllowedTime - block.timestamp;
     }
     
-    /**
-     * @notice Check if address is authorized proposer
-     * @param proposer The proposer address
-     */
     function isAuthorizedProposer(address proposer) external view returns (bool) {
         return proposer == owner() || authorizedProposers[proposer];
     }
     
-    // ========== EMERGENCY FUNCTIONS ==========
+    function getAllProposalIds() external view returns (uint256[] memory) {
+        return proposalIds;
+    }
+    
+    // ========== ENHANCED EMERGENCY FUNCTIONS ==========
     
     /**
-     * @notice Emergency function to close a proposal
+     * @notice Enhanced emergency function to close a proposal
      * @param proposalId The proposal ID
+     * @param reason Reason for emergency closure
+     */
+    function emergencyCloseProposal(uint256 proposalId, string calldata reason) 
+        external 
+        onlyOwner 
+        validProposal(proposalId) 
+    {
+        Proposal storage p = proposals[proposalId];
+        p.endTime = block.timestamp;
+        emit ProposalExecuted(proposalId, false);
+        
+        // Additional event for emergency closure
+        emit EmergencyProposalClosed(proposalId, reason, msg.sender);
+    }
+    
+    /**
+     * @notice Original emergency close for backward compatibility
      */
     function emergencyCloseProposal(uint256 proposalId) 
         external 
@@ -485,12 +674,5 @@ contract PoliDaoGovernance is Ownable, Pausable {
         Proposal storage p = proposals[proposalId];
         p.endTime = block.timestamp;
         emit ProposalExecuted(proposalId, false);
-    }
-    
-    /**
-     * @notice Get all proposal IDs
-     */
-    function getAllProposalIds() external view returns (uint256[] memory) {
-        return proposalIds;
     }
 }

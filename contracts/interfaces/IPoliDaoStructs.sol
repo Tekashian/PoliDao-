@@ -2,9 +2,10 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title IPoliDaoStructs
+ * @title IPoliDaoStructs - POPRAWIONA WERSJA
  * @notice Centralized interface for all shared data structures across PoliDAO modules
  * @dev This interface defines common enums, structs, and events used by all modules
+ * @dev WSZYSTKIE DUPLIKATY ZOSTAŁY USUNIĘTE - TO JEST JEDYNE ŹRÓDŁO DEFINICJI
  */
 interface IPoliDaoStructs {
     
@@ -57,7 +58,7 @@ interface IPoliDaoStructs {
         uint8 status;            
         bool isSuspended;        
         bool fundsWithdrawn;
-        bool isFlexible;         // DODANE: Czy zbiórka jest elastyczna
+        bool isFlexible;         // Czy zbiórka jest elastyczna
     }
     
     /**
@@ -74,22 +75,7 @@ interface IPoliDaoStructs {
         string[] initialVideos;
         string metadataHash;
         string location;
-        bool isFlexible;         // DODANE: Czy zbiórka ma być elastyczna
-    }
-    
-    /**
-     * @notice Governance proposal structure
-     */
-    struct Proposal {
-        uint256 id;
-        string question;
-        uint256 yesVotes;
-        uint256 noVotes;
-        uint256 endTime;
-        address creator;
-        bool exists;
-        bool executed;
-        uint256 createdAt;
+        bool isFlexible;         // Czy zbiórka ma być elastyczna
     }
     
     /**
@@ -176,7 +162,7 @@ interface IPoliDaoStructs {
         uint256 indexed fundraiserId
     );
     
-    // ========== REFUND EVENTS (DODANE) ==========
+    // ========== REFUND EVENTS ==========
     
     event RefundProcessed(
         uint256 indexed fundraiserId,
@@ -212,16 +198,43 @@ interface IPoliDaoStructs {
         uint256 amountAfterCommission
     );
     
+    // ========== WEB3 EVENTS ==========
+    
+    event DonationMadeWithPermit(
+        uint256 indexed fundraiserId, 
+        address indexed donor, 
+        address indexed token, 
+        uint256 amount
+    );
+    
+    event DonationMadeWithMetaTx(
+        uint256 indexed fundraiserId, 
+        address indexed donor, 
+        address indexed relayer, 
+        uint256 amount
+    );
+    
+    event BatchDonationExecuted(
+        bytes32 indexed batchId, 
+        address indexed donor, 
+        uint256 totalAmount
+    );
+    
     // ========== MODULE MANAGEMENT EVENTS ==========
     
     event ModulesInitialized(
         address governance, 
         address media, 
         address updates, 
-        address refunds           // DODANE: refunds module
+        address refunds
     );
     
     event RefundsModuleSet(
+        address indexed oldModule, 
+        address indexed newModule
+    );
+    
+    event SecurityModuleSet(
         address indexed oldModule, 
         address indexed newModule
     );
@@ -261,26 +274,6 @@ interface IPoliDaoStructs {
         string newLocation
     );
     
-    event DonationMadeWithPermit(
-        uint256 indexed fundraiserId, 
-        address indexed donor, 
-        address indexed token, 
-        uint256 amount
-    );
-    
-    event DonationMadeWithMetaTx(
-        uint256 indexed fundraiserId, 
-        address indexed donor, 
-        address indexed relayer, 
-        uint256 amount
-    );
-    
-    event BatchDonationExecuted(
-        bytes32 indexed batchId, 
-        address indexed donor, 
-        uint256 totalAmount
-    );
-    
     event TokenWhitelisted(address indexed token);
     event TokenRemoved(address indexed token);
     event DonationCommissionSet(uint256 newCommission);
@@ -289,6 +282,80 @@ interface IPoliDaoStructs {
     event CommissionWalletChanged(address indexed oldWallet, address indexed newWallet);
     event FeeTokenSet(address indexed oldToken, address indexed newToken);
     event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
+    
+    // ========== SECURITY EVENTS ==========
+    
+    event SecurityLevelChanged(
+        uint8 indexed oldLevel,
+        uint8 indexed newLevel,
+        address indexed initiator,
+        string reason
+    );
+    
+    event CircuitBreakerTriggered(
+        string indexed functionName,
+        address indexed caller,
+        uint256 gasUsed,
+        uint256 threshold,
+        uint256 timestamp
+    );
+    
+    event EmergencyPauseActivated(
+        address indexed initiator,
+        string reason,
+        uint256 timestamp
+    );
+    
+    event EmergencyPauseDeactivated(
+        address indexed initiator,
+        uint256 timestamp
+    );
+    
+    event UserSuspended(
+        address indexed user,
+        address indexed suspendedBy,
+        string reason,
+        uint256 duration,
+        uint256 timestamp
+    );
+    
+    event UserUnsuspended(
+        address indexed user,
+        address indexed unsuspendedBy,
+        uint256 timestamp
+    );
+    
+    event TokenSuspended(
+        address indexed token,
+        address indexed suspendedBy,
+        string reason,
+        uint256 timestamp
+    );
+    
+    event TokenUnsuspended(
+        address indexed token,
+        address indexed unsuspendedBy,
+        uint256 timestamp
+    );
+    
+    event SecurityGuardianAdded(
+        address indexed guardian,
+        address indexed addedBy,
+        uint256 permissions
+    );
+    
+    event SecurityGuardianRemoved(
+        address indexed guardian,
+        address indexed removedBy
+    );
+    
+    event RateLimitExceeded(
+        address indexed user,
+        string functionName,
+        uint256 attempts,
+        uint256 limit,
+        uint256 windowStart
+    );
     
     // ========== COMMON ERRORS ==========
     
@@ -318,7 +385,7 @@ interface IPoliDaoStructs {
     error ClosureNotInitiated(uint256 fundraiserId);
     error ClosureAlreadyInitiated(uint256 fundraiserId);
     error ReclaimPeriodExpired(uint256 fundraiserId);
-    error RefundsPaused(uint256 fundraiserId);                    // POPRAWKA: Zmieniona nazwa
+    error RefundsPaused(uint256 fundraiserId);
     error InvalidRefundCommission(uint256 commission);
     error RefundsModuleNotSet();
     error OnlyRefundsModule(address caller);
