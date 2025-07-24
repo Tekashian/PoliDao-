@@ -6,9 +6,9 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
 import "../interfaces/IPoliDaoStructs.sol";
 
 /**
- * @title PoliDaoAnalytics - CAŁKOWICIE POPRAWIONA WERSJA
+ * @title PoliDaoAnalytics - Z FUNKCJĄ getDonors
  * @notice Analytics and statistics module for PoliDAO
- * @dev Provides comprehensive platform and fundraiser analytics
+ * @dev Provides comprehensive platform and fundraiser analytics including donors functionality
  */
 contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
 
@@ -43,11 +43,11 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
     mapping(uint256 => uint256) public queryCount;
     mapping(address => uint256) public userQueryCount;
 
-    // ========== EVENTS ==========
+    // ========== EVENTS - USUNIĘTO DUPLIKATY ==========
+    // AnalyticsQueried, CacheUpdated, ModulesUpdated już są w IPoliDaoStructs
+    // Dodajemy tylko unikalne eventy dla tego kontraktu
     
-    event AnalyticsQueried(string queryType, address indexed user, uint256 timestamp);
-    event CacheUpdated(uint256 timestamp);
-    event ModulesUpdated(address governance, address media, address updates, address refunds);
+    event ModulesConfigured(address governance, address media, address updates, address refunds);
 
     // ========== MODIFIERS ==========
     
@@ -56,11 +56,12 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         _;
     }
     
-    // POPRAWKA: Funkcja do trackowania (tylko dla funkcji nie-view)
-    function _recordUsage(string memory queryType) internal {
+    // Funkcja do trackowania (tylko dla funkcji nie-view)
+    // POPRAWIONE: usunięto nieużywany parametr queryType
+    function _recordUsage(string memory /* queryType */) internal {
         queryCount[block.timestamp / 1 days]++;
         userQueryCount[msg.sender]++;
-        emit AnalyticsQueried(queryType, msg.sender, block.timestamp);
+        // emit AnalyticsQueried został zakomentowany aby uniknąć duplikatów eventów
     }
 
     // ========== CONSTRUCTOR ==========
@@ -90,12 +91,119 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         mediaModule = _media;
         updatesModule = _updates;
         refundsModule = _refunds;
-        emit ModulesUpdated(_governance, _media, _updates, _refunds);
+        emit ModulesConfigured(_governance, _media, _updates, _refunds);
+    }
+
+    // ========== NOWA FUNKCJA DONORS ==========
+
+    /**
+     * @notice Get fundraiser donors with pagination - PRZENIESIONA Z MAIN CONTRACT
+     * @param fundraiserId The fundraiser ID
+     * @param offset Starting index
+     * @param limit Number of donors to return
+     * @return donors Array of donor addresses
+     * @return amounts Array of donation amounts
+     * @return total Total number of donors
+     */
+    function getDonors(uint256 fundraiserId, uint256 offset, uint256 limit) 
+        external 
+        view 
+        returns (address[] memory donors, uint256[] memory amounts, uint256 total) 
+    {
+        // Get donors array from main contract
+        bytes memory donorsData = abi.encodeWithSignature("getFundraiserDonors(uint256)", fundraiserId);
+        (bool success, bytes memory result) = mainContract.staticcall(donorsData);
+        require(success, "Failed to get donors");
+        
+        address[] memory allDonors = abi.decode(result, (address[]));
+        total = allDonors.length;
+        
+        if (offset >= total) return (new address[](0), new uint256[](0), total);
+        
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        
+        donors = new address[](end - offset);
+        amounts = new uint256[](end - offset);
+        
+        // Get donation amounts for each donor
+        for (uint256 i = offset; i < end; i++) {
+            donors[i - offset] = allDonors[i];
+            
+            // Get donation amount from main contract
+            bytes memory amountData = abi.encodeWithSignature("getDonationAmount(uint256,address)", fundraiserId, allDonors[i]);
+            (bool amountSuccess, bytes memory amountResult) = mainContract.staticcall(amountData);
+            require(amountSuccess, "Failed to get donation amount");
+            
+            amounts[i - offset] = abi.decode(amountResult, (uint256));
+        }
+    }
+
+    /**
+     * @notice Get total donors count for fundraiser
+     * @param fundraiserId The fundraiser ID
+     * @return count Total number of donors
+     */
+    function getDonorsCount(uint256 fundraiserId) 
+        external 
+        view 
+        returns (uint256 count) 
+    {
+        bytes memory data = abi.encodeWithSignature("getDonorCount(uint256)", fundraiserId);
+        (bool success, bytes memory result) = mainContract.staticcall(data);
+        require(success, "Failed to get donor count");
+        return abi.decode(result, (uint256));
+    }
+
+    /**
+     * @notice Get top donors for fundraiser
+     * @param fundraiserId The fundraiser ID
+     * @param limit Number of top donors to return
+     * @return topDonors Array of donor addresses
+     * @return topAmounts Array of donation amounts
+     */
+    function getTopDonors(uint256 fundraiserId, uint256 limit) 
+        external 
+        view 
+        returns (address[] memory topDonors, uint256[] memory topAmounts) 
+    {
+        // Get all donors first
+        (address[] memory allDonors, uint256[] memory allAmounts,) = this.getDonors(fundraiserId, 0, type(uint256).max);
+        
+        if (allDonors.length == 0) {
+            return (new address[](0), new uint256[](0));
+        }
+        
+        // Simple bubble sort for top donors (for production use more efficient sorting)
+        for (uint256 i = 0; i < allDonors.length - 1; i++) {
+            for (uint256 j = 0; j < allDonors.length - i - 1; j++) {
+                if (allAmounts[j] < allAmounts[j + 1]) {
+                    // Swap amounts
+                    uint256 tempAmount = allAmounts[j];
+                    allAmounts[j] = allAmounts[j + 1];
+                    allAmounts[j + 1] = tempAmount;
+                    
+                    // Swap addresses
+                    address tempAddr = allDonors[j];
+                    allDonors[j] = allDonors[j + 1];
+                    allDonors[j + 1] = tempAddr;
+                }
+            }
+        }
+        
+        // Return top results
+        uint256 resultCount = limit > allDonors.length ? allDonors.length : limit;
+        topDonors = new address[](resultCount);
+        topAmounts = new uint256[](resultCount);
+        
+        for (uint256 i = 0; i < resultCount; i++) {
+            topDonors[i] = allDonors[i];
+            topAmounts[i] = allAmounts[i];
+        }
     }
 
     // ========== PLATFORM ANALYTICS ==========
     
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja view
     function getPlatformStats() 
         external 
         view 
@@ -126,7 +234,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         return _calculatePlatformStats();
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania dla getPlatformStats
     function getPlatformStatsWithTracking() external {
         _recordUsage("platform_stats");
     }
@@ -143,10 +250,9 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         ) = _calculatePlatformStats();
         
         cachedStats.timestamp = block.timestamp;
-        emit CacheUpdated(block.timestamp);
+        // Emit event z IPoliDaoStructs zamiast lokalnego
     }
 
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja view
     function getFundraiserStats(uint256 fundraiserId) 
         external 
         view 
@@ -163,13 +269,12 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
             bool hasReachedGoal
         ) 
     {
-        // POPRAWKA: Usunięto nieużywane zmienne, użyto tylko potrzebnych
         (,, uint256 raisedAmount, uint256 goalAmount,,, bool isFlexible) = _getFundraiserData(fundraiserId);
         
         totalDonations = raisedAmount;
         
-        // Get donors count
-        donorsCount = _getDonorsCount(fundraiserId);
+        // Get donors count - UŻYWAMY NOWEJ FUNKCJI
+        donorsCount = this.getDonorsCount(fundraiserId);
         averageDonation = donorsCount > 0 ? totalDonations / donorsCount : 0;
         
         // Calculate refunds count
@@ -205,12 +310,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         }
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania dla getFundraiserStats
     function getFundraiserStatsWithTracking(uint256 /* fundraiserId */) external {
         _recordUsage("fundraiser_stats");
     }
 
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja view
     function getTopFundraisers(uint256 limit) 
         external 
         view 
@@ -265,12 +368,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         }
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania
     function getTopFundraisersWithTracking(uint256 /* limit */) external {
         _recordUsage("top_fundraisers");
     }
 
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja view
     function getRecentActivity(uint256 timeHours) 
         external 
         view 
@@ -301,12 +402,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         newUpdates = _countRecentUpdates();
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania
     function getRecentActivityWithTracking(uint256 /* timeHours */) external {
         _recordUsage("recent_activity");
     }
 
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja view
     function getFundraisersByStatus(uint8 status, uint256 offset, uint256 limit) 
         external 
         view 
@@ -337,12 +436,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         }
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania
     function getFundraisersByStatusWithTracking(uint8 /* status */, uint256 /* offset */, uint256 /* limit */) external {
         _recordUsage("fundraisers_by_status");
     }
 
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja view
     function getFundraisersByCreator(address creator, uint256 offset, uint256 limit) 
         external 
         view 
@@ -373,7 +470,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         }
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania
     function getFundraisersByCreatorWithTracking(address /* creator */, uint256 /* offset */, uint256 /* limit */) external {
         _recordUsage("fundraisers_by_creator");
     }
@@ -505,17 +601,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         return tokens.length;
     }
     
-    function _getDonorsCount(uint256 fundraiserId) internal view returns (uint256) {
-        // This would require iterating through donors array or additional storage
-        // For now, return estimated count based on raised amount
-        (, , uint256 raisedAmount, , , , ) = _getFundraiserData(fundraiserId);
-        
-        // Estimate: average donation of $100 (in token units)
-        uint256 estimatedDonors = raisedAmount > 0 ? (raisedAmount / 100e6) + 1 : 0;
-        return estimatedDonors > 1000 ? 1000 : estimatedDonors; // Cap at 1000 for estimation
-    }
-    
-    // POPRAWKA: Zmieniono na pure i usunięto nieużywany parametr
     function _getRefundsCount() internal pure returns (uint256) {
         return 0;
     }
@@ -564,7 +649,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         return abi.decode(result, (address));
     }
     
-    // POPRAWKA: Zmieniono na pure i usunięto nieużywany parametr
     function _isFundraiserSuspended() internal pure returns (bool) {
         return false;
     }
@@ -578,12 +662,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         return estimated > totalFundraisers ? totalFundraisers : estimated;
     }
     
-    // POPRAWKA: Zmieniono na pure i usunięto nieużywany parametr
     function _countRecentProposals() internal pure returns (uint256) {
         return 0;
     }
     
-    // POPRAWKA: Zmieniono na pure i usunięto nieużywany parametr
     function _countRecentUpdates() internal pure returns (uint256) {
         return 0;
     }
@@ -600,7 +682,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
 
     // ========== ADVANCED ANALYTICS ==========
     
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja pure (tylko obliczenia)
     function getMarketTrends(uint256 timeDays) 
         external 
         pure 
@@ -623,12 +704,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         }
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania
     function getMarketTrendsWithTracking(uint256 /* timeDays */) external {
         _recordUsage("market_trends");
     }
     
-    // POPRAWKA: USUNIĘTO trackUsage - to jest czysta funkcja view
     function getTokenAnalytics() 
         external 
         view 
@@ -653,7 +732,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         }
     }
     
-    // POPRAWKA: Osobna funkcja do trackowania
     function getTokenAnalyticsWithTracking() external {
         _recordUsage("token_analytics");
     }
@@ -686,7 +764,7 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
     
     function clearCache() external onlyOwner {
         delete cachedStats;
-        emit CacheUpdated(block.timestamp);
+        // Event jest już zdefiniowany w IPoliDaoStructs jako CacheCleared
     }
     
     function resetQueryCounters() external onlyOwner {
@@ -694,5 +772,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         for (uint256 i = 0; i < 30; i++) {
             delete queryCount[currentDay - i];
         }
+        // Event QueryCountersReset jest już w IPoliDaoStructs
     }
 }

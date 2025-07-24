@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../PoliDao.sol";
+// ========== POPRAWIONE IMPORTY ==========
+import "../interfaces/IPoliDao.sol";          // ZMIANA: Interface zamiast implementacji
 import "../PoliDaoRouter.sol";
 import "../modules/PoliDaoGovernance.sol";
 import "../modules/PoliDaoMedia.sol";
@@ -18,7 +19,7 @@ contract ReentrancyAttackMock is IPoliDaoStructs {
     
     // ========== STORAGE ==========
     
-    PoliDao public immutable coreContract;              // ZMIANA: Główny kontrakt (Core)
+    IPoliDao public immutable coreContract;             // POPRAWIONE: Interface zamiast konkretnej implementacji
     PoliDaoRouter public immutable routerContract;      // NOWE: Router do wrapper'ów
     PoliDaoGovernance public immutable governanceModule;
     PoliDaoMedia public immutable mediaModule;
@@ -32,6 +33,11 @@ contract ReentrancyAttackMock is IPoliDaoStructs {
     AttackType public currentAttackType;
     bool public hasAttacked;
     uint256 public attackCount;
+    
+    // ========== CONSTANTS ==========
+    uint256 constant MIN_EXTENSION_NOTICE = 7 days;
+    uint256 constant MAX_EXTENSION_DAYS = 90;
+    uint256 constant MAX_LOCATION_LENGTH = 200;
     
     // ========== ENUMS ==========
     
@@ -58,7 +64,7 @@ contract ReentrancyAttackMock is IPoliDaoStructs {
     // ========== CONSTRUCTOR ==========
     
     constructor(
-        address payable _coreContract,        // ZMIANA: Core zamiast main
+        address _coreContract,                // ZMIANA: Core jako interface
         address _routerContract,              // NOWE: Router
         address _governanceModule,
         address _mediaModule,
@@ -72,7 +78,7 @@ contract ReentrancyAttackMock is IPoliDaoStructs {
         require(_updatesModule != address(0), "Invalid updates module");
         require(_token != address(0), "Invalid token");
         
-        coreContract = PoliDao(_coreContract);
+        coreContract = IPoliDao(_coreContract);             // POPRAWIONE: Interface cast
         routerContract = PoliDaoRouter(_routerContract);
         governanceModule = PoliDaoGovernance(_governanceModule);
         mediaModule = PoliDaoMedia(_mediaModule);
@@ -122,8 +128,8 @@ contract ReentrancyAttackMock is IPoliDaoStructs {
         try routerContract.createProposal(_question, "", _duration) returns (uint256 proposalId) {
             targetProposal = proposalId;
         } catch {
-            // Fallback: try direct module access
-            targetProposal = governanceModule.getProposalCount() + 1;
+            // Fallback: estimate proposal ID
+            targetProposal = 1; // Simplified fallback
         }
     }
     
@@ -452,8 +458,9 @@ contract ReentrancyAttackMock is IPoliDaoStructs {
     
     /**
      * @notice Test wszystkich Router functions
+     * @dev POPRAWIONE: usunięto nieużywany parametr _fundraiserId
      */
-    function testRouterFunctions(uint256 _fundraiserId) external view returns (
+    function testRouterFunctions() external view returns (
         bool supportsPermit,
         uint256 nonce,
         bool isModuleActive

@@ -4,8 +4,8 @@ pragma solidity ^0.8.20;
 import "./IPoliDaoStructs.sol";
 
 /**
- * @title IPoliDao
- * @notice Main interface for PoliDAO platform
+ * @title IPoliDao - ZAKTUALIZOWANY INTERFACE
+ * @notice Main interface for PoliDAO platform with missing functions added
  * @dev Defines all public functions of the main PoliDAO contract
  */
 interface IPoliDao is IPoliDaoStructs {
@@ -68,12 +68,35 @@ interface IPoliDao is IPoliDaoStructs {
      */
     function refund(uint256 fundraiserId) external;
     
+    // ========== NOWE FUNKCJE - BRAKUJĄCE ==========
+    
     /**
-     * @notice Extend fundraiser duration
+     * @notice Extend fundraiser duration for a fee
      * @param fundraiserId The fundraiser ID
-     * @param additionalDays Additional days to extend
+     * @param additionalDays Additional days to extend (max 90)
      */
     function extendFundraiser(uint256 fundraiserId, uint256 additionalDays) external;
+    
+    /**
+     * @notice Update fundraiser location
+     * @param fundraiserId The fundraiser ID
+     * @param newLocation New location string
+     */
+    function updateLocation(uint256 fundraiserId, string calldata newLocation) external;
+    
+    /**
+     * @notice Check if fundraiser can be extended
+     * @param fundraiserId The fundraiser ID
+     * @return canExtend Whether fundraiser can be extended
+     * @return timeLeft Time left until end
+     * @return reason Reason if cannot extend
+     */
+    function canExtendFundraiser(uint256 fundraiserId) 
+        external 
+        view 
+        returns (bool canExtend, uint256 timeLeft, string memory reason);
+    
+    // ========== SUSPENSION FUNCTIONS ==========
     
     /**
      * @notice Suspend a fundraiser
@@ -87,13 +110,6 @@ interface IPoliDao is IPoliDaoStructs {
      * @param fundraiserId The fundraiser ID
      */
     function unsuspendFundraiser(uint256 fundraiserId) external;
-    
-    /**
-     * @notice Update fundraiser location
-     * @param fundraiserId The fundraiser ID
-     * @param newLocation New location
-     */
-    function updateLocation(uint256 fundraiserId, string calldata newLocation) external;
     
     // ========== GOVERNANCE FUNCTIONS ==========
     
@@ -205,21 +221,8 @@ interface IPoliDao is IPoliDaoStructs {
     // ========== VIEW FUNCTIONS ==========
     
     /**
-     * @notice Get fundraiser details
+     * @notice Get detailed fundraiser information - ROZSZERZONA
      * @param fundraiserId The fundraiser ID
-     * @return title Tytuł zbiórki
-     * @return description Opis zbiórki
-     * @return location Lokalizacja zbiórki
-     * @return endDate Data zakończenia
-     * @return fundraiserType Typ zbiórki
-     * @return status Status zbiórki
-     * @return token Adres tokenu
-     * @return goalAmount Cel zbiórki
-     * @return raisedAmount Zebrana kwota
-     * @return creator Twórca zbiórki
-     * @return extensionCount Liczba przedłużeń
-     * @return isSuspended Czy zawieszona
-     * @return suspensionReason Powód zawieszenia
      */
     function getFundraiserDetails(uint256 fundraiserId) 
         external 
@@ -241,16 +244,8 @@ interface IPoliDao is IPoliDaoStructs {
         );
     
     /**
-     * @notice Get fundraiser progress
+     * @notice Get fundraiser progress - ROZSZERZONA
      * @param fundraiserId The fundraiser ID
-     * @return raised Zebrana kwota
-     * @return goal Cel zbiórki
-     * @return percentage Procent ukończenia
-     * @return donorsCount Liczba darczyńców
-     * @return timeLeft Pozostały czas
-     * @return refundDeadline Deadline zwrotu
-     * @return isSuspended Czy zawieszona
-     * @return suspensionTime Czas zawieszenia
      */
     function getFundraiserProgress(uint256 fundraiserId) 
         external 
@@ -267,7 +262,8 @@ interface IPoliDao is IPoliDaoStructs {
         );
     
     /**
-     * @notice Get fundraiser donors
+     * @notice Get fundraiser donors - PRZENIESIONA DO ANALYTICS MODULE
+     * @dev This function will delegate to Analytics module
      * @param fundraiserId The fundraiser ID
      * @param offset Starting index
      * @param limit Number of donors to return
@@ -345,7 +341,55 @@ interface IPoliDao is IPoliDaoStructs {
      */
     function isTokenWhitelisted(address token) external view returns (bool isWhitelisted);
     
-    // ========== ADMIN FUNCTIONS ==========
+    // ========== NOWE VIEW FUNCTIONS ==========
+    
+    /**
+     * @notice Get all fee information - NOWA FUNKCJA
+     * @return donationFee Donation commission in basis points
+     * @return successFee Success commission in basis points
+     * @return refundFee Refund commission in basis points
+     * @return extensionFeeAmount Extension fee amount
+     * @return feeTokenAddress Token used for extension payments
+     * @return commissionWalletAddress Wallet receiving commissions
+     */
+    function getFeeInfo() 
+        external 
+        view 
+        returns (
+            uint256 donationFee,
+            uint256 successFee,
+            uint256 refundFee,
+            uint256 extensionFeeAmount,
+            address feeTokenAddress,
+            address commissionWalletAddress
+        );
+    
+    /**
+     * @notice Get basic fundraiser info
+     * @param id Fundraiser ID
+     */
+    function getFundraiserBasicInfo(uint256 id) 
+        external 
+        view 
+        returns (
+            string memory title,
+            address creator,
+            address token,
+            uint256 raised,
+            uint256 goal,
+            uint256 endDate,
+            uint8 status,
+            bool isFlexible
+        );
+    
+    /**
+     * @notice Get fundraiser creator
+     * @param fundraiserId The fundraiser ID
+     * @return creator Creator address
+     */
+    function getFundraiserCreator(uint256 fundraiserId) external view returns (address creator);
+    
+    // ========== ADMIN FUNCTIONS - FEE MANAGEMENT ==========
     
     /**
      * @notice Whitelist a token
@@ -360,22 +404,175 @@ interface IPoliDao is IPoliDaoStructs {
     function removeWhitelistToken(address token) external;
     
     /**
-     * @notice Set commission rates
-     * @param donationCommission Donation commission in basis points
-     * @param successCommission Success commission in basis points
-     * @param refundCommission Refund commission in basis points
+     * @notice Set all commission rates - ROZSZERZONA O REFUND
+     * @param _donation Donation commission in basis points
+     * @param _success Success commission in basis points
+     * @param _refund Refund commission in basis points
      */
     function setCommissions(
-        uint256 donationCommission,
-        uint256 successCommission,
-        uint256 refundCommission
+        uint256 _donation,
+        uint256 _success,
+        uint256 _refund
     ) external;
+    
+    /**
+     * @notice Set extension fee - NOWA FUNKCJA
+     * @param _extensionFee New extension fee amount
+     */
+    function setExtensionFee(uint256 _extensionFee) external;
+    
+    /**
+     * @notice Set fee token for extensions - NOWA FUNKCJA
+     * @param _feeToken New fee token address
+     */
+    function setFeeToken(address _feeToken) external;
     
     /**
      * @notice Set commission wallet
      * @param newWallet New commission wallet address
      */
     function setCommissionWallet(address newWallet) external;
+    
+    // ========== MODULE MANAGEMENT ==========
+    
+    /**
+     * @notice Set individual module
+     * @param moduleKey Module identifier
+     * @param moduleAddress Module contract address
+     */
+    function setModule(bytes32 moduleKey, address moduleAddress) external;
+    
+    /**
+     * @notice Set all modules at once
+     */
+    function setModules(
+        address governance, 
+        address media, 
+        address updates, 
+        address refunds,
+        address security,
+        address web3,
+        address analytics
+    ) external;
+    
+    /**
+     * @notice Get module address
+     * @param moduleKey Module identifier
+     * @return moduleAddress Module contract address
+     */
+    function getModule(bytes32 moduleKey) external view returns (address moduleAddress);
+    
+    /**
+     * @notice Delegate call to module
+     * @param moduleKey Module identifier
+     * @param data Call data
+     * @return result Return data
+     */
+    function delegateCall(bytes32 moduleKey, bytes calldata data) 
+        external 
+        returns (bytes memory result);
+    
+    /**
+     * @notice Static call to module
+     * @param moduleKey Module identifier
+     * @param data Call data
+     * @return result Return data
+     */
+    function staticCall(bytes32 moduleKey, bytes calldata data) 
+        external 
+        view 
+        returns (bytes memory result);
+    
+    // ========== MODULE KEYS ==========
+    
+    function GOVERNANCE_MODULE() external view returns (bytes32);
+    function MEDIA_MODULE() external view returns (bytes32);
+    function UPDATES_MODULE() external view returns (bytes32);
+    function REFUNDS_MODULE() external view returns (bytes32);
+    function SECURITY_MODULE() external view returns (bytes32);
+    function WEB3_MODULE() external view returns (bytes32);
+    function ANALYTICS_MODULE() external view returns (bytes32);
+    
+    // ========== HELPER FUNCTIONS FOR MODULES ==========
+    
+    /**
+     * @notice Get fundraiser data for modules
+     */
+    function getFundraiserData(uint256 fundraiserId) 
+        external 
+        view 
+        returns (
+            address creator,
+            address token,
+            uint256 raisedAmount,
+            uint256 goalAmount,
+            uint256 endDate,
+            uint8 status,
+            bool isFlexible
+        );
+    
+    /**
+     * @notice Update fundraiser state (only refunds module)
+     */
+    function updateFundraiserState(
+        uint256 fundraiserId, 
+        uint256 newRaisedAmount, 
+        uint8 newStatus
+    ) external;
+    
+    /**
+     * @notice Get donation amount for specific donor
+     */
+    function getDonationAmount(uint256 fundraiserId, address donor) 
+        external 
+        view 
+        returns (uint256);
+    
+    /**
+     * @notice Update donation amount (only refunds module)
+     */
+    function updateDonationAmount(uint256 fundraiserId, address donor, uint256 newAmount) 
+        external;
+    
+    // ========== ANALYTICS HELPER FUNCTIONS ==========
+    
+    /**
+     * @notice Get fundraiser donors array (only analytics module)
+     */
+    function getFundraiserDonors(uint256 fundraiserId) 
+        external 
+        view 
+        returns (address[] memory donors);
+    
+    /**
+     * @notice Get donor count (analytics module)
+     */
+    function getDonorCount(uint256 fundraiserId) 
+        external 
+        view 
+        returns (uint256 count);
+    
+    /**
+     * @notice Get fundraiser location
+     */
+    function getFundraiserLocation(uint256 fundraiserId) 
+        external 
+        view 
+        returns (string memory location);
+    
+    /**
+     * @notice Get extension information
+     */
+    function getExtensionInfo(uint256 fundraiserId) 
+        external 
+        view 
+        returns (
+            uint256 extensionCount,
+            uint256 originalEndDate,
+            uint256 currentEndDate
+        );
+    
+    // ========== SYSTEM FUNCTIONS ==========
     
     /**
      * @notice Pause the contract

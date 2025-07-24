@@ -19,6 +19,13 @@ interface IPoliDaoCore {
     function SECURITY_MODULE() external pure returns (bytes32);
     function WEB3_MODULE() external pure returns (bytes32);
     function ANALYTICS_MODULE() external pure returns (bytes32);
+    
+    // Core contract functions for extension and location
+    function extendFundraiser(uint256 fundraiserId, uint256 additionalDays) external;
+    function updateLocation(uint256 fundraiserId, string calldata newLocation) external;
+    function canExtendFundraiser(uint256 fundraiserId) external view returns (bool canExtend, uint256 timeLeft, string memory reason);
+    function getFundraiserLocation(uint256 fundraiserId) external view returns (string memory location);
+    function getExtensionInfo(uint256 fundraiserId) external view returns (uint256 extensionCount, uint256 originalEndDate, uint256 currentEndDate);
 }
 
 /**
@@ -236,6 +243,70 @@ contract PoliDaoRouter is IPoliDaoStructs {
             return (new address[](0), new uint256[](0), new uint256[](0), new uint256[](0));
         }
         return IPoliDaoAnalytics(analyticsModule).getTokenAnalytics();
+    }
+
+    // ========== NEW DONORS FUNCTIONS ==========
+    
+    function getDonors(uint256 fundraiserId, uint256 offset, uint256 limit) 
+        external 
+        view 
+        returns (address[] memory donors, uint256[] memory amounts, uint256 total) 
+    {
+        address analyticsModule = core.getModule(core.ANALYTICS_MODULE());
+        if (analyticsModule == address(0)) {
+            return (new address[](0), new uint256[](0), 0);
+        }
+        return IPoliDaoAnalytics(analyticsModule).getDonors(fundraiserId, offset, limit);
+    }
+
+    function getDonorsCount(uint256 fundraiserId) external view returns (uint256) {
+        address analyticsModule = core.getModule(core.ANALYTICS_MODULE());
+        if (analyticsModule == address(0)) return 0;
+        return IPoliDaoAnalytics(analyticsModule).getDonorsCount(fundraiserId);
+    }
+
+    function getTopDonors(uint256 fundraiserId, uint256 limit) 
+        external 
+        view 
+        returns (address[] memory topDonors, uint256[] memory topAmounts) 
+    {
+        address analyticsModule = core.getModule(core.ANALYTICS_MODULE());
+        if (analyticsModule == address(0)) {
+            return (new address[](0), new uint256[](0));
+        }
+        return IPoliDaoAnalytics(analyticsModule).getTopDonors(fundraiserId, limit);
+    }
+
+    // ========== NEW EXTENSION FUNCTIONS ==========
+    
+    function extendFundraiser(uint256 fundraiserId, uint256 additionalDays) external {
+        core.extendFundraiser(fundraiserId, additionalDays);
+    }
+
+    function canExtendFundraiser(uint256 fundraiserId) 
+        external 
+        view 
+        returns (bool canExtend, uint256 timeLeft, string memory reason) 
+    {
+        return core.canExtendFundraiser(fundraiserId);
+    }
+
+    function getExtensionInfo(uint256 fundraiserId) 
+        external 
+        view 
+        returns (uint256 extensionCount, uint256 originalEndDate, uint256 currentEndDate) 
+    {
+        return core.getExtensionInfo(fundraiserId);
+    }
+
+    // ========== NEW LOCATION FUNCTIONS ==========
+    
+    function updateLocation(uint256 fundraiserId, string calldata newLocation) external {
+        core.updateLocation(fundraiserId, newLocation);
+    }
+
+    function getFundraiserLocation(uint256 fundraiserId) external view returns (string memory) {
+        return core.getFundraiserLocation(fundraiserId);
     }
 
     // ========== REFUNDS MODULE WRAPPERS ==========

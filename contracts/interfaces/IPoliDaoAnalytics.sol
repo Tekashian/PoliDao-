@@ -4,13 +4,13 @@ pragma solidity ^0.8.20;
 import "./IPoliDaoStructs.sol";
 
 /**
- * @title IPoliDaoAnalytics - POPRAWIONA WERSJA
+ * @title IPoliDaoAnalytics - Z FUNKCJĄ getDonors
  * @notice Interface for PoliDAO analytics and statistics module
  * @dev Defines all analytics-related functions for platform metrics, fundraiser stats, and performance tracking
  */
 interface IPoliDaoAnalytics is IPoliDaoStructs {
     
-    // ========== STRUCTURES ==========
+    // ========== STRUCTURES - TYLKO UNIKALNE ==========
     
     struct PlatformStats {
         uint256 totalFundraisers;
@@ -23,18 +23,7 @@ interface IPoliDaoAnalytics is IPoliDaoStructs {
         uint256 timestamp;
     }
     
-    struct FundraiserAnalytics {
-        uint256 totalDonations;
-        uint256 averageDonation;
-        uint256 donorsCount;
-        uint256 refundsCount;
-        uint256 mediaItemsCount;
-        uint256 updatesCount;
-        uint256 daysActive;
-        uint256 goalProgress; // In basis points
-        uint256 velocity; // Donations per day
-        bool hasReachedGoal;
-    }
+    // USUNIĘTO: FundraiserAnalytics - już jest w IPoliDaoStructs
     
     struct MarketTrends {
         uint256[] dailyVolume;
@@ -170,9 +159,46 @@ interface IPoliDaoAnalytics is IPoliDaoStructs {
             uint256[] memory fundraiserCounts,
             uint256[] memory averageAmounts
         );
+
+    // ========== NOWA FUNKCJA DONORS ==========
+    
+    /**
+     * @notice Get fundraiser donors with pagination - PRZENIESIONA Z MAIN CONTRACT
+     * @param fundraiserId The fundraiser ID
+     * @param offset Starting index
+     * @param limit Number of donors to return
+     * @return donors Array of donor addresses
+     * @return amounts Array of donation amounts
+     * @return total Total number of donors
+     */
+    function getDonors(uint256 fundraiserId, uint256 offset, uint256 limit) 
+        external 
+        view 
+        returns (address[] memory donors, uint256[] memory amounts, uint256 total);
+    
+    /**
+     * @notice Get total donors count for fundraiser
+     * @param fundraiserId The fundraiser ID
+     * @return count Total number of donors
+     */
+    function getDonorsCount(uint256 fundraiserId) 
+        external 
+        view 
+        returns (uint256 count);
+    
+    /**
+     * @notice Get top donors for fundraiser
+     * @param fundraiserId The fundraiser ID
+     * @param limit Number of top donors to return
+     * @return topDonors Array of donor addresses
+     * @return topAmounts Array of donation amounts
+     */
+    function getTopDonors(uint256 fundraiserId, uint256 limit) 
+        external 
+        view 
+        returns (address[] memory topDonors, uint256[] memory topAmounts);
     
     // ========== TRACKING FUNCTIONS (WITH STATE MODIFICATION) ==========
-    // POPRAWKA: Usunięto nieużywane parametry z interfejsu
     
     function getPlatformStatsWithTracking() external;
     

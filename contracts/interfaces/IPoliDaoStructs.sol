@@ -2,12 +2,18 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title IPoliDaoStructs - POPRAWIONA WERSJA
+ * @title IPoliDaoStructs - ZAKTUALIZOWANA WERSJA
  * @notice Centralized interface for all shared data structures across PoliDAO modules
  * @dev This interface defines common enums, structs, and events used by all modules
- * @dev WSZYSTKIE DUPLIKATY ZOSTAŁY USUNIĘTE - TO JEST JEDYNE ŹRÓDŁO DEFINICJI
+ * @dev DODANO SUPPORT DLA EXTEND FUNDRAISER, UPDATE LOCATION I getDonors
  */
 interface IPoliDaoStructs {
+    
+    // ========== CONSTANTS FOR NEW FUNCTIONS ==========
+    // These constants should be defined in implementing contracts:
+    // MIN_EXTENSION_NOTICE = 7 days
+    // MAX_EXTENSION_DAYS = 90
+    // MAX_LOCATION_LENGTH = 200
     
     // ========== ENUMS ==========
     
@@ -44,16 +50,16 @@ interface IPoliDaoStructs {
     }
     
     /**
-     * @notice Packed fundraiser data for gas optimization
+     * @notice Packed fundraiser data for gas optimization - ROZSZERZONA
      */
     struct PackedFundraiserData {
         uint128 goalAmount;      
         uint128 raisedAmount;    
         uint64 endDate;          
-        uint64 originalEndDate;  
+        uint64 originalEndDate;  // DODANE: do trackowania przedłużeń
         uint32 id;               
         uint32 suspensionTime;   
-        uint16 extensionCount;   
+        uint16 extensionCount;   // DODANE: liczba przedłużeń
         uint8 fundraiserType;    
         uint8 status;            
         bool isSuspended;        
@@ -62,7 +68,7 @@ interface IPoliDaoStructs {
     }
     
     /**
-     * @notice Fundraiser creation data structure
+     * @notice Fundraiser creation data structure - ROZSZERZONA
      */
     struct FundraiserCreationData {
         string title;
@@ -74,8 +80,8 @@ interface IPoliDaoStructs {
         string[] initialImages;
         string[] initialVideos;
         string metadataHash;
-        string location;
-        bool isFlexible;         // Czy zbiórka ma być elastyczna
+        string location;        // DODANE: lokalizacja
+        bool isFlexible;        // Czy zbiórka ma być elastyczna
     }
     
     /**
@@ -90,6 +96,48 @@ interface IPoliDaoStructs {
         uint8 updateType; // 0=regular, 1=important, 2=milestone
         bool isPinned;
         uint256[] mediaIds;
+    }
+    
+    // ========== ANALYTICS STRUCTURES ==========
+    
+    /**
+     * @notice Donor information structure - NOWA STRUKTURA
+     */
+    struct DonorInfo {
+        address donor;
+        uint256 amount;
+        uint256 donationTime;
+        bool hasRefunded;
+    }
+    
+    /**
+     * @notice Fundraiser analytics summary - NOWA STRUKTURA
+     */
+    struct FundraiserAnalytics {
+        uint256 totalDonations;
+        uint256 averageDonation;
+        uint256 donorsCount;
+        uint256 refundsCount;
+        uint256 mediaItemsCount;
+        uint256 updatesCount;
+        uint256 daysActive;
+        uint256 goalProgress; // In basis points
+        uint256 velocity; // Donations per day
+        bool hasReachedGoal;
+        uint256 extensionCount; // DODANE
+        string currentLocation; // DODANE
+    }
+    
+    /**
+     * @notice Extension information - NOWA STRUKTURA
+     */
+    struct ExtensionInfo {
+        uint256 extensionCount;
+        uint256 originalEndDate;
+        uint256 currentEndDate;
+        uint256 timeLeft;
+        bool canExtend;
+        string reason;
     }
     
     // ========== COMMON EVENTS ==========
@@ -118,6 +166,35 @@ interface IPoliDaoStructs {
         uint256 indexed id, 
         uint8 oldStatus, 
         uint8 newStatus
+    );
+    
+    // ========== NOWE EVENTY DLA EXTEND I LOCATION ==========
+    
+    /**
+     * @notice Event emitted when fundraiser is extended
+     */
+    event FundraiserExtended(
+        uint256 indexed id, 
+        uint256 newEndDate, 
+        uint256 extensionDays, 
+        uint256 feePaid
+    );
+    
+    /**
+     * @notice Event emitted when fundraiser location is updated
+     */
+    event LocationUpdated(
+        uint256 indexed id, 
+        string oldLocation, 
+        string newLocation
+    );
+    
+    /**
+     * @notice Event emitted when extension fee is changed
+     */
+    event ExtensionFeeSet(
+        uint256 oldFee, 
+        uint256 newFee
     );
     
     // Governance events
@@ -162,6 +239,29 @@ interface IPoliDaoStructs {
         uint256 indexed fundraiserId
     );
     
+    // ========== ANALYTICS EVENTS ==========
+    
+    /**
+     * @notice Event emitted when donors data is queried
+     */
+    event DonorsQueried(
+        uint256 indexed fundraiserId,
+        address indexed requester,
+        uint256 offset,
+        uint256 limit,
+        uint256 totalDonors
+    );
+    
+    /**
+     * @notice Event emitted when top donors are retrieved
+     */
+    event TopDonorsRetrieved(
+        uint256 indexed fundraiserId,
+        address indexed requester,
+        uint256 limit,
+        uint256 totalReturned
+    );
+    
     // ========== REFUND EVENTS ==========
     
     event RefundProcessed(
@@ -184,7 +284,6 @@ interface IPoliDaoStructs {
         uint256 totalWithdrawn
     );
     
-    // Additional events (moved from main contract to avoid duplication)
     event DonationRefunded(
         uint256 indexed fundraiserId, 
         address indexed donor, 
@@ -239,6 +338,16 @@ interface IPoliDaoStructs {
         address indexed newModule
     );
     
+    event Web3ModuleSet(
+        address indexed oldModule, 
+        address indexed newModule
+    );
+    
+    event AnalyticsModuleSet(
+        address indexed oldModule, 
+        address indexed newModule
+    );
+    
     // ========== REFUND SPECIFIC EVENTS ==========
     
     event RefundsPausedForFundraiser(uint256 indexed fundraiserId);
@@ -247,13 +356,6 @@ interface IPoliDaoStructs {
     event RefundsModuleInitialized(address mainContract, address commissionWallet);
     
     // ========== OTHER EVENTS ==========
-    
-    event FundraiserExtended(
-        uint256 indexed id, 
-        uint256 newEndDate, 
-        uint256 extensionDays, 
-        uint256 feePaid
-    );
     
     event FundraiserSuspended(
         uint256 indexed id, 
@@ -266,12 +368,6 @@ interface IPoliDaoStructs {
         uint256 indexed id, 
         address indexed unsuspendedBy, 
         uint256 timestamp
-    );
-    
-    event LocationUpdated(
-        uint256 indexed id, 
-        string oldLocation, 
-        string newLocation
     );
     
     event TokenWhitelisted(address indexed token);
@@ -378,6 +474,24 @@ interface IPoliDaoStructs {
     error ArrayLengthMismatch(uint256 length1, uint256 length2);
     error BatchAlreadyExecuted(bytes32 batchId);
     
+    // ========== NOWE ERRORS DLA EXTEND I LOCATION ==========
+    
+    error InvalidExtensionPeriod(uint256 daysCount);
+    error ExtensionNoticeToShort(uint256 timeLeft, uint256 required);
+    error FundraiserCannotBeExtended(uint256 fundraiserId, string reason);
+    error ExtensionFeePaymentFailed(uint256 required, address token);
+    error InvalidLocation(string location);
+    error LocationTooLong(uint256 length, uint256 maxLength);
+    error ExtensionCountExceeded(uint256 current, uint256 max);
+    
+    // ========== ANALYTICS ERRORS ==========
+    
+    error InvalidDonorsQuery(uint256 fundraiserId, uint256 offset, uint256 limit);
+    error DonorsDataNotAvailable(uint256 fundraiserId);
+    error AnalyticsModuleNotSet();
+    error UnauthorizedAnalyticsAccess(address caller);
+    error DonorsCountMismatch(uint256 expected, uint256 actual);
+    
     // ========== REFUND SPECIFIC ERRORS ==========
     
     error RefundNotAvailable(uint256 fundraiserId, address donor);
@@ -400,4 +514,12 @@ interface IPoliDaoStructs {
     error InvalidModuleAddress(address moduleAddress);
     error ModuleCallFailed(string moduleName);
     error UnauthorizedModuleAccess(address caller, address expectedModule);
+    
+    // ========== FEE MANAGEMENT ERRORS ==========
+    
+    error InvalidExtensionFee(uint256 fee);
+    error InvalidFeeToken(address token);
+    error FeeTokenNotSet();
+    error CommissionTooHigh(uint256 commission, uint256 max);
+    error InsufficientFeePayment(uint256 provided, uint256 required);
 }
