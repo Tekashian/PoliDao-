@@ -5,13 +5,16 @@ import "./interfaces/IPoliDao.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
- * @title PoliDao - GŁÓWNY KONTRAKT
+ * @title PoliDao - GŁÓWNY KONTRAKT - ZAKTUALIZOWANY
  * @notice Main implementation of PoliDAO platform
  * @dev Core contract implementing all fundraising functionality
  */
 contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
     
     // ========== CONSTANTS ==========
     uint256 public constant MIN_EXTENSION_NOTICE = 7 days;
@@ -25,6 +28,7 @@ contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
     mapping(uint256 => string) public fundraiserDescriptions;
     mapping(uint256 => string) public fundraiserLocations;
     mapping(uint256 => address) public fundraiserCreators;
+    mapping(uint256 => address) public fundraiserTokens;  // DODANE
     
     // Donations mapping: fundraiserId => donor => amount
     mapping(uint256 => mapping(address => uint256)) public donations;
@@ -80,11 +84,13 @@ contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
         external 
         override 
         whenNotPaused
+        nonReentrant  // DODANE
         returns (uint256 fundraiserId) 
     {
         require(bytes(data.title).length > 0, "Title required");
         require(data.endDate > block.timestamp, "Invalid end date");
         require(isTokenWhitelisted[data.token], "Token not whitelisted");
+        require(bytes(data.location).length <= MAX_LOCATION_LENGTH, "Location too long");  // DODANE
         
         fundraiserCounter++;
         fundraiserId = fundraiserCounter;
@@ -110,6 +116,19 @@ contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
         fundraiserDescriptions[fundraiserId] = data.description;
         fundraiserLocations[fundraiserId] = data.location;
         fundraiserCreators[fundraiserId] = msg.sender;
+        fundraiserTokens[fundraiserId] = data.token;  // DODANE
+        
+        // DODANE - rejestracja w Refunds module
+        address refundsModule = modules[REFUNDS_MODULE];
+        if (refundsModule != address(0)) {
+            bytes memory registerData = abi.encodeWithSignature(
+                "registerFundraiser(uint256,bool)",
+                fundraiserId,
+                data.isFlexible
+            );
+            (bool success,) = refundsModule.call(registerData);
+            require(success, "Refunds registration failed");
+        }
         
         emit FundraiserCreated(
             fundraiserId,
@@ -240,10 +259,161 @@ contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
         return (data.extensionCount, data.originalEndDate, data.endDate);
     }
     
+    // ========== REFUND FUNCTIONS - ZAKTUALIZOWANE ==========
+    
+    function refund(uint256 fundraiserId) external override whenNotPaused nonReentrant {
+        require(fundraisers[fundraiserId].id != 0, "Fundraiser not found");
+        require(donations[fundraiserId][msg.sender] > 0, "No donation found");
+        
+        address refundsModule = modules[REFUNDS_MODULE];
+        require(refundsModule != address(0), "Refunds module not set");
+        
+        PackedFundraiserData memory fundraiser = fundraisers[fundraiserId];
+        address token = fundraiserTokens[fundraiserId];
+        uint256 donationAmount = donations[fundraiserId][msg.sender];
+        bool goalReached = fundraiser.raisedAmount >= fundraiser.goalAmount;
+        
+        // Clear donation before external call (reentrancy protection)
+        donations[fundraiserId][msg.sender] = 0;
+        fundraisers[fundraiserId].raisedAmount -= uint128(donationAmount);
+        
+        // Process refund through module
+        bytes memory refundData = abi.encodeWithSignature(
+            "processRefund(uint256,address,uint256,address,uint8,uint256,bool)",
+            fundraiserId,
+            msg.sender,
+            donationAmount,
+            token,
+            fundraiser.status,
+            fundraiser.endDate,
+            goalReached
+        );
+        
+        (bool success,) = refundsModule.call(refundData);
+        require(success, "Refund processing failed");
+    }
+    
+    function canRefund(uint256 fundraiserId, address donor) 
+        external 
+        view 
+        override
+        returns (bool canRefundResult, string memory reason) 
+    {
+        address refundsModule = modules[REFUNDS_MODULE];
+        if (refundsModule == address(0)) {
+            return (false, "Refunds module not set");
+        }
+        
+        if (fundraisers[fundraiserId].id == 0) {
+            return (false, "Fundraiser not found");
+        }
+        
+        PackedFundraiserData memory fundraiser = fundraisers[fundraiserId];
+        uint256 donationAmount = donations[fundraiserId][donor];
+        bool goalReached = fundraiser.raisedAmount >= fundraiser.goalAmount;
+        
+        // Call refunds module
+        bytes memory data = abi.encodeWithSignature(
+            "canRefund(uint256,address,uint256,uint8,uint256,bool)",
+            fundraiserId,
+            donor,
+            donationAmount,
+            fundraiser.status,
+            fundraiser.endDate,
+            goalReached
+        );
+        
+        (bool success, bytes memory result) = refundsModule.staticcall(data);
+        if (!success) {
+            return (false, "Module call failed");
+        }
+        
+        return abi.decode(result, (bool, string));
+    }
+    
+    // ========== HELPER FUNCTIONS FOR MODULES - ZAKTUALIZOWANE ==========
+    
+    function getFundraiserData(uint256 fundraiserId) 
+        external 
+        view 
+        override
+        returns (
+            address creator,
+            address token,
+            uint256 raisedAmount,
+            uint256 goalAmount,
+            uint256 endDate,
+            uint8 status,
+            bool isFlexible
+        ) 
+    {
+        PackedFundraiserData memory data = fundraisers[fundraiserId];
+        require(data.id != 0, "Fundraiser not found");
+        
+        return (
+            fundraiserCreators[fundraiserId],
+            fundraiserTokens[fundraiserId],
+            data.raisedAmount,
+            data.goalAmount,
+            data.endDate,
+            data.status,
+            data.isFlexible
+        );
+    }
+    
+    function updateFundraiserState(
+        uint256 fundraiserId, 
+        uint256 newRaisedAmount, 
+        uint8 newStatus
+    ) external override {
+        require(msg.sender == modules[REFUNDS_MODULE], "Only refunds module");
+        require(fundraisers[fundraiserId].id != 0, "Fundraiser not found");
+        
+        fundraisers[fundraiserId].raisedAmount = uint128(newRaisedAmount);
+        fundraisers[fundraiserId].status = newStatus;
+    }
+    
+    function updateDonationAmount(uint256 fundraiserId, address donor, uint256 newAmount) 
+        external override {
+        require(msg.sender == modules[REFUNDS_MODULE], "Only refunds module");
+        require(fundraisers[fundraiserId].id != 0, "Fundraiser not found");
+        
+        donations[fundraiserId][donor] = newAmount;
+    }
+    
+    function getFundraiserBasicInfo(uint256 id) 
+        external 
+        view 
+        override
+        returns (
+            string memory title,
+            address creator,
+            address token,
+            uint256 raised,
+            uint256 goal,
+            uint256 endDate,
+            uint8 status,
+            bool isFlexible
+        ) 
+    {
+        PackedFundraiserData memory data = fundraisers[id];
+        require(data.id != 0, "Fundraiser not found");
+        
+        return (
+            fundraiserTitles[id],
+            fundraiserCreators[id],
+            fundraiserTokens[id],
+            data.raisedAmount,
+            data.goalAmount,
+            data.endDate,
+            data.status,
+            data.isFlexible
+        );
+    }
+    
     // ========== STUB IMPLEMENTATIONS (dla interfejsu) ==========
     
     function withdrawFunds(uint256) external pure override { revert("Not implemented"); }
-    function refund(uint256) external pure override { revert("Not implemented"); }
     function suspendFundraiser(uint256, string calldata) external pure override { revert("Not implemented"); }
     function unsuspendFundraiser(uint256) external pure override { revert("Not implemented"); }
     function createProposal(string calldata, uint256) external pure override { revert("Not implemented"); }
@@ -291,7 +461,7 @@ contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
             data.endDate,
             data.fundraiserType,
             data.status,
-            address(0), // TODO: get token from storage
+            fundraiserTokens[fundraiserId],  // ZAKTUALIZOWANE: zamiast address(0)
             data.goalAmount,
             data.raisedAmount,
             fundraiserCreators[fundraiserId],
@@ -353,10 +523,30 @@ contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
     function pause() external override onlyOwner { _pause(); }
     function unpause() external override onlyOwner { _unpause(); }
     
-    // ========== MODULE MANAGEMENT ==========
+    // ========== MODULE MANAGEMENT - ZAKTUALIZOWANE ==========
     
     function setModule(bytes32 moduleKey, address moduleAddress) external override onlyOwner {
         modules[moduleKey] = moduleAddress;
+    }
+    
+    function setModules(
+        address governance, 
+        address media, 
+        address updates, 
+        address refunds,
+        address security,
+        address web3,
+        address analytics
+    ) external override onlyOwner {
+        modules[GOVERNANCE_MODULE] = governance;
+        modules[MEDIA_MODULE] = media;
+        modules[UPDATES_MODULE] = updates;
+        modules[REFUNDS_MODULE] = refunds;
+        modules[SECURITY_MODULE] = security;
+        modules[WEB3_MODULE] = web3;
+        modules[ANALYTICS_MODULE] = analytics;
+        
+        emit ModulesInitialized(governance, media, updates, refunds);
     }
     
     function getModule(bytes32 moduleKey) external view override returns (address) {
@@ -400,18 +590,12 @@ contract PoliDao is IPoliDao, Ownable, Pausable, ReentrancyGuard {
     function getDonors(uint256, uint256, uint256) external pure override returns (address[] memory, uint256[] memory, uint256) { revert("Use analytics module"); }
     function getFundraisersByStatus(uint8, uint256, uint256) external pure override returns (uint256[] memory, uint256) { revert("Use analytics module"); }
     function getFundraisersByCreator(address, uint256, uint256) external pure override returns (uint256[] memory, uint256) { revert("Use analytics module"); }
-    function canRefund(uint256, address) external pure override returns (bool, string memory) { revert("Use refunds module"); }
     function getWhitelistedTokens() external view override returns (address[] memory) { return whitelistedTokens; }
     function getFeeInfo() external view override returns (uint256, uint256, uint256, uint256, address, address) { 
         return (donationCommission, successCommission, refundCommission, extensionFee, feeToken, commissionWallet);
     }
-    function getFundraiserBasicInfo(uint256) external pure override returns (string memory, address, address, uint256, uint256, uint256, uint8, bool) { revert("Not implemented"); }
     function removeWhitelistToken(address) external pure override { revert("Not implemented"); }
     function setCommissions(uint256, uint256, uint256) external pure override { revert("Not implemented"); }
     function setFeeToken(address) external pure override { revert("Not implemented"); }
-    function setModules(address, address, address, address, address, address, address) external pure override { revert("Not implemented"); }
-    function getFundraiserData(uint256) external pure override returns (address, address, uint256, uint256, uint256, uint8, bool) { revert("Not implemented"); }
-    function updateFundraiserState(uint256, uint256, uint8) external pure override { revert("Not implemented"); }
-    function updateDonationAmount(uint256, address, uint256) external pure override { revert("Not implemented"); }
     function emergencyWithdraw(address, address, uint256) external pure override { revert("Not implemented"); }
 }
