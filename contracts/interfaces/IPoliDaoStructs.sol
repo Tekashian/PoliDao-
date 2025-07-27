@@ -2,18 +2,12 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title IPoliDaoStructs - ZAKTUALIZOWANA WERSJA
+ * @title IPoliDaoStructs - FIXED VERSION WITHOUT DUPLICATES
  * @notice Centralized interface for all shared data structures across PoliDAO modules
  * @dev This interface defines common enums, structs, and events used by all modules
- * @dev DODANO SUPPORT DLA EXTEND FUNDRAISER, UPDATE LOCATION I getDonors
+ * @dev FIXED: Removed all duplicate events, cleaned up structure definitions
  */
 interface IPoliDaoStructs {
-    
-    // ========== CONSTANTS FOR NEW FUNCTIONS ==========
-    // These constants should be defined in implementing contracts:
-    // MIN_EXTENSION_NOTICE = 7 days
-    // MAX_EXTENSION_DAYS = 90
-    // MAX_LOCATION_LENGTH = 200
     
     // ========== ENUMS ==========
     
@@ -50,25 +44,25 @@ interface IPoliDaoStructs {
     }
     
     /**
-     * @notice Packed fundraiser data for gas optimization - ROZSZERZONA
+     * @notice Packed fundraiser data for gas optimization - ENHANCED
      */
     struct PackedFundraiserData {
         uint128 goalAmount;      
         uint128 raisedAmount;    
         uint64 endDate;          
-        uint64 originalEndDate;  // DODANE: do trackowania przedłużeń
+        uint64 originalEndDate;  // ADDED: For tracking extensions
         uint32 id;               
         uint32 suspensionTime;   
-        uint16 extensionCount;   // DODANE: liczba przedłużeń
+        uint16 extensionCount;   // ADDED: Number of extensions
         uint8 fundraiserType;    
         uint8 status;            
         bool isSuspended;        
         bool fundsWithdrawn;
-        bool isFlexible;         // Czy zbiórka jest elastyczna
+        bool isFlexible;         // Whether fundraiser allows partial withdrawals
     }
     
     /**
-     * @notice Fundraiser creation data structure - ROZSZERZONA
+     * @notice Fundraiser creation data structure - ENHANCED
      */
     struct FundraiserCreationData {
         string title;
@@ -80,8 +74,8 @@ interface IPoliDaoStructs {
         string[] initialImages;
         string[] initialVideos;
         string metadataHash;
-        string location;        // DODANE: lokalizacja
-        bool isFlexible;        // Czy zbiórka ma być elastyczna
+        string location;        // ADDED: Location field
+        bool isFlexible;        // Whether fundraiser should be flexible
     }
     
     /**
@@ -101,7 +95,7 @@ interface IPoliDaoStructs {
     // ========== ANALYTICS STRUCTURES ==========
     
     /**
-     * @notice Donor information structure - NOWA STRUKTURA
+     * @notice Donor information structure
      */
     struct DonorInfo {
         address donor;
@@ -111,7 +105,7 @@ interface IPoliDaoStructs {
     }
     
     /**
-     * @notice Fundraiser analytics summary - NOWA STRUKTURA
+     * @notice Fundraiser analytics summary
      */
     struct FundraiserAnalytics {
         uint256 totalDonations;
@@ -124,12 +118,12 @@ interface IPoliDaoStructs {
         uint256 goalProgress; // In basis points
         uint256 velocity; // Donations per day
         bool hasReachedGoal;
-        uint256 extensionCount; // DODANE
-        string currentLocation; // DODANE
+        uint256 extensionCount; // ADDED
+        string currentLocation; // ADDED
     }
     
     /**
-     * @notice Extension information - NOWA STRUKTURA
+     * @notice Extension information
      */
     struct ExtensionInfo {
         uint256 extensionCount;
@@ -140,7 +134,7 @@ interface IPoliDaoStructs {
         string reason;
     }
     
-    // ========== COMMON EVENTS ==========
+    // ========== CORE EVENTS ==========
     
     // Fundraiser events
     event FundraiserCreated(
@@ -168,11 +162,8 @@ interface IPoliDaoStructs {
         uint8 newStatus
     );
     
-    // ========== NOWE EVENTY DLA EXTEND I LOCATION ==========
+    // ========== EXTENSION & LOCATION EVENTS ==========
     
-    /**
-     * @notice Event emitted when fundraiser is extended
-     */
     event FundraiserExtended(
         uint256 indexed id, 
         uint256 newEndDate, 
@@ -180,24 +171,19 @@ interface IPoliDaoStructs {
         uint256 feePaid
     );
     
-    /**
-     * @notice Event emitted when fundraiser location is updated
-     */
     event LocationUpdated(
         uint256 indexed id, 
         string oldLocation, 
         string newLocation
     );
     
-    /**
-     * @notice Event emitted when extension fee is changed
-     */
     event ExtensionFeeSet(
         uint256 oldFee, 
         uint256 newFee
     );
     
-    // Governance events
+    // ========== GOVERNANCE EVENTS ==========
+    
     event ProposalCreated(
         uint256 indexed id, 
         string question, 
@@ -211,7 +197,8 @@ interface IPoliDaoStructs {
         bool support
     );
     
-    // Media events
+    // ========== MEDIA EVENTS ==========
+    
     event MediaAdded(
         uint256 indexed fundraiserId, 
         string ipfsHash, 
@@ -225,7 +212,8 @@ interface IPoliDaoStructs {
         string ipfsHash
     );
     
-    // Update events
+    // ========== UPDATE EVENTS ==========
+    
     event UpdatePosted(
         uint256 indexed updateId, 
         uint256 indexed fundraiserId, 
@@ -241,9 +229,6 @@ interface IPoliDaoStructs {
     
     // ========== ANALYTICS EVENTS ==========
     
-    /**
-     * @notice Event emitted when donors data is queried
-     */
     event DonorsQueried(
         uint256 indexed fundraiserId,
         address indexed requester,
@@ -252,9 +237,6 @@ interface IPoliDaoStructs {
         uint256 totalDonors
     );
     
-    /**
-     * @notice Event emitted when top donors are retrieved
-     */
     event TopDonorsRetrieved(
         uint256 indexed fundraiserId,
         address indexed requester,
@@ -328,34 +310,13 @@ interface IPoliDaoStructs {
         address refunds
     );
     
-    event RefundsModuleSet(
-        address indexed oldModule, 
-        address indexed newModule
-    );
-    
-    event SecurityModuleSet(
-        address indexed oldModule, 
-        address indexed newModule
-    );
-    
-    event Web3ModuleSet(
-        address indexed oldModule, 
-        address indexed newModule
-    );
-    
-    event AnalyticsModuleSet(
-        address indexed oldModule, 
-        address indexed newModule
-    );
-    
     // ========== REFUND SPECIFIC EVENTS ==========
     
     event RefundsPausedForFundraiser(uint256 indexed fundraiserId);
     event RefundsUnpausedForFundraiser(uint256 indexed fundraiserId);
-    event RefundCommissionUpdated(uint256 oldCommission, uint256 newCommission);
-    event RefundsModuleInitialized(address mainContract, address commissionWallet);
+    event RefundCommissionSet(uint256 newCommission);
     
-    // ========== OTHER EVENTS ==========
+    // ========== ADMIN EVENTS ==========
     
     event FundraiserSuspended(
         uint256 indexed id, 
@@ -371,13 +332,7 @@ interface IPoliDaoStructs {
     );
     
     event TokenWhitelisted(address indexed token);
-    event TokenRemoved(address indexed token);
-    event DonationCommissionSet(uint256 newCommission);
-    event SuccessCommissionSet(uint256 newCommission);
-    event RefundCommissionSet(uint256 newCommission);
     event CommissionWalletChanged(address indexed oldWallet, address indexed newWallet);
-    event FeeTokenSet(address indexed oldToken, address indexed newToken);
-    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
     
     // ========== SECURITY EVENTS ==========
     
@@ -474,7 +429,7 @@ interface IPoliDaoStructs {
     error ArrayLengthMismatch(uint256 length1, uint256 length2);
     error BatchAlreadyExecuted(bytes32 batchId);
     
-    // ========== NOWE ERRORS DLA EXTEND I LOCATION ==========
+    // ========== EXTENSION & LOCATION ERRORS ==========
     
     error InvalidExtensionPeriod(uint256 daysCount);
     error ExtensionNoticeToShort(uint256 timeLeft, uint256 required);
@@ -512,7 +467,7 @@ interface IPoliDaoStructs {
     
     error ModuleNotSet(string moduleName);
     error InvalidModuleAddress(address moduleAddress);
-    error ModuleCallFailed(string moduleName);
+    error ModuleExecutionFailed(string moduleName);
     error UnauthorizedModuleAccess(address caller, address expectedModule);
     
     // ========== FEE MANAGEMENT ERRORS ==========
