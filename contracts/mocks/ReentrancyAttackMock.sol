@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 // ========== POPRAWIONE IMPORTY ==========
 import "../interfaces/IPoliDao.sol";          // ZMIANA: Interface zamiast implementacji
-import "../PoliDaoRouter.sol";
+import "../router/PoliDaoRouter.sol";
 import "../modules/PoliDaoGovernance.sol";
 import "../modules/PoliDaoMedia.sol";
 import "../modules/PoliDaoUpdates.sol";

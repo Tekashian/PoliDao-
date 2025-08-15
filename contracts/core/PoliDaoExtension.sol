@@ -382,10 +382,10 @@ contract PoliDaoExtensions is ReentrancyGuard {
         view 
         returns (bool isActive) 
     {
-        PackedFundraiserData memory data = storageContract.fundraisers(fundraiserId);
+        IPoliDaoStructs.PackedFundraiserData memory data = storageContract.fundraisers(fundraiserId);
         return (
             data.id != 0 &&
-            data.status == uint8(FundraiserStatus.ACTIVE) &&
+            data.status == uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE) &&
             !data.isSuspended &&
             block.timestamp <= data.endDate
         );

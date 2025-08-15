@@ -221,20 +221,20 @@ library DonationLogic {
      * @param store The storage contract instance
      * @param fundraiserId The fundraiser ID
      * @param donor The donor address
-     * @return hasDonated Whether the donor has donated
-     * @return amount Amount donated
+    * @return donated Whether the donor has donated
+    * @return amount Amount donated
      */
     function hasDonated(
         PoliDaoStorage store,
         uint256 fundraiserId,
         address donor
-    ) external view returns (bool hasDonated, uint256 amount) {
-        if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
-        
-        amount = store.donations(fundraiserId, donor);
-        hasDonated = amount > 0;
-        
-        return (hasDonated, amount);
+    ) external view returns (bool donated, uint256 amount) {
+    if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
+
+    amount = store.donations(fundraiserId, donor);
+    donated = amount > 0;
+
+    return (donated, amount);
     }
     
     /**

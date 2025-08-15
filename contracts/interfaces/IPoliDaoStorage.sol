@@ -29,6 +29,9 @@ interface IPoliDaoStorage is IPoliDaoStructs {
     /// @notice Emitted when ownership is transferred
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     
+    /// @notice Emitted when storage releases funds to a recipient
+    event FundsReleased(address indexed token, address indexed to, uint256 amount, address indexed by);
+    
     // ========== CORE CRUD FUNCTIONS ==========
     
     /**
@@ -148,6 +151,19 @@ interface IPoliDaoStorage is IPoliDaoStructs {
      * @param moduleAddress The module address
      */
     function setModule(bytes32 moduleKey, address moduleAddress) external;
+
+    /**
+     * @notice Sets all modules at once
+     */
+    function setModules(
+        address governance, 
+        address media, 
+        address updates, 
+        address refunds,
+        address security,
+        address web3,
+        address analytics
+    ) external;
     
     /**
      * @notice Sets the authorized router
@@ -334,6 +350,14 @@ interface IPoliDaoStorage is IPoliDaoStructs {
      * @return wallet Commission wallet address
      */
     function commissionWallet() external view returns (address);
+
+    /**
+     * @notice Release funds held by storage to a recipient
+     * @param token Token address
+     * @param to Recipient address
+     * @param amount Amount to transfer
+     */
+    function releaseFunds(address token, address to, uint256 amount) external;
     
     // ========== CONSTANTS ==========
     

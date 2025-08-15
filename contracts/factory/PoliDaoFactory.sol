@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "../storage/PoliDaoStorage.sol";
 import "../core/PoliDaoCore.sol";
-import "../core/PoliDaoExtensions.sol";
+import "../core/PoliDaoExtension.sol";
 import "../router/PoliDaoRouter.sol";
 
 /**
@@ -95,7 +95,7 @@ contract PoliDaoFactory {
         address feeToken,
         address initialToken,
         string calldata systemName
-    ) external returns (
+    ) public returns (
         uint256 deploymentId,
         address storageContract,
         address coreContract,
@@ -195,7 +195,7 @@ contract PoliDaoFactory {
     function configureModules(
         uint256 deploymentId,
         ModuleAddresses calldata modules
-    ) external {
+    ) public {
         require(deploymentId <= deployedSystemsCount && deploymentId > 0, "PoliDaoFactory: Invalid deployment ID");
         
         DeployedSystem storage system = deployedSystems[deploymentId];
