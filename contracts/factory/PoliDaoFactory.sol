@@ -1,10 +1,34 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../storage/PoliDaoStorage.sol";
-import "../core/PoliDaoCore.sol";
-import "../core/PoliDaoExtension.sol";
-import "../router/PoliDaoRouter.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+// Use minimal interfaces to avoid pulling full contract bytecode into the factory
+interface IStorageInit {
+    function initialize(address _commissionWalletArg, address _feeTokenArg, address _initialTokenArg, address initialOwner) external;
+    function authorizeContract(address contractAddr) external;
+    function setAuthorizedRouter(address router) external;
+    function transferOwnership(address newOwner) external;
+    function owner() external view returns (address);
+}
+
+interface ICoreInit {
+    function initialize(address _storageContract, address initialOwner) external;
+    function setExtensionsContract(address _extensionsContract) external;
+    function setRouterContract(address _routerContract) external;
+    function transferOwnership(address newOwner) external;
+    function setModules(address governance, address media, address updates, address refunds, address security, address web3, address analytics) external;
+    function owner() external view returns (address);
+}
+
+interface IExtensionsInit {
+    function initialize(address _storageContract, address _coreContract) external;
+}
+
+interface IRouterInit {
+    function initialize(address _coreContract, address initialOwner) external;
+}
+import "@openzeppelin/contracts/proxy/Clones.sol";
 
 /**
  * @title PoliDaoFactory
@@ -14,7 +38,9 @@ import "../router/PoliDaoRouter.sol";
  * @custom:version 1.0.0-UNIFIED
  * @custom:security-contact security@polidao.org
  */
-contract PoliDaoFactory {
+contract PoliDaoFactory is Ownable {
+    // Initialize Ownable with deployer as owner
+    constructor() Ownable(msg.sender) {}
     
     // ========== EVENTS ==========
     
@@ -50,6 +76,12 @@ contract PoliDaoFactory {
     
     /// @notice Mapping of deployer to their deployed systems
     mapping(address => uint256[]) public deployerSystems;
+
+    // Optional implementation addresses for clones pattern
+    address public storageImplementation;
+    address public coreImplementation;
+    address public extensionsImplementation;
+    address public routerImplementation;
     
     // ========== STRUCTS ==========
     
@@ -112,43 +144,45 @@ contract PoliDaoFactory {
         deploymentId = deployedSystemsCount;
         
         // ========== 1. DEPLOY STORAGE CONTRACT ==========
-        storageContract = address(new PoliDaoStorage(
-            commissionWallet,
-            feeToken,
-            initialToken
-        ));
+    require(storageImplementation != address(0), "PoliDaoFactory: storage implementation not set");
+    // use clones
+    storageContract = Clones.clone(storageImplementation);
+    IStorageInit(storageContract).initialize(commissionWallet, feeToken, initialToken, msg.sender);
         
         // ========== 2. DEPLOY CORE CONTRACT ==========
-        coreContract = address(new PoliDaoCore(storageContract));
+    require(coreImplementation != address(0), "PoliDaoFactory: core implementation not set");
+    coreContract = Clones.clone(coreImplementation);
+    ICoreInit(coreContract).initialize(storageContract, msg.sender);
         
         // ========== 3. DEPLOY EXTENSIONS CONTRACT ==========
-        extensionsContract = address(new PoliDaoExtensions(
-            storageContract,
-            coreContract
-        ));
+    require(extensionsImplementation != address(0), "PoliDaoFactory: extensions implementation not set");
+    extensionsContract = Clones.clone(extensionsImplementation);
+    IExtensionsInit(extensionsContract).initialize(storageContract, coreContract);
         
         // ========== 4. DEPLOY ROUTER CONTRACT ==========
-        routerContract = address(new PoliDaoRouter(coreContract));
+    require(routerImplementation != address(0), "PoliDaoFactory: router implementation not set");
+    routerContract = Clones.clone(routerImplementation);
+    IRouterInit(routerContract).initialize(coreContract, msg.sender);
         
         // ========== 5. CONFIGURE CONNECTIONS ==========
         
-        // Authorize core and extensions in storage
-        PoliDaoStorage(storageContract).authorizeContract(coreContract);
-        PoliDaoStorage(storageContract).authorizeContract(extensionsContract);
-        
-        // Set extensions contract in core
-        PoliDaoCore(coreContract).setExtensionsContract(extensionsContract);
-        
-        // Set router contract in core
-        PoliDaoCore(coreContract).setRouterContract(routerContract);
-        
-        // Set authorized router in storage
-        PoliDaoStorage(storageContract).setAuthorizedRouter(routerContract);
-        
-        // ========== 6. TRANSFER OWNERSHIP TO DEPLOYER ==========
-        
-        PoliDaoStorage(storageContract).transferOwnership(msg.sender);
-        PoliDaoCore(coreContract).transferOwnership(msg.sender);
+    // Authorize core and extensions in storage
+    IStorageInit(storageContract).authorizeContract(coreContract);
+    IStorageInit(storageContract).authorizeContract(extensionsContract);
+
+    // Set extensions contract in core
+    ICoreInit(coreContract).setExtensionsContract(extensionsContract);
+
+    // Set router contract in core
+    ICoreInit(coreContract).setRouterContract(routerContract);
+
+    // Set authorized router in storage
+    IStorageInit(storageContract).setAuthorizedRouter(routerContract);
+
+    // ========== 6. TRANSFER OWNERSHIP TO DEPLOYER ==========
+
+    IStorageInit(storageContract).transferOwnership(msg.sender);
+    ICoreInit(coreContract).transferOwnership(msg.sender);
         
         // ========== 7. RECORD DEPLOYMENT ==========
         
@@ -184,6 +218,14 @@ contract PoliDaoFactory {
             routerContract
         );
     }
+
+    // ========== ADMIN: set implementation addresses for clones ==========
+    function setImplementations(address _storageImpl, address _coreImpl, address _extensionsImpl, address _routerImpl) external onlyOwner {
+        storageImplementation = _storageImpl;
+        coreImplementation = _coreImpl;
+        extensionsImplementation = _extensionsImpl;
+        routerImplementation = _routerImpl;
+    }
     
     // ========== MODULE CONFIGURATION ==========
     
@@ -212,7 +254,7 @@ contract PoliDaoFactory {
         require(modules.web3 != address(0), "PoliDaoFactory: Invalid web3 module");
         
         // Configure modules in core contract
-        PoliDaoCore(system.coreContract).setModules(
+        ICoreInit(system.coreContract).setModules(
             modules.governance,
             modules.media,
             modules.updates,
@@ -223,13 +265,13 @@ contract PoliDaoFactory {
         );
         
         // Authorize modules in storage contract
-        PoliDaoStorage(system.storageContract).authorizeContract(modules.analytics);
-        PoliDaoStorage(system.storageContract).authorizeContract(modules.governance);
-        PoliDaoStorage(system.storageContract).authorizeContract(modules.media);
-        PoliDaoStorage(system.storageContract).authorizeContract(modules.refunds);
-        PoliDaoStorage(system.storageContract).authorizeContract(modules.security);
-        PoliDaoStorage(system.storageContract).authorizeContract(modules.updates);
-        PoliDaoStorage(system.storageContract).authorizeContract(modules.web3);
+    IStorageInit(system.storageContract).authorizeContract(modules.analytics);
+    IStorageInit(system.storageContract).authorizeContract(modules.governance);
+    IStorageInit(system.storageContract).authorizeContract(modules.media);
+    IStorageInit(system.storageContract).authorizeContract(modules.refunds);
+    IStorageInit(system.storageContract).authorizeContract(modules.security);
+    IStorageInit(system.storageContract).authorizeContract(modules.updates);
+    IStorageInit(system.storageContract).authorizeContract(modules.web3);
         
         // Mark as configured
         system.isConfigured = true;
@@ -438,7 +480,7 @@ contract PoliDaoFactory {
         }
         
         // Check ownership
-        try PoliDaoStorage(system.storageContract).owner() returns (address storageOwner) {
+    try IStorageInit(system.storageContract).owner() returns (address storageOwner) {
             if (storageOwner != system.deployer) {
                 tempIssues[issueCount] = "Storage ownership not transferred to deployer";
                 issueCount++;
@@ -448,7 +490,7 @@ contract PoliDaoFactory {
             issueCount++;
         }
         
-        try PoliDaoCore(system.coreContract).owner() returns (address coreOwner) {
+    try ICoreInit(system.coreContract).owner() returns (address coreOwner) {
             if (coreOwner != system.deployer) {
                 tempIssues[issueCount] = "Core ownership not transferred to deployer";
                 issueCount++;

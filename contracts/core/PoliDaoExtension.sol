@@ -19,10 +19,10 @@ contract PoliDaoExtensions is ReentrancyGuard {
     // ========== STORAGE AND DEPENDENCIES ==========
     
     /// @notice Unified storage contract
-    PoliDaoStorage public immutable storageContract;
+    PoliDaoStorage public storageContract;
     
     /// @notice Core contract address
-    address public immutable coreContract;
+    address public coreContract;
     
     // ========== EVENTS ==========
     
@@ -54,10 +54,22 @@ contract PoliDaoExtensions is ReentrancyGuard {
      * @param _storageContract Address of the unified storage contract
      * @param _coreContract Address of the core contract
      */
+    // legacy constructor
     constructor(address _storageContract, address _coreContract) {
         require(_storageContract != address(0), "PoliDaoExtensions: Invalid storage contract");
         require(_coreContract != address(0), "PoliDaoExtensions: Invalid core contract");
-        
+        storageContract = PoliDaoStorage(_storageContract);
+        coreContract = _coreContract;
+    }
+
+    // initializer for clone deployments
+    bool private _initialized;
+
+    function initialize(address _storageContract, address _coreContract) external {
+        require(!_initialized, "PoliDaoExtensions: already initialized");
+        require(_storageContract != address(0), "PoliDaoExtensions: Invalid storage contract");
+        require(_coreContract != address(0), "PoliDaoExtensions: Invalid core contract");
+        _initialized = true;
         storageContract = PoliDaoStorage(_storageContract);
         coreContract = _coreContract;
     }

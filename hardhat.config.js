@@ -249,3 +249,41 @@ task("fresh-compile", "Wyczyść cache i skompiluj od nowa")
     console.log("📏 Sprawdzanie rozmiaru...");
     await hre.run("contract-size");
   });
+
+// ⭐ NOWE ZADANIE: Wyświetl rozmiary wszystkich skompilowanych kontraktów
+task("sizes-all", "Wyświetl rozmiary wszystkich skompilowanych kontraktów")
+  .setAction(async (taskArgs, hre) => {
+    console.log("🔨 Kompilacja (jeśli potrzeba) i zbieranie artefaktów...");
+    await hre.run("compile");
+
+    const names = await hre.artifacts.getAllFullyQualifiedNames();
+    const maxSize = 24576;
+
+    console.log(`\n📦 Znaleziono ${names.length} artefakt(ów).`);
+
+    for (const fqn of names) {
+      try {
+        const artifact = await hre.artifacts.readArtifact(fqn);
+        const bytecode = artifact.bytecode || "";
+        const deployed = artifact.deployedBytecode || "";
+        const bytecodeSize = bytecode.length ? (bytecode.length - 2) / 2 : 0;
+        const deployedSize = deployed.length ? (deployed.length - 2) / 2 : 0;
+        const kb = (deployedSize / 1024).toFixed(2);
+
+        console.log(`\n- ${fqn}`);
+        console.log(`   Contract: ${artifact.contractName}`);
+        console.log(`   Deployed size: ${deployedSize.toLocaleString()} bytes (${kb} KB) ${deployedSize > maxSize ? '❌ OVER 24KB' : '✅ OK'}`);
+
+        if (artifact.linkReferences && Object.keys(artifact.linkReferences).length) {
+          console.log('   Linked libraries:');
+          for (const src in artifact.linkReferences) {
+            for (const lib in artifact.linkReferences[src]) {
+              console.log(`     - ${src}:${lib}`);
+            }
+          }
+        }
+      } catch (err) {
+        console.log(`Failed to read artifact ${fqn}: ${err.message}`);
+      }
+    }
+  });

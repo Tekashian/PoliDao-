@@ -20,7 +20,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
     // ========== CORE CONTRACT ==========
     
     /// @notice Address of the core contract
-    PoliDaoCore public immutable coreContract;
+    PoliDaoCore public coreContract;
     
     // ========== RATE LIMITING ==========
     
@@ -367,6 +367,18 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         require(_coreContract != address(0), "PoliDaoRouter: Invalid core contract");
         coreContract = PoliDaoCore(_coreContract);
         lastSuccessfulTransaction = block.timestamp;
+    }
+
+    // initializer for clone deployments
+    bool private _initialized;
+
+    function initialize(address _coreContract, address initialOwner) external {
+        require(!_initialized, "PoliDaoRouter: already initialized");
+        require(_coreContract != address(0), "PoliDaoRouter: Invalid core contract");
+        _initialized = true;
+        coreContract = PoliDaoCore(_coreContract);
+        lastSuccessfulTransaction = block.timestamp;
+        transferOwnership(initialOwner);
     }
     
     // ========== CORE FUNCTION ROUTING ==========

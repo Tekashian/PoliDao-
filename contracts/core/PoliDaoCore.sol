@@ -24,7 +24,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     // ========== STORAGE AND DEPENDENCIES ==========
     
     /// @notice Unified storage contract interface
-    IPoliDaoStorage public immutable storageContract;
+    IPoliDaoStorage public storageContract;
     
     /// @notice Extensions contract for advanced functionality
     address public extensionsContract;
@@ -94,9 +94,21 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @notice Initializes the core contract
      * @param _storageContract Address of the unified storage contract
      */
+    // Keep constructor for legacy direct deployments
     constructor(address _storageContract) Ownable(msg.sender) {
         require(_storageContract != address(0), "PoliDaoCore: Invalid storage contract");
         storageContract = IPoliDaoStorage(_storageContract);
+    }
+
+    // initializer for clone deployments
+    bool private _initialized;
+
+    function initialize(address _storageContract, address initialOwner) external {
+        require(!_initialized, "PoliDaoCore: already initialized");
+        require(_storageContract != address(0), "PoliDaoCore: Invalid storage contract");
+        _initialized = true;
+        storageContract = IPoliDaoStorage(_storageContract);
+        transferOwnership(initialOwner);
     }
     
     // ========== CONTRACT MANAGEMENT ==========

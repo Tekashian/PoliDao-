@@ -50,6 +50,7 @@ contract PoliDaoStorage is IPoliDaoStorage {
 	}
 
 	constructor(address _commissionWalletArg, address _feeTokenArg, address _initialTokenArg) {
+		// keep constructor for legacy direct deployments
 		_owner = msg.sender;
 		_commissionWallet = _commissionWalletArg;
 		_feeToken = _feeTokenArg;
@@ -58,6 +59,21 @@ contract PoliDaoStorage is IPoliDaoStorage {
 		}
 		// authorize deployer by default (owner)
 		_authorizedContracts[msg.sender] = true;
+	}
+
+	// initializer for clone-based deployments (EIP-1167)
+	bool private _initialized;
+
+	function initialize(address _commissionWalletArg, address _feeTokenArg, address _initialTokenArg, address initialOwner) external {
+		require(!_initialized, "PoliDaoStorage: already initialized");
+		_initialized = true;
+		_owner = initialOwner;
+		_commissionWallet = _commissionWalletArg;
+		_feeToken = _feeTokenArg;
+		if (_initialTokenArg != address(0)) {
+			_whitelistedTokens.push(_initialTokenArg);
+		}
+		_authorizedContracts[initialOwner] = true;
 	}
 
 	function addDonation(uint256 fundraiserId, address donor, uint256 amount) external {
