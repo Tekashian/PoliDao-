@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { deployMockToken, toUnits } = require("../../helpers/testUtils");
+const { deployMockToken, toUnits } = require("../helpers/testUtils");
 
 describe("DonationLogic - unit tests (via PoliDaoStorage)", function () {
   let deployer, alice, bob;

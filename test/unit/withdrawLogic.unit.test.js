@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { deployMockToken, toUnits } = require("../../helpers/testUtils");
+const { deployMockToken, toUnits } = require("../helpers/testUtils");
 
 describe("WithdrawLogic - unit tests (via PoliDaoStorage releaseFunds)", function () {
   let deployer, bob;
