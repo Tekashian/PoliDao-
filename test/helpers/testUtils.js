@@ -150,6 +150,12 @@ async function resolveDependencyByName(argName) {
     const role = String(argName || "").toLowerCase();
     const [signer] = await ethers.getSigners();
 
+    // NEW: prefer system fixture address if available
+    try {
+        const sysAddr = await systemAddressByRole(role);
+        if (sysAddr) return sysAddr;
+    } catch (_) { /* ignore */ }
+
     const addrFrom = (c) => (c && (c.address || c.target)) || c || ethers.constants.AddressZero;
 
     if (role.includes("storage")) {
@@ -167,7 +173,6 @@ async function resolveDependencyByName(argName) {
         return addrFrom(r);
     }
     if (role.includes("refund")) {
-        // PoliDaoRefunds(main, commissionWallet)
         const coreAddr = await resolveDependencyByName("core");
         const r = await deployOnce("PoliDaoRefunds", coreAddr, signer.address);
         return addrFrom(r);
@@ -176,7 +181,6 @@ async function resolveDependencyByName(argName) {
         return signer.address;
     }
     if (role.includes("fee") && role.includes("token")) {
-        // Try a MockToken
         try {
             const dec = 18;
             const supply = await toUnits("1000000", dec);
@@ -190,7 +194,6 @@ async function resolveDependencyByName(argName) {
         return signer.address;
     }
     if (role.includes("token")) {
-        // Generic token address
         try {
             const dec = 18;
             const supply = await toUnits("1000000", dec);
@@ -279,21 +282,24 @@ async function fallbackDeploy(contractName, ...providedArgs) {
         } catch (_e) { /* continue to system-backed path */ }
     }
 
-    // 1) użyj gotowych instancji z system fixture
+    // 1) użyj gotowych instancji z system fixture (najpierw dokładna nazwa, potem rola)
     const sys = await getSystem();
     if (sys) {
         const name = String(contractName || "");
-        const map = {
+        const exact = {
             "PoliDaoStorage": pick(sys, ["storage", "daoStorage", "PoliDaoStorage", "poliDaoStorage"]),
             "PoliDaoCore": pick(sys, ["core", "daoCore", "PoliDaoCore", "poliDaoCore"]),
             "PoliDaoRouter": pick(sys, ["router", "daoRouter", "PoliDaoRouter", "poliDaoRouter"]),
             "PoliDaoRefunds": pick(sys, ["refunds", "daoRefunds", "PoliDaoRefunds", "poliDaoRefunds"]),
             "MockToken": pick(sys, ["token", "feeToken", "mockToken", "erc20"]),
         };
-        if (map[name]) return map[name];
+        if (exact[name]) return exact[name];
+
+        const fromRole = pickFromSystem(sys, contractName);
+        if (fromRole) return fromRole;
     }
 
-    // 2) fallback: rozpoznaj potrzebne adresy z ABI i rozwiąż address-deps
+    // 2) fallback: ABI-driven args
     const Factory = await ethers.getContractFactory(contractName);
     const fragment = Factory.interface?.deploy || Factory.interface?.fragments?.find(f => f.type === "constructor");
     const inputs = (fragment && fragment.inputs) || [];
@@ -334,35 +340,48 @@ async function fallbackDeploy(contractName, ...providedArgs) {
  * Deploy MockToken robustly: tries common constructor signatures (uses full 5-arg ctor if available),
  * then ensures target account has `amount`. Returns { token, minted }.
  */
-async function deployMockToken(options = {}) {
+async function deployMockToken(...args) {
+    // Supports:
+    // - deployMockToken(ownerAddress, amount)
+    // - deployMockToken({ owner, name, symbol, decimals, supply })
     const [signer] = await ethers.getSigners();
-    const owner = options.owner || signer.address;
-    const name = options.name || "MockToken";
-    const symbol = options.symbol || "MCK";
-    const decimals = options.decimals ?? 18;
-    const supply = options.supply ?? (ethers.utils && ethers.utils.parseUnits ? ethers.utils.parseUnits("1000000", decimals) : (10n ** BigInt(6 + decimals)));
+    let owner, name, symbol, decimals, supply;
+    if (args.length > 0 && typeof args[0] === "object") {
+        const opts = args[0] || {};
+        owner = opts.owner || signer.address;
+        name = opts.name || "MockToken";
+        symbol = opts.symbol || "MCK";
+        decimals = opts.decimals ?? 18;
+        supply = opts.supply ?? (ethers.utils?.parseUnits ? ethers.utils.parseUnits("1000000", decimals) : 10n ** BigInt(6 + decimals));
+    } else {
+        owner = args[0] || signer.address;
+        const amount = args[1];
+        name = "MockToken";
+        symbol = "MCK";
+        decimals = 18;
+        supply = amount ?? (ethers.utils?.parseUnits ? ethers.utils.parseUnits("1000000", 18) : 10n ** 24n);
+    }
 
-    // Try most common ctor: (string, string, uint8, uint256, address)
+    let token, minted = false;
+    // Prefer full signature: (string, string, uint8, uint256, address)
     try {
-        return await deployOnce("MockToken", name, symbol, decimals, supply, owner);
-    } catch (_e1) {
-        // Alt: (string, string, uint8, uint256) then mint/transfer in fixture – deploy anyway
+        token = await deployOnce("MockToken", name, symbol, decimals, supply, owner);
+        minted = true;
+    } catch {
         try {
-            return await deployOnce("MockToken", name, symbol, decimals, supply);
-        } catch (_e2) {
-            // Alt: (uint256, address)
+            token = await deployOnce("MockToken", name, symbol, decimals, supply);
+            minted = false;
+        } catch {
             try {
-                return await deployOnce("MockToken", supply, owner);
-            } catch (_e3) {
-                // Alt: (address, uint256)
-                try {
-                    return await deployOnce("MockToken", owner, supply);
-                } catch (eFinal) {
-                    throw eFinal;
-                }
+                token = await deployOnce("MockToken", supply, owner);
+                minted = true;
+            } catch {
+                token = await deployOnce("MockToken", owner, supply);
+                minted = true;
             }
         }
     }
+    return { token, minted };
 }
 
 /**
@@ -380,106 +399,128 @@ async function expectRevert(promise, messageSubstring) {
 }
 
 /* --- replace previous complex patch with a robust, minimal wrapper --- */
-(function patchContractFactoryDeploySimple() {
+// (removed) old simple patch that injected ZERO_ADDR defaults
+
+// Patch ContractFactory.deploy: on arg-mismatch, retry with auto-resolved constructor args.
+// Also ensure returned contract has .deployed() shim for ethers v6.
+(function patchContractFactoryDeployAutoArgs() {
     try {
         const CF = ethers.ContractFactory;
-        if (!CF || !CF.prototype || CF.prototype.__deployPatchedSimple) return;
-        const originalDeploy = CF.prototype.deploy;
-        CF.prototype.deploy = async function (...args) {
-            // try normal deploy first
-            try {
-                const res = await originalDeploy.apply(this, args);
+        if (!CF || !CF.prototype || CF.prototype.__pd_deployPatched) return;
 
-                // If it's a tx-like object (TxResponse) -> wait + attach full Contract from artifact
-                if (res && typeof res.wait === "function") {
+        const originalDeploy = CF.prototype.deploy;
+
+        async function toContractIfTx(res, name, signerOrProvider) {
+            if (res && (res.address || res.target)) return res;
+            if (res && typeof res.wait === "function") {
+                const rc = await res.wait();
+                const addr = rc?.contractAddress || rc?.to || res.deployTransaction?.contractAddress;
+                if (addr) {
                     try {
-                        const receipt = await res.wait();
-                        const addr = (receipt && (receipt.contractAddress || receipt.to)) || (res.deployTransaction && res.deployTransaction.contractAddress);
-                        if (addr) {
-                            // Always attach by contract name (uses compiled artifact ABI)
-                            try {
-                                const signerOrProvider = (this.signer && this.signer.provider) ? this.signer : (ethers.provider ? ethers.provider.getSigner() : undefined);
-                                const contract = await ethers.getContractAt(this.constructorName || this.contractName || this.interface && this.interface.name || (args[0] && typeof args[0] === 'string' ? args[0] : undefined) || this.interface?.name, addr, signerOrProvider);
-                                if (typeof contract.deployed !== "function") contract.deployed = async () => contract;
-                                return contract;
-                            } catch (e) {
-                                // Fallback: try by contractName if available
-                                try {
-                                    const contract = await ethers.getContractAt(this.contractName || this.interface?.name, addr);
-                                    if (typeof contract.deployed !== "function") contract.deployed = async () => contract;
-                                    return contract;
-                                } catch (e2) {
-                                    // last resort: return minimal shim with address + deployed()
-                                    const shim = { address: addr, deployed: async () => shim };
-                                    return shim;
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        // if wait/attach failed, fallthrough to other checks
+                        const c = await ethers.getContractAt(name, addr, signerOrProvider);
+                        return c;
+                    } catch {
+                        return { address: addr };
                     }
                 }
+            }
+            return res;
+        }
 
-                // If it's already a Contract-like object with address -> ensure deployed() and return
-                if (res && (res.address || res.target || res.contractAddress)) {
-                    if (typeof res.deployed !== "function") res.deployed = async () => res;
-                    return res;
+        function addDeployedShim(contractLike) {
+            if (!contractLike) return contractLike;
+            if (typeof contractLike.deployed !== "function") {
+                contractLike.deployed = async () => {
+                    try {
+                        if (typeof contractLike.waitForDeployment === "function") {
+                            await contractLike.waitForDeployment();
+                        } else if (contractLike.deployTransaction?.wait) {
+                            await contractLike.deployTransaction.wait();
+                        }
+                    } catch {}
+                    return contractLike;
+                };
+            }
+            return contractLike;
+        }
+
+        async function autoArgsFromConstructor(iface) {
+            const fragment = iface?.deploy || iface?.fragments?.find(f => f.type === "constructor");
+            const inputs = (fragment && fragment.inputs) || [];
+            const args = [];
+            for (const inp of inputs) {
+                const t = (inp.type || "").toLowerCase();
+                const n = (inp.name || "").toLowerCase();
+
+                if (t.startsWith("address")) {
+                    if (n.includes("storage")) {
+                        args.push(await resolveDependencyByName("storage"));
+                    } else if (n.includes("core") || n.includes("main")) {
+                        args.push(await resolveDependencyByName("core"));
+                    } else if (n.includes("router")) {
+                        args.push(await resolveDependencyByName("router"));
+                    } else if (n.includes("commission") && n.includes("wallet")) {
+                        args.push(await resolveDependencyByName("commissionWallet"));
+                    } else if (n.includes("owner") || n.includes("admin") || n.includes("initialowner")) {
+                        args.push(await resolveDependencyByName("owner"));
+                    } else if (n.includes("token") || n.includes("fee")) {
+                        args.push(await resolveDependencyByName("token"));
+                    } else {
+                        args.push(await resolveDependencyByName("core"));
+                    }
+                } else if (n.includes("decimals") || n === "decimals_" || n === "decimals") {
+                    args.push(18);
+                } else if (n.includes("supply") || n.includes("initialsupply") || n.includes("initial_supply")) {
+                    const dec = 18;
+                    args.push(ethers.utils?.parseUnits ? ethers.utils.parseUnits("1000000", dec) : 1000000);
+                } else if (t === "bool") {
+                    args.push(false);
+                } else if (t.startsWith("uint") || t.startsWith("int")) {
+                    args.push(0);
+                } else if (t === "string") {
+                    args.push("");
+                } else if (t.startsWith("bytes")) {
+                    args.push("0x");
+                } else if (t.endsWith("[]")) {
+                    args.push([]);
+                } else {
+                    args.push(0);
                 }
+            }
+            return args;
+        }
 
-                // If older ethers returned Contract with deployed() available
-                if (res && typeof res.deployed === "function") {
-                    await res.deployed();
-                    return res;
-                }
+        CF.prototype.deploy = async function (...args) {
+            const name = this?.interface?.name || this?.contractName || "Unknown";
+            const signerOrProvider = this.signer || ethers.provider;
 
-                // otherwise return whatever original returned
-                return res;
+            // Attempt with user-provided args
+            try {
+                const res = await originalDeploy.apply(this, args);
+                const contractLike = await toContractIfTx(res, name, signerOrProvider);
+                return addDeployedShim(contractLike || res);
             } catch (err) {
-                const msg = err && err.message ? err.message.toLowerCase() : "";
-                // If error is unrelated, rethrow
-                if (!msg.includes("incorrect number of arguments") && !msg.includes("missing")) {
+                const msg = (err?.message || "").toLowerCase();
+                const isArgMismatch =
+                    msg.includes("incorrect number of arguments") ||
+                    msg.includes("missing argument") ||
+                    msg.includes("not enough arguments") ||
+                    msg.includes("invalid number of parameters");
+                if (!isArgMismatch) {
                     throw err;
                 }
             }
 
-            // If constructor arg mismatch, build defaults and retry (use buildDefaultArgsFromFactory)
-            try {
-                const defaults = buildDefaultArgsFromFactory(this);
-                const res2 = await originalDeploy.apply(this, defaults);
-
-                if (res2 && typeof res2.wait === "function") {
-                    const receipt = await res2.wait();
-                    const addr = (receipt && (receipt.contractAddress || receipt.to)) || (res2.deployTransaction && res2.deployTransaction.contractAddress);
-                    if (addr) {
-                        try {
-                            const contract = await ethers.getContractAt(this.contractName || this.interface?.name, addr);
-                            if (typeof contract.deployed !== "function") contract.deployed = async () => contract;
-                            return contract;
-                        } catch (e) {
-                            const shim = { address: addr, deployed: async () => shim };
-                            return shim;
-                        }
-                    }
-                }
-
-                if (res2 && (res2.address || res2.target || res2.contractAddress)) {
-                    if (typeof res2.deployed !== "function") res2.deployed = async () => res2;
-                    return res2;
-                }
-
-                if (res2 && typeof res2.deployed === "function") {
-                    await res2.deployed();
-                    return res2;
-                }
-
-                return res2;
-            } catch (e) {
-                throw e;
-            }
+            // Retry with auto-resolved args
+            const autoArgs = await autoArgsFromConstructor(this.interface);
+            const res2 = await originalDeploy.apply(this, autoArgs);
+            const contractLike2 = await toContractIfTx(res2, name, signerOrProvider);
+            return addDeployedShim(contractLike2 || res2);
         };
-        CF.prototype.__deployPatchedSimple = true;
-    } catch (e) {
-        // do not break tests if patching not possible
+
+        CF.prototype.__pd_deployPatched = true;
+    } catch {
+        // ignore
     }
 })();
 
@@ -502,6 +543,18 @@ function pick(obj, keys) {
     for (const k of keys) {
         if (obj && obj[k]) return obj[k];
     }
+    return undefined;
+}
+
+// NEW: pick by role (substring) from system fixture
+function pickFromSystem(sys, contractName) {
+    if (!sys) return undefined;
+    const lc = String(contractName || "").toLowerCase();
+    if (lc.includes("storage")) return pick(sys, ["storage", "daoStorage", "PoliDaoStorage", "poliDaoStorage"]);
+    if (lc.includes("core") || lc.includes("main")) return pick(sys, ["core", "daoCore", "PoliDaoCore", "poliDaoCore"]);
+    if (lc.includes("router")) return pick(sys, ["router", "daoRouter", "PoliDaoRouter", "poliDaoRouter"]);
+    if (lc.includes("refund")) return pick(sys, ["refunds", "daoRefunds", "PoliDaoRefunds", "poliDaoRefunds"]);
+    if (lc.includes("token") || lc.includes("fee")) return pick(sys, ["token", "feeToken", "mockToken", "erc20"]);
     return undefined;
 }
 
