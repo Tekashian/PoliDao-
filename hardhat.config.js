@@ -146,7 +146,8 @@ module.exports = {
   // ========== COMPILER OPTIMIZATION ==========
   mocha: {
     timeout: 60000,
-    bail: false
+    bail: false,
+    require: ["./test/helpers/v6-compat.js"] // v6 shim
   },
 
   // ========== PATHS ==========

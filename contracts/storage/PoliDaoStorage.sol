@@ -1,169 +1,339 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../interfaces/IPoliDaoStorage.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "../interfaces/IPoliDaoStructs.sol";
 
-/**
- * Minimal abstract storage contract placeholder.
- * This file provides the `PoliDaoStorage` symbol used across the codebase
- * by declaring an abstract contract that implements the storage interface.
- * The actual concrete storage implementation can replace this later.
- */
-contract PoliDaoStorage is IPoliDaoStorage {
-	// Minimal in-memory storage to satisfy compilation. NOT for production.
-	mapping(uint256 => PackedFundraiserData) internal _fundraisers;
-	mapping(uint256 => mapping(address => uint256)) internal _donations;
-	mapping(bytes32 => address) internal _modules;
-	mapping(address => bool) internal _authorizedContracts;
-	address[] internal _whitelistedTokens;
-	uint256 internal _counter;
-	address internal _commissionWallet;
-	address internal _feeToken;
-	address internal _authorizedRouter;
+contract PoliDaoStorage is Ownable {
+    using SafeERC20 for IERC20;
 
-	// Events
-	function createFundraiser(
-		PackedFundraiserData memory data,
-		string memory /*title*/,
-		string memory /*description*/,
-		string memory /*location*/,
-		address /*creator*/,
-		address token
-	) external returns (uint256 fundraiserId) {
-		_counter++;
-		data.id = uint32(_counter);
-		_fundraisers[_counter] = data;
-		_whitelistedTokens.push(token);
-		return _counter;
-	}
+    // OZ v5 Ownable requires initialOwner in constructor
+    constructor() Ownable(msg.sender) {}
 
-	using SafeERC20 for IERC20;
+    // ===================== Constants (libraries expect public getters) =====================
+    // Extension/creation constraints
+    uint256 public constant MAX_EXTENSION_DAYS = 365;
+    uint256 public constant MAX_EXTENSIONS = 3;
+    uint256 public constant MIN_EXTENSION_NOTICE = 1 days;
+    uint256 public constant SECONDS_PER_DAY = 1 days;
+    uint256 public constant MAX_FUTURE_DATE = 365 days;
 
-	// simple owner implementation to satisfy the interface without conflicting with OpenZeppelin Ownable
-	address private _owner;
+    // Text limits
+    uint256 public constant MAX_LOCATION_LENGTH = 256;
+    uint256 public constant MAX_TITLE_LENGTH = 128;
+    uint256 public constant MAX_DESCRIPTION_LENGTH = 1024;
 
-	modifier onlyOwner() {
-		require(msg.sender == _owner, "Only owner");
-		_;
-	}
+    // Fees/commission caps (basis points and absolute fee caps)
+    uint256 public constant MAX_COMMISSION_RATE = 10_000; // 100% in bps
+    uint256 public constant MAX_EXTENSION_FEE = type(uint256).max;
 
-	constructor(address _commissionWalletArg, address _feeTokenArg, address _initialTokenArg) {
-		// keep constructor for legacy direct deployments
-		_owner = msg.sender;
-		_commissionWallet = _commissionWalletArg;
-		_feeToken = _feeTokenArg;
-		if (_initialTokenArg != address(0)) {
-			_whitelistedTokens.push(_initialTokenArg);
-		}
-		// authorize deployer by default (owner)
-		_authorizedContracts[msg.sender] = true;
-	}
+    // ===================== Router and access =====================
+    address private _authorizedRouter;
+    mapping(address => bool) private _authorizedContracts;
 
-	// initializer for clone-based deployments (EIP-1167)
-	bool private _initialized;
+    event ContractAuthorized(address indexed contractAddress);
+    event ContractDeauthorized(address indexed contractAddress);
 
-	function initialize(address _commissionWalletArg, address _feeTokenArg, address _initialTokenArg, address initialOwner) external {
-		require(!_initialized, "PoliDaoStorage: already initialized");
-		_initialized = true;
-		_owner = initialOwner;
-		_commissionWallet = _commissionWalletArg;
-		_feeToken = _feeTokenArg;
-		if (_initialTokenArg != address(0)) {
-			_whitelistedTokens.push(_initialTokenArg);
-		}
-		_authorizedContracts[initialOwner] = true;
-	}
+    function setAuthorizedRouter(address router) external onlyOwner {
+        _authorizedRouter = router;
+    }
 
-	function addDonation(uint256 fundraiserId, address donor, uint256 amount) external {
-		_donations[fundraiserId][donor] += amount;
-	}
+    function authorizedRouter() external view returns (address) {
+        return _authorizedRouter;
+    }
 
-	function updateFundraiser(uint256, PackedFundraiserData memory) external {}
-	function updateFundraiserLocation(uint256, string memory) external {}
-	function updateDonationAmount(uint256, address, uint256) external {}
-	function updateRaisedAmount(uint256, uint256) external {}
-	function updateFundraiserStatus(uint256, uint8) external {}
+    function authorizeContract(address contractAddress) external onlyOwner {
+        _authorizedContracts[contractAddress] = true;
+        emit ContractAuthorized(contractAddress);
+    }
 
-	function addWhitelistedToken(address token) external onlyOwner { _whitelistedTokens.push(token); }
-	function removeWhitelistedToken(address) external onlyOwner {}
+    function deauthorizeContract(address contractAddress) external onlyOwner {
+        _authorizedContracts[contractAddress] = false;
+        emit ContractDeauthorized(contractAddress);
+    }
 
-	function setCommissions(uint256, uint256, uint256) external onlyOwner {}
-	function setExtensionFee(uint256) external onlyOwner {}
-	function setCommissionWallet(address) external onlyOwner {}
-	function setFeeToken(address) external onlyOwner {}
+    function isContractAuthorized(address contractAddress) public view returns (bool) {
+        return _authorizedContracts[contractAddress];
+    }
 
-	function setModule(bytes32 moduleKey, address moduleAddress) external onlyOwner { _modules[moduleKey] = moduleAddress; }
-	function setModules(address governance, address media, address updates, address refunds, address security, address web3, address analytics) external onlyOwner {
-		_modules[keccak256(bytes("ANALYTICS"))] = analytics;
-		_modules[keccak256(bytes("GOVERNANCE"))] = governance;
-		_modules[keccak256(bytes("MEDIA"))] = media;
-		_modules[keccak256(bytes("REFUNDS"))] = refunds;
-		_modules[keccak256(bytes("SECURITY"))] = security;
-		_modules[keccak256(bytes("UPDATES"))] = updates;
-		_modules[keccak256(bytes("WEB3"))] = web3;
-	}
+    // ===================== Fundraisers =====================
+    uint256 public fundraiserCounter;
 
-	function setAuthorizedRouter(address _router) external onlyOwner { _authorizedRouter = _router; }
+    // Packed struct storage
+    mapping(uint256 => IPoliDaoStructs.PackedFundraiserData) private _fundraisers;
 
-	function authorizeContract(address contractAddr) external onlyOwner { _authorizedContracts[contractAddr] = true; emit ContractAuthorized(contractAddr); }
+    // Additional fields accessed by libs
+    mapping(uint256 => address) public fundraiserCreators;
+    mapping(uint256 => address) public fundraiserTokens;
+    mapping(uint256 => string) public fundraiserTitles;
+    mapping(uint256 => string) public fundraiserDescriptions;
+    mapping(uint256 => string) public fundraiserLocations;
 
-	function deauthorizeContract(address contractAddr) external onlyOwner { _authorizedContracts[contractAddr] = false; emit ContractDeauthorized(contractAddr); }
+    // Donor tracking
+    mapping(uint256 => mapping(address => uint256)) public donations;
+    mapping(uint256 => address[]) private _fundraiserDonors;
+    mapping(uint256 => mapping(address => bool)) private _isDonorInList;
 
-	function getFundraiserDonors(uint256 /*fundraiserId*/) external pure returns (address[] memory donors) { return new address[](0); }
-	function getWhitelistedTokens() external view returns (address[] memory) { return _whitelistedTokens; }
-	function getFeeInfo() external view returns (uint256, uint256, uint256, uint256, address, address) { return (0,0,0,0,_feeToken,_commissionWallet); }
-	function isContractAuthorized(address contractAddr) external view returns (bool) { return _authorizedContracts[contractAddr]; }
+    // Events
+    event FundraiserCreatedInStorage(uint256 indexed fundraiserId, address indexed creator);
+    event DonationAddedToStorage(uint256 indexed fundraiserId, address indexed donor, uint256 amount);
+    event FundsReleased(address indexed token, address indexed to, uint256 amount, address indexed by);
 
-	/**
-	 * @notice Release funds from storage to a recipient; only authorized contracts/modules may call
-	 */
-	function releaseFunds(address token, address to, uint256 amount) external {
-		require(_authorizedContracts[msg.sender] || _modules[keccak256(bytes("REFUNDS"))] == msg.sender, "Not authorized to release funds");
-		require(to != address(0), "Invalid recipient");
-		require(amount > 0, "Amount must be > 0");
-		// Check balance
-		uint256 bal = IERC20(token).balanceOf(address(this));
-		require(bal >= amount, "Insufficient balance in storage");
-		// Use SafeERC20 via the IERC20 wrapper
-		IERC20(token).safeTransfer(to, amount);
-		emit FundsReleased(token, to, amount, msg.sender);
-	}
+    // Getter returning the packed struct as expected by libraries
+    function fundraisers(uint256 fundraiserId) external view returns (IPoliDaoStructs.PackedFundraiserData memory) {
+        return _fundraisers[fundraiserId];
+    }
 
-	function fundraiserCounter() external view returns (uint256) { return _counter; }
-	function fundraisers(uint256 fundraiserId) external view returns (PackedFundraiserData memory) { return _fundraisers[fundraiserId]; }
-	function fundraiserTitles(uint256) external pure returns (string memory) { return ""; }
-	function fundraiserDescriptions(uint256) external pure returns (string memory) { return ""; }
-	function fundraiserLocations(uint256) external pure returns (string memory) { return ""; }
-	function fundraiserCreators(uint256) external pure returns (address) { return address(0); }
-	function fundraiserTokens(uint256) external pure returns (address) { return address(0); }
-	function donations(uint256 fundraiserId, address donor) external view returns (uint256) { return _donations[fundraiserId][donor]; }
-	function isTokenWhitelisted(address /*token*/) external pure returns (bool) { return true; }
-	function modules(bytes32 moduleKey) external view returns (address) { return _modules[moduleKey]; }
-	function authorizedRouter() external view returns (address) { return _authorizedRouter; }
-	function donationCommission() external pure returns (uint256) { return 0; }
-	function successCommission() external pure returns (uint256) { return 0; }
-	function refundCommission() external pure returns (uint256) { return 0; }
-	function extensionFee() external pure returns (uint256) { return 0; }
-	function feeToken() external view returns (address) { return _feeToken; }
-	function commissionWallet() external view returns (address) { return _commissionWallet; }
-	function MAX_EXTENSION_FEE() external pure returns (uint256) { return 0; }
-	function MAX_COMMISSION_RATE() external pure returns (uint256) { return 0; }
-	function MAX_LOCATION_LENGTH() external pure returns (uint256) { return 200; }
-	function MAX_TITLE_LENGTH() external pure returns (uint256) { return 200; }
-	function MAX_DESCRIPTION_LENGTH() external pure returns (uint256) { return 1000; }
-	function MAX_FUTURE_DATE() external view returns (uint256) { return block.timestamp + 365 days; }
-	function MAX_EXTENSIONS() external pure returns (uint256) { return 90; }
-	function MIN_EXTENSION_NOTICE() external pure returns (uint256) { return 7 days; }
-	function MAX_EXTENSION_DAYS() external pure returns (uint256) { return 90; }
+    // Internal creation helper to unify all overloads
+    function _createFundraiserInternal(
+        IPoliDaoStructs.PackedFundraiserData memory data,
+        string memory title,
+        string memory description,
+        string memory location,
+        address creator,
+        address token
+    ) internal returns (uint256 fundraiserId) {
+        // Start IDs from 1 (id==0 means not exists in libs)
+        fundraiserId = ++fundraiserCounter;
+        data.id = uint32(fundraiserId);
+        _fundraisers[fundraiserId] = data;
+        fundraiserCreators[fundraiserId] = creator;
+        fundraiserTokens[fundraiserId] = token;
+        fundraiserTitles[fundraiserId] = title;
+        fundraiserDescriptions[fundraiserId] = description;
+        fundraiserLocations[fundraiserId] = location;
+        emit FundraiserCreatedInStorage(fundraiserId, creator);
+    }
 
-	// Ownership helpers to satisfy IPoliDaoStorage
-	function transferOwnership(address newOwner) external onlyOwner {
-		require(newOwner != address(0), "Invalid new owner");
-		emit OwnershipTransferred(_owner, newOwner);
-		_owner = newOwner;
-	}
+    // Pełny wariant (używany przez FundraiserLogic)
+    function createFundraiser(
+        IPoliDaoStructs.PackedFundraiserData memory data,
+        string memory title,
+        string memory description,
+        string memory location,
+        address creator,
+        address token
+    ) external returns (uint256 fundraiserId) {
+        require(creator != address(0), "Invalid creator");
+        fundraiserId = _createFundraiserInternal(
+            data, title, description, location, creator, token
+        );
+    }
 
-	function owner() external view returns (address) { return _owner; }
+    // Starter: prosty wariant używany w testach/demach
+    function createFundraiser(address token) external returns (uint256 fundraiserId) {
+        IPoliDaoStructs.PackedFundraiserData memory data = IPoliDaoStructs.PackedFundraiserData({
+            goalAmount: 0,
+            raisedAmount: 0,
+            endDate: uint64(block.timestamp + 30 days),
+            originalEndDate: uint64(block.timestamp + 30 days),
+            id: 0,
+            suspensionTime: 0,
+            extensionCount: 0,
+            fundraiserType: 0,
+            status: uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE),
+            isSuspended: false,
+            fundsWithdrawn: false,
+            isFlexible: false
+        });
+        fundraiserId = _createFundraiserInternal(
+            data, "", "", "", msg.sender, token
+        );
+    }
+
+    // Update packed struct (used by ExtensionLogic and others)
+    function updateFundraiser(uint256 fundraiserId, IPoliDaoStructs.PackedFundraiserData memory data) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        require(fundraiserId != 0, "Invalid id");
+        data.id = uint32(fundraiserId); // keep id consistent
+        _fundraisers[fundraiserId] = data;
+    }
+
+    // Update status (used by modules)
+    function updateFundraiserStatus(uint256 fundraiserId, uint8 newStatus) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        _fundraisers[fundraiserId].status = newStatus;
+    }
+
+    // Update raised amount (used by donation/withdraw/refund flows)
+    function updateRaisedAmount(uint256 fundraiserId, uint256 newAmount) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        require(newAmount <= type(uint128).max, "Overflow");
+        _fundraisers[fundraiserId].raisedAmount = uint128(newAmount);
+    }
+
+    // Location/title/description updates (wrappers expected by LocationLogic)
+    function updateFundraiserLocation(uint256 fundraiserId, string memory newLocation) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        fundraiserLocations[fundraiserId] = newLocation;
+    }
+
+    // Optional helpers (not strictly required by libs, but useful)
+    function setFundraiserTitle(uint256 fundraiserId, string memory newTitle) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        fundraiserTitles[fundraiserId] = newTitle;
+    }
+
+    function setFundraiserDescription(uint256 fundraiserId, string memory newDescription) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        fundraiserDescriptions[fundraiserId] = newDescription;
+    }
+
+    // Donor-related
+    function addDonation(uint256 fundraiserId, address donor, uint256 amount) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        require(donor != address(0) && amount > 0, "Invalid donation");
+
+        donations[fundraiserId][donor] += amount;
+        if (!_isDonorInList[fundraiserId][donor]) {
+            _isDonorInList[fundraiserId][donor] = true;
+            _fundraiserDonors[fundraiserId].push(donor);
+        }
+
+        emit DonationAddedToStorage(fundraiserId, donor, amount);
+    }
+
+    function updateDonationAmount(uint256 fundraiserId, address donor, uint256 newAmount) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        require(donor != address(0), "Invalid donor");
+        donations[fundraiserId][donor] = newAmount;
+        if (newAmount > 0 && !_isDonorInList[fundraiserId][donor]) {
+            _isDonorInList[fundraiserId][donor] = true;
+            _fundraiserDonors[fundraiserId].push(donor);
+        }
+    }
+
+    function getFundraiserDonors(uint256 fundraiserId) external view returns (address[] memory donors) {
+        return _fundraiserDonors[fundraiserId];
+    }
+
+    // ===================== Whitelist =====================
+    address[] internal _whitelistedTokens;
+    mapping(address => bool) internal _isWhitelisted;
+
+    function addWhitelistedToken(address token) external onlyOwner {
+        if (!_isWhitelisted[token]) {
+            _isWhitelisted[token] = true;
+            _whitelistedTokens.push(token);
+        }
+    }
+
+    function removeWhitelistedToken(address token) external onlyOwner {
+        if (_isWhitelisted[token]) {
+            _isWhitelisted[token] = false;
+            // keep array for history; tests don’t require pruning
+        }
+    }
+
+    function isTokenWhitelisted(address token) external view returns (bool) {
+        return _isWhitelisted[token];
+    }
+
+    function getWhitelistedTokens() external view returns (address[] memory) {
+        return _whitelistedTokens;
+    }
+
+    // ===================== Fees and commissions =====================
+    // Public vars create getters matching interface names
+    uint256 public donationCommission;   // bps
+    uint256 public successCommission;    // bps
+    uint256 public refundCommission;     // bps
+    uint256 public extensionFee;         // absolute amount
+    address public feeToken;             // ERC20 for fees
+    address public commissionWallet;     // receiver
+
+    // Overload: some tests call setCommissions(uint256) to set refund only
+    function setCommissions(uint256 _refundCommission) external onlyOwner {
+        require(_refundCommission <= MAX_COMMISSION_RATE, "refund > max");
+        refundCommission = _refundCommission;
+    }
+
+    function setCommissions(
+        uint256 _donationCommission,
+        uint256 _successCommission,
+        uint256 _refundCommission
+    ) external onlyOwner {
+        require(_donationCommission <= MAX_COMMISSION_RATE, "donation > max");
+        require(_successCommission <= MAX_COMMISSION_RATE, "success > max");
+        require(_refundCommission <= MAX_COMMISSION_RATE, "refund > max");
+        donationCommission = _donationCommission;
+        successCommission = _successCommission;
+        refundCommission = _refundCommission;
+    }
+
+    function setExtensionFee(uint256 _extensionFee) external onlyOwner {
+        require(_extensionFee <= MAX_EXTENSION_FEE, "fee > max");
+        extensionFee = _extensionFee;
+    }
+
+    function setCommissionWallet(address _commissionWallet) external onlyOwner {
+        require(_commissionWallet != address(0), "zero wallet");
+        commissionWallet = _commissionWallet;
+    }
+
+    function setFeeToken(address _feeToken) external onlyOwner {
+        require(_feeToken != address(0), "zero token");
+        feeToken = _feeToken;
+    }
+
+    function getFeeInfo()
+        external
+        view
+        returns (
+            uint256 donationCommissionRate,
+            uint256 successCommissionRate,
+            uint256 refundCommissionRate,
+            uint256 extensionFeeAmount,
+            address feeTokenAddress,
+            address commissionWalletAddress
+        )
+    {
+        return (
+            donationCommission,
+            successCommission,
+            refundCommission,
+            extensionFee,
+            feeToken,
+            commissionWallet
+        );
+    }
+
+    // ===================== Modules =====================
+    mapping(bytes32 => address) internal _modules;
+
+    function setModule(bytes32 moduleKey, address moduleAddress) external onlyOwner {
+        _modules[moduleKey] = moduleAddress;
+    }
+
+    // Convenience bulk setter to satisfy interface
+    function setModules(
+        address governance,
+        address media,
+        address updates,
+        address refunds,
+        address security,
+        address web3,
+        address analytics
+    ) external onlyOwner {
+        _modules[keccak256("GOVERNANCE")] = governance;
+        _modules[keccak256("MEDIA")] = media;
+        _modules[keccak256("UPDATES")] = updates;
+        _modules[keccak256("REFUNDS")] = refunds;
+        _modules[keccak256("SECURITY")] = security;
+        _modules[keccak256("WEB3")] = web3;
+        _modules[keccak256("ANALYTICS")] = analytics;
+    }
+
+    function modules(bytes32 moduleKey) external view returns (address) {
+        return _modules[moduleKey];
+    }
+
+    // ===================== Funds release =====================
+    function releaseFunds(address token, address to, uint256 amount) external {
+        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+        require(to != address(0) && amount > 0, "Invalid");
+        IERC20(token).safeTransfer(to, amount);
+        emit FundsReleased(token, to, amount, msg.sender);
+    }
 }
