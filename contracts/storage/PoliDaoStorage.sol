@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "../interfaces/IPoliDaoStructs.sol";
 
 contract PoliDaoStorage is Ownable {
@@ -55,6 +56,32 @@ contract PoliDaoStorage is Ownable {
 
     function isContractAuthorized(address contractAddress) public view returns (bool) {
         return _authorizedContracts[contractAddress];
+    }
+
+    // ===================== Whitelist (MOVED UP BEFORE FUNDRAISERS) =====================
+    address[] internal _whitelistedTokens;
+    mapping(address => bool) internal _isWhitelisted;
+
+    function addWhitelistedToken(address token) external onlyOwner {
+        if (!_isWhitelisted[token]) {
+            _isWhitelisted[token] = true;
+            _whitelistedTokens.push(token);
+        }
+    }
+
+    function removeWhitelistedToken(address token) external onlyOwner {
+        if (_isWhitelisted[token]) {
+            _isWhitelisted[token] = false;
+            // keep array for history; tests don't require pruning
+        }
+    }
+
+    function isTokenWhitelisted(address token) public view returns (bool) {
+        return _isWhitelisted[token];
+    }
+
+    function getWhitelistedTokens() external view returns (address[] memory) {
+        return _whitelistedTokens;
     }
 
     // ===================== Fundraisers =====================
@@ -180,20 +207,50 @@ contract PoliDaoStorage is Ownable {
         fundraiserDescriptions[fundraiserId] = newDescription;
     }
 
-    // Donor-related
-    function addDonation(uint256 fundraiserId, address donor, uint256 amount) external {
-        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
-        require(donor != address(0) && amount > 0, "Invalid donation");
-
+    /**
+     * @notice Add donation to fundraiser
+     * @param fundraiserId The fundraiser ID
+     * @param donor The donor address
+     * @param amount The donation amount
+     */
+    function addDonation(
+        uint256 fundraiserId,
+        address donor,
+        uint256 amount
+    ) external {
+        require(amount > 0, "Amount must be greater than zero");
+        require(fundraiserId <= fundraiserCounter, "Invalid fundraiser ID");
+        require(fundraiserId > 0, "Fundraiser does not exist");
+        
+        // Get fundraiser data
+        IPoliDaoStructs.PackedFundraiserData storage fundraiser = _fundraisers[fundraiserId];
+        require(fundraiser.status == uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE), "Fundraiser not active");
+        require(block.timestamp < fundraiser.endDate, "Fundraiser ended");
+        
+        // Get the fundraiser's token
+        address tokenAddress = fundraiserTokens[fundraiserId];
+        require(tokenAddress != address(0), "No token set for fundraiser");
+        require(isTokenWhitelisted(tokenAddress), "Token not whitelisted");
+        
+        // Transfer tokens from donor to this contract
+        IERC20(tokenAddress).safeTransferFrom(donor, address(this), amount);
+        
+        // Update donation mapping
         donations[fundraiserId][donor] += amount;
+        
+        // Update raised amount
+        _fundraisers[fundraiserId].raisedAmount += uint128(amount);
+        
+        // Add donor to list if not already present
         if (!_isDonorInList[fundraiserId][donor]) {
             _isDonorInList[fundraiserId][donor] = true;
             _fundraiserDonors[fundraiserId].push(donor);
         }
-
+        
         emit DonationAddedToStorage(fundraiserId, donor, amount);
     }
-
+    
+    // Donor-related
     function updateDonationAmount(uint256 fundraiserId, address donor, uint256 newAmount) external {
         require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
         require(donor != address(0), "Invalid donor");
@@ -206,32 +263,6 @@ contract PoliDaoStorage is Ownable {
 
     function getFundraiserDonors(uint256 fundraiserId) external view returns (address[] memory donors) {
         return _fundraiserDonors[fundraiserId];
-    }
-
-    // ===================== Whitelist =====================
-    address[] internal _whitelistedTokens;
-    mapping(address => bool) internal _isWhitelisted;
-
-    function addWhitelistedToken(address token) external onlyOwner {
-        if (!_isWhitelisted[token]) {
-            _isWhitelisted[token] = true;
-            _whitelistedTokens.push(token);
-        }
-    }
-
-    function removeWhitelistedToken(address token) external onlyOwner {
-        if (_isWhitelisted[token]) {
-            _isWhitelisted[token] = false;
-            // keep array for history; tests don’t require pruning
-        }
-    }
-
-    function isTokenWhitelisted(address token) external view returns (bool) {
-        return _isWhitelisted[token];
-    }
-
-    function getWhitelistedTokens() external view returns (address[] memory) {
-        return _whitelistedTokens;
     }
 
     // ===================== Fees and commissions =====================

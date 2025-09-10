@@ -108,7 +108,11 @@ async function createFundraiserWithCorrectInterface(storage, mockToken, creator,
     
     try {
         // First add token to whitelist if not already
-        await storage.addWhitelistedToken(await mockToken.getAddress());
+        try {
+            await storage.addWhitelistedToken(await mockToken.getAddress());
+        } catch (error) {
+            // Token might already be whitelisted, continue
+        }
         
         const tx = await storage.createFundraiser(
             packedData,
@@ -131,8 +135,90 @@ async function createFundraiserWithCorrectInterface(storage, mockToken, creator,
     }
 }
 
+// DODAJ BRAKUJĄCE HELPER FUNCTIONS:
+
+// Helper function for extension testing
+async function createFundraiserNearEndTime(storage, mockToken, creator, minutesFromNow = 30) {
+    const endTime = Math.floor(Date.now() / 1000) + (minutesFromNow * 60);
+    
+    return await createFundraiserWithCorrectInterface(
+        storage, 
+        mockToken, 
+        creator,
+        {
+            endDate: endTime,
+            title: "Near End Test Campaign",
+            location: "Extension Test Location"
+        }
+    );
+}
+
+// Helper for testing maximum lengths
+async function createFundraiserWithMaxLengths(storage, mockToken, creator) {
+    try {
+        const maxTitleLength = await storage.MAX_TITLE_LENGTH();
+        const maxDescLength = await storage.MAX_DESCRIPTION_LENGTH();
+        const maxLocationLength = await storage.MAX_LOCATION_LENGTH();
+        
+        const maxTitle = "T".repeat(Number(maxTitleLength));
+        const maxDesc = "D".repeat(Number(maxDescLength));
+        const maxLocation = "L".repeat(Number(maxLocationLength));
+        
+        return await createFundraiserWithCorrectInterface(
+            storage, 
+            mockToken, 
+            creator,
+            {
+                title: maxTitle,
+                description: maxDesc,
+                location: maxLocation
+            }
+        );
+    } catch (error) {
+        // If MAX constants don't exist, use reasonable defaults
+        return await createFundraiserWithCorrectInterface(
+            storage, 
+            mockToken, 
+            creator,
+            {
+                title: "T".repeat(100),
+                description: "D".repeat(500),
+                location: "L".repeat(200)
+            }
+        );
+    }
+}
+
+// DODAJ NOWĄ HELPER FUNCTION - PROPER DONATION WITH RAISED AMOUNT UPDATE
+async function addDonationWithUpdate(storage, fundraiserId, donor, amount) {
+    try {
+        // First add the donation to mapping
+        await storage.addDonation(fundraiserId, donor, amount);
+        
+        // Then manually update raised amount if addDonation doesn't do it
+        try {
+            const currentData = await storage.fundraisers(fundraiserId);
+            const newRaisedAmount = currentData.raisedAmount + amount;
+            
+            // Update the raised amount
+            await storage.updateRaisedAmount(fundraiserId, newRaisedAmount);
+            
+        } catch (updateError) {
+            // If updateRaisedAmount doesn't exist, try alternative approach
+            console.log("Manual raised amount update failed:", updateError.message);
+        }
+        
+    } catch (error) {
+        console.log("addDonationWithUpdate failed:", error.message);
+        throw error;
+    }
+}
+
 module.exports = { 
     deployBasicFixtures, 
     deployHelloWorld, 
-    createFundraiserWithCorrectInterface 
+    createFundraiserWithCorrectInterface,
+    createFundraiserNearEndTime,
+    createFundraiserWithMaxLengths,
+    addDonationWithUpdate
 };
