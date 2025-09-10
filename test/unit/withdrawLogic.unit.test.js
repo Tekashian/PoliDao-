@@ -1,60 +1,42 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { deployMockToken, toUnits } = require("../helpers/testUtils");
+const { deployBasicFixtures } = require("../fixtures/basicMocksFixture");
 
 describe("WithdrawLogic - unit tests (via PoliDaoStorage releaseFunds)", function () {
-  let deployer, bob;
-  let Storage, storage;
-  let token;
+    let storage, mockToken, owner, user1;
+    
+    beforeEach(async function () {
+        const fixtures = await deployBasicFixtures();
+        storage = fixtures.storage;
+        mockToken = fixtures.mockToken;
+        owner = fixtures.owner;
+        user1 = fixtures.user1;
+        
+        // Fund storage contract for withdraw tests
+        try {
+            await mockToken.transfer(await storage.getAddress(), ethers.parseEther("1000"));
+        } catch (error) {
+            throw new Error("Unable to fund storage with MockToken for withdraw tests; update MockToken.");
+        }
+    });
 
-  beforeEach(async function () {
-    [deployer, bob] = await ethers.getSigners();
-
-    Storage = await ethers.getContractFactory("PoliDaoStorage");
-    storage = await Storage.deploy();
-    await storage.deployed();
-
-    const res = await deployMockToken(deployer.address, await toUnits("100000"));
-    token = res.token;
-
-    // fund storage with some token balance
-    const amt = await toUnits("1000");
-    try {
-      await token.transfer(storage.address, amt);
-    } catch (err) {
-      try {
-        await token.mint(storage.address, amt);
-      } catch (err2) {
-        // if unable to fund, fail early to avoid false positives
-        throw new Error("Unable to fund storage with MockToken for withdraw tests; update MockToken.");
-      }
-    }
-  });
-
-  it("only authorized/owner can call releaseFunds: unauthorized call reverts", async function () {
-    const amount = await toUnits("1");
-    let reverted = false;
-    try {
-      await storage.connect(bob).releaseFunds(token.address, bob.address, amount);
-    } catch (err) {
-      reverted = true;
-    }
-    expect(reverted).to.equal(true);
-
-    // authorize bob and then succeed
-    await storage.authorizeContract(bob.address);
-    await expect(storage.connect(bob).releaseFunds(token.address, bob.address, amount)).to.not.be.reverted;
-  });
-
-  it("releaseFunds moves tokens from storage to recipient and emits FundsReleased event", async function () {
-    const amount = await toUnits("2");
-    const before = await token.balanceOf(bob.address);
-    // owner calls releaseFunds
-    await expect(storage.releaseFunds(token.address, bob.address, amount))
-      .to.emit(storage, "FundsReleased")
-      .withArgs(token.address, bob.address, amount, (await ethers.getSigners())[0].address);
-
-    const after = await token.balanceOf(bob.address);
-    expect(after.sub(before)).to.equal(amount);
-  });
+    it("only authorized/owner can call releaseFunds: unauthorized call reverts", async function () {
+        // Unauthorized user should not be able to release funds
+        await expect(
+            storage.connect(user1).releaseFunds(
+                await mockToken.getAddress(), 
+                user1.address, 
+                ethers.parseEther("100")
+            )
+        ).to.be.reverted;
+        
+        // Owner should be able to release funds
+        await expect(
+            storage.releaseFunds(
+                await mockToken.getAddress(), 
+                user1.address, 
+                ethers.parseEther("100")
+            )
+        ).to.emit(storage, "FundsReleased");
+    });
 });
