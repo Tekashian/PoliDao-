@@ -7,14 +7,14 @@ import "../libraries/LocationLogic.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
- * @title PoliDaoExtensions
+ * @title PoliDaoExtension
  * @notice Extension features for PoliDAO platform - handles advanced functionality
  * @dev Uses unified storage pattern with extension logic libraries
  * @author PoliDAO Team
  * @custom:version 1.0.0-UNIFIED
  * @custom:security-contact security@polidao.org
  */
-contract PoliDaoExtensions is ReentrancyGuard {
+contract PoliDaoExtension is ReentrancyGuard {
     
     // ========== STORAGE AND DEPENDENCIES ==========
     
@@ -33,7 +33,7 @@ contract PoliDaoExtensions is ReentrancyGuard {
     
     /// @notice Ensures only core contract can call certain functions
     modifier onlyCore() {
-        require(msg.sender == coreContract, "PoliDaoExtensions: Only core contract");
+        require(msg.sender == coreContract, "PoliDaoExtension: Only core contract");
         _;
     }
     
@@ -42,7 +42,7 @@ contract PoliDaoExtensions is ReentrancyGuard {
         require(
             msg.sender == coreContract || 
             storageContract.isContractAuthorized(msg.sender),
-            "PoliDaoExtensions: Not authorized"
+            "PoliDaoExtension: Not authorized"
         );
         _;
     }
@@ -56,8 +56,8 @@ contract PoliDaoExtensions is ReentrancyGuard {
      */
     // legacy constructor
     constructor(address _storageContract, address _coreContract) {
-        require(_storageContract != address(0), "PoliDaoExtensions: Invalid storage contract");
-        require(_coreContract != address(0), "PoliDaoExtensions: Invalid core contract");
+        require(_storageContract != address(0), "PoliDaoExtension: Invalid storage contract");
+        require(_coreContract != address(0), "PoliDaoExtension: Invalid core contract");
         storageContract = PoliDaoStorage(_storageContract);
         coreContract = _coreContract;
     }
@@ -66,9 +66,9 @@ contract PoliDaoExtensions is ReentrancyGuard {
     bool private _initialized;
 
     function initialize(address _storageContract, address _coreContract) external {
-        require(!_initialized, "PoliDaoExtensions: already initialized");
-        require(_storageContract != address(0), "PoliDaoExtensions: Invalid storage contract");
-        require(_coreContract != address(0), "PoliDaoExtensions: Invalid core contract");
+        require(!_initialized, "PoliDaoExtension: already initialized");
+        require(_storageContract != address(0), "PoliDaoExtension: Invalid storage contract");
+        require(_coreContract != address(0), "PoliDaoExtension: Invalid core contract");
         _initialized = true;
         storageContract = PoliDaoStorage(_storageContract);
         coreContract = _coreContract;
@@ -126,7 +126,7 @@ contract PoliDaoExtensions is ReentrancyGuard {
         address caller
     ) external onlyAuthorized {
         address securityModule = storageContract.modules(keccak256("SECURITY_MODULE"));
-        require(securityModule != address(0), "PoliDaoExtensions: Security module not set");
+        require(securityModule != address(0), "PoliDaoExtension: Security module not set");
         
         // Delegate to security module
         (bool success,) = securityModule.delegatecall(
@@ -137,7 +137,7 @@ contract PoliDaoExtensions is ReentrancyGuard {
                 caller
             )
         );
-        require(success, "PoliDaoExtensions: Suspension failed");
+        require(success, "PoliDaoExtension: Suspension failed");
     }
     
     /**
@@ -148,7 +148,7 @@ contract PoliDaoExtensions is ReentrancyGuard {
     function unsuspendFundraiser(uint256 fundraiserId, address caller) 
         external onlyAuthorized {
         address securityModule = storageContract.modules(keccak256("SECURITY_MODULE"));
-        require(securityModule != address(0), "PoliDaoExtensions: Security module not set");
+        require(securityModule != address(0), "PoliDaoExtension: Security module not set");
         
         // Delegate to security module
         (bool success,) = securityModule.delegatecall(
@@ -158,7 +158,7 @@ contract PoliDaoExtensions is ReentrancyGuard {
                 caller
             )
         );
-        require(success, "PoliDaoExtensions: Unsuspension failed");
+        require(success, "PoliDaoExtension: Unsuspension failed");
     }
     
     // ========== VIEW FUNCTIONS ==========
@@ -318,7 +318,7 @@ contract PoliDaoExtensions is ReentrancyGuard {
      */
     function emergencyPause() external view onlyCore {
         // Placeholder for future emergency functionality
-        revert("PoliDaoExtensions: Emergency pause not implemented");
+        revert("PoliDaoExtension: Emergency pause not implemented");
     }
     
     /**

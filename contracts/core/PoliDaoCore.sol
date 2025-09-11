@@ -93,11 +93,15 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     /**
      * @notice Initializes the core contract
      * @param _storageContract Address of the unified storage contract
+     * @param _routerContract Address of the router contract
      */
     // Keep constructor for legacy direct deployments
-    constructor(address _storageContract) Ownable(msg.sender) {
+    constructor(address _storageContract, address _routerContract) Ownable(msg.sender) {
         require(_storageContract != address(0), "PoliDaoCore: Invalid storage contract");
+        require(_routerContract != address(0), "PoliDaoCore: Invalid router contract");
+        
         storageContract = IPoliDaoStorage(_storageContract);
+        routerContract = _routerContract;
     }
 
     // initializer for clone deployments
