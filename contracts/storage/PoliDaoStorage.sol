@@ -143,6 +143,8 @@ contract PoliDaoStorage is Ownable {
         address token
     ) external returns (uint256 fundraiserId) {
         require(creator != address(0), "Invalid creator");
+        require(token != address(0), "Invalid token");
+        require(isTokenWhitelisted(token), "Token not whitelisted");
         fundraiserId = _createFundraiserInternal(
             data, title, description, location, creator, token
         );
@@ -150,6 +152,8 @@ contract PoliDaoStorage is Ownable {
 
     // Starter: prosty wariant używany w testach/demach
     function createFundraiser(address token) external returns (uint256 fundraiserId) {
+        require(token != address(0), "Invalid token");
+        require(isTokenWhitelisted(token), "Token not whitelisted");
         IPoliDaoStructs.PackedFundraiserData memory data = IPoliDaoStructs.PackedFundraiserData({
             goalAmount: 0,
             raisedAmount: 0,
@@ -158,14 +162,14 @@ contract PoliDaoStorage is Ownable {
             id: 0,
             suspensionTime: 0,
             extensionCount: 0,
-            fundraiserType: 0,
+            fundraiserType: uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL),
             status: uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE),
             isSuspended: false,
             fundsWithdrawn: false,
             isFlexible: false
         });
         fundraiserId = _createFundraiserInternal(
-            data, "", "", "", msg.sender, token
+            data, "Starter Campaign", "Created via starter", "N/A", msg.sender, token
         );
     }
 

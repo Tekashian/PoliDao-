@@ -185,6 +185,12 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         });
 
         // Create fundraiser in storage (packed data + metadata + creator + token)
+        // +++ Enforce whitelist at core level as well (defense in depth)
+        require(
+            storageContract.isTokenWhitelisted(data.token),
+            "PoliDaoCore: Token not whitelisted"
+        );
+
         fundraiserId = storageContract.createFundraiser(
             packed,
             data.title,
@@ -600,36 +606,25 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         _unpause(); 
     }
     
-    // ========== PASSTHROUGH FUNCTIONS FOR COMPATIBILITY ==========
-    
-    /**
-     * @notice Adds a token to the whitelist
-     */
+    // ========== TOKEN WHITELIST MANAGEMENT (delegation to storage) ==========
+
     function whitelistToken(address token) external onlyOwner {
+        require(token != address(0), "Invalid token");
         storageContract.addWhitelistedToken(token);
     }
-    
-    /**
-     * @notice Gets all whitelisted tokens
-     */
-    function getWhitelistedTokens() external view returns (address[] memory) { 
-        return storageContract.getWhitelistedTokens(); 
+
+    function removeWhitelistToken(address token) external onlyOwner {
+        storageContract.removeWhitelistedToken(token);
     }
-    
-    /**
-     * @notice Gets fee and commission information
-     */
-    function getFeeInfo() external view returns (
-        uint256 donationCommissionRate, 
-        uint256 successCommissionRate, 
-        uint256 refundCommissionRate, 
-        uint256 extensionFeeAmount, 
-        address feeTokenAddress, 
-        address commissionWalletAddress
-    ) { 
-        return storageContract.getFeeInfo();
+
+    function isTokenWhitelisted(address token) external view returns (bool) {
+        return storageContract.isTokenWhitelisted(token);
     }
-    
+
+    function getWhitelistedTokens() external view returns (address[] memory) {
+        return storageContract.getWhitelistedTokens();
+    }
+
     // ========== INTERNAL HELPER FUNCTIONS ==========
     
     /**

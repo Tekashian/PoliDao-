@@ -17,12 +17,16 @@ interface IPoliDao is IPoliDaoStructs {
      * @param data Fundraiser creation data
      * @return fundraiserId The ID of the created fundraiser
      */
-    function createFundraiser(FundraiserCreationData calldata data) 
-        external 
-        returns (uint256 fundraiserId);
-    
+    function createFundraiser(
+        PackedFundraiserData memory data,
+        string memory title,
+        string memory description,
+        string memory location,
+        address token
+    ) external returns (uint256 fundraiserId);
+
     /**
-     * @notice Donate to a fundraiser
+     * @notice Makes a donation to a fundraiser
      * @param fundraiserId The fundraiser ID
      * @param amount The donation amount
      */
