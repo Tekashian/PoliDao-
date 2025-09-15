@@ -1,34 +1,50 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-// Use minimal interfaces to avoid pulling full contract bytecode into the factory
+import "../interfaces/IExtensionSecurityAdmin.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
+
+// Minimal interfaces używane przez Factory (dopasowane do wywołań w pliku)
 interface IStorageInit {
-    function initialize(address _commissionWalletArg, address _feeTokenArg, address _initialTokenArg, address initialOwner) external;
-    function authorizeContract(address contractAddr) external;
+    // initializer
+    function initialize(address commissionWallet, address feeToken, address initialToken, address initialOwner) external;
+    // auth
+    function authorizeContract(address contractAddress) external;
     function setAuthorizedRouter(address router) external;
+    // ownership
     function transferOwnership(address newOwner) external;
     function owner() external view returns (address);
 }
 
 interface ICoreInit {
-    function initialize(address _storageContract, address initialOwner) external;
-    function setExtensionsContract(address _extensionsContract) external;
-    function setRouterContract(address _routerContract) external;
+    // initializer
+    function initialize(address storageContract, address initialOwner) external;
+    // wiring
+    function setExtensionsContract(address extensions) external;
+    function setRouterContract(address router) external;
+    // modules
+    function setModules(
+        address governance,
+        address media,
+        address updates,
+        address refunds,
+        address security,
+        address web3,
+        address analytics
+    ) external;
+    // ownership
     function transferOwnership(address newOwner) external;
-    function setModules(address governance, address media, address updates, address refunds, address security, address web3, address analytics) external;
     function owner() external view returns (address);
 }
 
 interface IExtensionsInit {
-    function initialize(address _storageContract, address _coreContract) external;
+    function initialize(address storageContract, address coreContract) external;
 }
 
 interface IRouterInit {
-    function initialize(address _coreContract, address initialOwner) external;
+    function initialize(address coreContract, address initialOwner) external;
 }
-import "@openzeppelin/contracts/proxy/Clones.sol";
 
 /**
  * @title PoliDaoFactory
@@ -239,7 +255,6 @@ contract PoliDaoFactory is Ownable {
         ModuleAddresses calldata modules
     ) public {
         require(deploymentId <= deployedSystemsCount && deploymentId > 0, "PoliDaoFactory: Invalid deployment ID");
-        
         DeployedSystem storage system = deployedSystems[deploymentId];
         require(system.deployer == msg.sender, "PoliDaoFactory: Only deployer can configure");
         require(!system.isConfigured, "PoliDaoFactory: Already configured");
@@ -263,16 +278,21 @@ contract PoliDaoFactory is Ownable {
             modules.web3,
             modules.analytics
         );
-        
-        // Authorize modules in storage contract
-    IStorageInit(system.storageContract).authorizeContract(modules.analytics);
-    IStorageInit(system.storageContract).authorizeContract(modules.governance);
-    IStorageInit(system.storageContract).authorizeContract(modules.media);
-    IStorageInit(system.storageContract).authorizeContract(modules.refunds);
-    IStorageInit(system.storageContract).authorizeContract(modules.security);
-    IStorageInit(system.storageContract).authorizeContract(modules.updates);
-    IStorageInit(system.storageContract).authorizeContract(modules.web3);
-        
+
+        IStorageInit(system.storageContract).authorizeContract(modules.analytics);
+        IStorageInit(system.storageContract).authorizeContract(modules.governance);
+        IStorageInit(system.storageContract).authorizeContract(modules.media);
+        IStorageInit(system.storageContract).authorizeContract(modules.refunds);
+        IStorageInit(system.storageContract).authorizeContract(modules.security);
+        IStorageInit(system.storageContract).authorizeContract(modules.updates);
+        IStorageInit(system.storageContract).authorizeContract(modules.web3);
+
+        // [HARDEN] Whitelist + set + freeze modułu bezpieczeństwa w Extension
+        IExtensionSecurityAdmin extAdmin = IExtensionSecurityAdmin(system.extensionsContract);
+        extAdmin.setSecurityModuleWhitelist(modules.security, true);
+        extAdmin.setSecurityModule(modules.security);
+        extAdmin.freezeSecurityModule();
+
         // Mark as configured
         system.isConfigured = true;
         
