@@ -5,16 +5,14 @@ import "../storage/PoliDaoStorage.sol";
 import "../libraries/ExtensionLogic.sol";
 import "../libraries/LocationLogic.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-/**
- * @title PoliDaoExtension
- * @notice Extension features for PoliDAO platform - handles advanced functionality
- * @dev Uses unified storage pattern with extension logic libraries
- * @author PoliDAO Team
- * @custom:version 1.0.0-UNIFIED
- * @custom:security-contact security@polidao.org
- */
-contract PoliDaoExtension is ReentrancyGuard {
+// Minimal interface to read owner from core
+interface IOwned {
+    function owner() external view returns (address);
+}
+
+contract PoliDaoExtension is Ownable, ReentrancyGuard {
     
     // ========== STORAGE AND DEPENDENCIES ==========
     
@@ -24,6 +22,35 @@ contract PoliDaoExtension is ReentrancyGuard {
     /// @notice Core contract address
     address public coreContract;
     
+    // Zabezpieczenia modułu bezpieczeństwa
+    address public securityModule;
+    bool public securityModuleFrozen;
+    mapping(address => bool) private securityModuleWhitelist;
+
+    event SecurityModuleUpdated(address indexed newModule);
+    event SecurityModuleFrozen();
+    event SecurityModuleWhitelistUpdated(address indexed module, bool allowed);
+
+    // Stałe selektory – delegatecall tylko do dozwolonych funkcji
+    bytes4 private constant SELECTOR_SUSPEND =
+        bytes4(keccak256("suspendFundraiser(uint256,string,address)"));
+    bytes4 private constant SELECTOR_UNSUSPEND =
+        bytes4(keccak256("unsuspendFundraiser(uint256,address)"));
+
+    function _isSelectorAllowed(bytes4 sel) internal pure returns (bool) {
+        return sel == SELECTOR_SUSPEND || sel == SELECTOR_UNSUSPEND;
+    }
+
+    function _forwardSecurityCall(bytes4 selector, bytes memory data) internal returns (bytes memory) {
+        require(securityModule != address(0), "Extension: securityModule not set");
+        require(securityModuleWhitelist[securityModule], "Extension: module not whitelisted");
+        require(_isSelectorAllowed(selector), "Extension: selector not allowed");
+
+        (bool ok, bytes memory ret) = securityModule.call(data); // no delegatecall
+        require(ok, "Extension: security call failed");
+        return ret;
+    }
+
     // ========== EVENTS ==========
     
     /// @notice Emitted when core contract is updated
@@ -55,7 +82,7 @@ contract PoliDaoExtension is ReentrancyGuard {
      * @param _coreContract Address of the core contract
      */
     // legacy constructor
-    constructor(address _storageContract, address _coreContract) {
+    constructor(address _storageContract, address _coreContract) Ownable(msg.sender) {
         require(_storageContract != address(0), "PoliDaoExtension: Invalid storage contract");
         require(_coreContract != address(0), "PoliDaoExtension: Invalid core contract");
         storageContract = PoliDaoStorage(_storageContract);
@@ -65,13 +92,24 @@ contract PoliDaoExtension is ReentrancyGuard {
     // initializer for clone deployments
     bool private _initialized;
 
-    function initialize(address _storageContract, address _coreContract) external {
+    function initialize(address _storageContract, address _coreContract /* , address _securityModule */) external /* initializer/onlyOnce */ {
         require(!_initialized, "PoliDaoExtension: already initialized");
         require(_storageContract != address(0), "PoliDaoExtension: Invalid storage contract");
         require(_coreContract != address(0), "PoliDaoExtension: Invalid core contract");
-        _initialized = true;
+
         storageContract = PoliDaoStorage(_storageContract);
         coreContract = _coreContract;
+
+        // Set owner to Core's owner if available, else to caller (factory EOA via tx)
+        address initialOwner = msg.sender;
+        try IOwned(_coreContract).owner() returns (address coreOwner) {
+            if (coreOwner != address(0)) {
+                initialOwner = coreOwner;
+            }
+        } catch { /* keep msg.sender */ }
+        _transferOwnership(initialOwner);
+
+        _initialized = true;
     }
     
     // ========== EXTENSION FUNCTIONS ==========
@@ -114,53 +152,25 @@ contract PoliDaoExtension is ReentrancyGuard {
         );
     }
     
-    /**
-     * @notice Suspends a fundraiser (delegates to security module)
-     * @param fundraiserId The fundraiser ID
-     * @param reason Suspension reason
-     * @param caller Original caller address
-     */
-    function suspendFundraiser(
-        uint256 fundraiserId, 
-        string calldata reason,
-        address caller
-    ) external onlyAuthorized {
-        address securityModule = storageContract.modules(keccak256("SECURITY_MODULE"));
-        require(securityModule != address(0), "PoliDaoExtension: Security module not set");
-        
-        // Delegate to security module
-        (bool success,) = securityModule.delegatecall(
-            abi.encodeWithSignature(
-                "suspendFundraiser(uint256,string,address)",
-                fundraiserId,
-                reason,
-                caller
-            )
-        );
-        require(success, "PoliDaoExtension: Suspension failed");
+    // Example hardened forwards (call instead of delegatecall + selector restriction)
+    function suspendFundraiser(uint256 fundraiserId, string calldata reason, address caller)
+        external
+        onlyAuthorized
+        nonReentrant
+    {
+        bytes memory data = abi.encodeWithSelector(SELECTOR_SUSPEND, fundraiserId, reason, caller);
+        _forwardSecurityCall(SELECTOR_SUSPEND, data);
     }
-    
-    /**
-     * @notice Unsuspends a fundraiser (delegates to security module)
-     * @param fundraiserId The fundraiser ID
-     * @param caller Original caller address
-     */
-    function unsuspendFundraiser(uint256 fundraiserId, address caller) 
-        external onlyAuthorized {
-        address securityModule = storageContract.modules(keccak256("SECURITY_MODULE"));
-        require(securityModule != address(0), "PoliDaoExtension: Security module not set");
-        
-        // Delegate to security module
-        (bool success,) = securityModule.delegatecall(
-            abi.encodeWithSignature(
-                "unsuspendFundraiser(uint256,address)",
-                fundraiserId,
-                caller
-            )
-        );
-        require(success, "PoliDaoExtension: Unsuspension failed");
+
+    function unsuspendFundraiser(uint256 fundraiserId, address caller)
+        external
+        onlyAuthorized
+        nonReentrant
+    {
+        bytes memory data = abi.encodeWithSelector(SELECTOR_UNSUSPEND, fundraiserId, caller);
+        _forwardSecurityCall(SELECTOR_UNSUSPEND, data);
     }
-    
+
     // ========== VIEW FUNCTIONS ==========
     
     /**
@@ -343,6 +353,29 @@ contract PoliDaoExtension is ReentrancyGuard {
         );
     }
     
+    // Whitelist zarządzana przez ownera
+    function setSecurityModuleWhitelist(address module, bool allowed) external onlyOwner {
+        require(module != address(0), "Extension: zero module");
+        securityModuleWhitelist[module] = allowed;
+        emit SecurityModuleWhitelistUpdated(module, allowed);
+    }
+
+    // Ustawienie modułu bezpieczeństwa – tylko z whitelisty
+    function setSecurityModule(address module) external onlyOwner {
+        require(!securityModuleFrozen, "Extension: securityModule frozen");
+        require(module != address(0), "Extension: zero module");
+        require(securityModuleWhitelist[module], "Extension: not whitelisted");
+        securityModule = module;
+        emit SecurityModuleUpdated(module);
+    }
+
+    // Zamrożenie adresu (brak możliwości zmiany po audycie)
+    function freezeSecurityModule() external onlyOwner {
+        require(securityModule != address(0), "Extension: not set");
+        securityModuleFrozen = true;
+        emit SecurityModuleFrozen();
+    }
+
     // ========== HELPER FUNCTIONS ==========
     
     /**

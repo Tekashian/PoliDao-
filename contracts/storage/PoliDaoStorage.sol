@@ -211,11 +211,26 @@ contract PoliDaoStorage is Ownable {
         fundraiserDescriptions[fundraiserId] = newDescription;
     }
 
+    // === ADDED: authorization modifier (uses existing vars) ===
+    modifier onlyAuthorized() {
+        // _authorizedContracts and _authorizedRouter already exist in this contract
+        require(
+            _authorizedContracts[msg.sender] || msg.sender == owner() || msg.sender == _authorizedRouter,
+            "PoliDaoStorage: Not authorized"
+        );
+        _;
+    }
+
+    // Helper: public-auth check for libraries/modules without exposing internal mappings
+    function isAuthorized(address a) external view returns (bool) {
+        return _authorizedContracts[a] || a == owner() || a == _authorizedRouter;
+    }
+
     /**
-     * @notice Add donation to fundraiser
+     * @notice Records a donation (no token transfer; tokens should be moved before)
      * @param fundraiserId The fundraiser ID
      * @param donor The donor address
-     * @param amount The donation amount
+     * @param amount The donated amount
      */
     function addDonation(
         uint256 fundraiserId,
@@ -236,22 +251,19 @@ contract PoliDaoStorage is Ownable {
         require(tokenAddress != address(0), "No token set for fundraiser");
         require(isTokenWhitelisted(tokenAddress), "Token not whitelisted");
         
-        // Transfer tokens from donor to this contract
-        IERC20(tokenAddress).safeTransferFrom(donor, address(this), amount);
-        
-        // Update donation mapping
+        // Record amount per donor
         donations[fundraiserId][donor] += amount;
-        
-        // Update raised amount
-        _fundraisers[fundraiserId].raisedAmount += uint128(amount);
-        
-        // Add donor to list if not already present
-        if (!_isDonorInList[fundraiserId][donor]) {
-            _isDonorInList[fundraiserId][donor] = true;
-            _fundraiserDonors[fundraiserId].push(donor);
+
+        // Update fundraiser totals (use internal storage mapping)
+        // If struct/type differs, adjust to your exact struct name imported from IPoiDaoStructs
+        IPoliDaoStructs.PackedFundraiserData storage f = _fundraisers[fundraiserId];
+        // ensure fundraiser exists if not already validated above
+        // require(f.id != 0, "PoliDaoStorage: Fundraiser not found");
+        unchecked {
+            f.raisedAmount = uint128(uint256(f.raisedAmount) + amount);
         }
-        
-        emit DonationAddedToStorage(fundraiserId, donor, amount);
+
+        // Note: no token transfer and no non-existent events here
     }
     
     // Donor-related

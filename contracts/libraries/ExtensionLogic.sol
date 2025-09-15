@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../storage/PoliDaoStorage.sol";
 import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title ExtensionLogic
@@ -15,7 +15,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
  */
 library ExtensionLogic {
     using SafeERC20 for IERC20;
-    
+
     // ========== EVENTS ==========
     
     /// @notice Emitted when a fundraiser is extended
@@ -49,8 +49,10 @@ library ExtensionLogic {
         uint256 fundraiserId,
         uint256 additionalDays,
         address caller
-    ) external {
-        
+    ) external returns (uint256 newEndDate) {
+        // SECURITY: prevent arbitrary-from
+        require(msg.sender == caller || store.isAuthorized(msg.sender), "ExtensionLogic: unauthorized");
+
         // ========== VALIDATION ==========
         
         IPoliDaoStructs.PackedFundraiserData memory fundraiser = store.fundraisers(fundraiserId);
@@ -78,10 +80,10 @@ library ExtensionLogic {
         if (extensionFee > 0) {
             address feeToken = store.feeToken();
             address commissionWallet = store.commissionWallet();
-            
-            IERC20(feeToken).safeTransferFrom(caller, commissionWallet, extensionFee);
+            // Kluczowa zmiana: from = msg.sender (nie caller)
+            IERC20(feeToken).safeTransferFrom(msg.sender, commissionWallet, extensionFee);
         }
-        
+
         // ========== UPDATE FUNDRAISER ==========
         
         // Create updated fundraiser data
@@ -100,6 +102,7 @@ library ExtensionLogic {
             additionalDays,
             extensionFee
         );
+        return newEndDate;
     }
     
     /**

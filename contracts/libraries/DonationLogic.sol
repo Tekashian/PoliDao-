@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../storage/PoliDaoStorage.sol";
 import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title DonationLogic
@@ -15,7 +15,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
  */
 library DonationLogic {
     using SafeERC20 for IERC20;
-    
+
     // ========== EVENTS ==========
     
     /// @notice Emitted when a donation is made
@@ -53,7 +53,12 @@ library DonationLogic {
         address donor,
         uint256 amount
     ) external {
-        
+        // SECURITY: prevent arbitrary-from
+        require(
+            msg.sender == donor || store.isAuthorized(msg.sender),
+            "DonationLogic: unauthorized transferFrom(from)"
+        );
+
         // ========== VALIDATION ==========
         
         IPoliDaoStructs.PackedFundraiserData memory fundraiser = store.fundraisers(fundraiserId);
@@ -75,13 +80,16 @@ library DonationLogic {
         if (currentRaised > type(uint128).max - amount) revert RaisedAmountOverflow();
         
         // ========== PROCESS DONATION ==========
-        
-        // Add donation to storage
-        store.addDonation(fundraiserId, donor, amount);
-        
-        // Transfer tokens from donor to this contract
+
+        // Dodatkowa autoryzacja (opcjonalnie zachowaj)
+        require(msg.sender == donor || store.isAuthorized(msg.sender), "DonationLogic: unauthorized");
+
         address token = store.fundraiserTokens(fundraiserId);
-        IERC20(token).safeTransferFrom(donor, address(this), amount);
+
+        // Kluczowa zmiana: from = msg.sender (nie donor)
+        IERC20(token).safeTransferFrom(msg.sender, address(store), amount);
+
+        store.addDonation(fundraiserId, donor, amount);
         
         // ========== EMIT EVENT ==========
         
