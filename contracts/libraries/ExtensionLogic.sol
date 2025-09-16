@@ -49,7 +49,9 @@ library ExtensionLogic {
         uint256 fundraiserId,
         uint256 additionalDays,
         address caller
-    ) external returns (uint256 newEndDate) {
+    )
+        internal
+    {
         // SECURITY: prevent arbitrary-from
         require(msg.sender == caller || store.isAuthorized(msg.sender), "ExtensionLogic: unauthorized");
 
@@ -91,18 +93,11 @@ library ExtensionLogic {
         updatedData.endDate += uint64(additionalDays * 1 days);
         updatedData.extensionCount++;
         
-        // Update in storage
+        // Emit BEFORE external interaction (CEI)
+        emit FundraiserExtended(fundraiserId, updatedData.endDate, additionalDays, extensionFee);
+
+        // External interaction to storage (state write)
         store.updateFundraiser(fundraiserId, updatedData);
-        
-        // ========== EMIT EVENT ==========
-        
-        emit FundraiserExtended(
-            fundraiserId,
-            updatedData.endDate,
-            additionalDays,
-            extensionFee
-        );
-        return newEndDate;
     }
     
     /**

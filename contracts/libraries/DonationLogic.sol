@@ -52,7 +52,9 @@ library DonationLogic {
         uint256 fundraiserId,
         address donor,
         uint256 amount
-    ) external {
+    )
+        internal
+    {
         // SECURITY: prevent arbitrary-from
         require(
             msg.sender == donor || store.isAuthorized(msg.sender),
@@ -89,11 +91,11 @@ library DonationLogic {
         // Kluczowa zmiana: from = msg.sender (nie donor)
         IERC20(token).safeTransferFrom(msg.sender, address(store), amount);
 
-        store.addDonation(fundraiserId, donor, amount);
-        
-        // ========== EMIT EVENT ==========
-        
+        // Emit BEFORE external interaction (CEI)
         emit DonationMade(fundraiserId, donor, token, amount, amount);
+
+        // External interaction to storage (state write)
+        store.addDonation(fundraiserId, donor, amount);
     }
     
     /**

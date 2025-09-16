@@ -3,12 +3,17 @@ pragma solidity ^0.8.20;
 
 import "../interfaces/IPoliDao.sol";
 import "../interfaces/IPoliDaoStorage.sol";
+import "./../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../interfaces/IPoliDaoRefunds.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
+
+import "../libraries/FundraiserLogic.sol";
+import "../storage/PoliDaoStorage.sol";
 
 /**
  * @title PoliDaoCore
@@ -20,6 +25,7 @@ import "../interfaces/IPoliDaoRefunds.sol";
  */
 contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using Address for address;
     
     // ========== STORAGE AND DEPENDENCIES ==========
     
@@ -38,7 +44,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     event FundraiserCreated(
         uint256 indexed fundraiserId,
         address indexed creator,
-        address indexed token,
+        address token,
         string title,
         uint8 fundraiserType,
         uint256 goalAmount,
@@ -68,7 +74,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         string reason,
         uint256 timestamp
     );
-    
+
+    /// @notice Emitted when a module notification is attempted (best-effort)
+    event ModuleNotificationSucceeded(bytes32 indexed moduleKey, address indexed module, bytes4 selector);
+    event ModuleNotificationFailed(bytes32 indexed moduleKey, address indexed module, bytes4 selector, bytes reason);
+
     // ========== MODIFIERS ==========
     
     /// @notice Ensures only router can call certain functions
@@ -152,61 +162,40 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @param data Struct containing all fundraiser creation parameters
      * @return fundraiserId The ID of the newly created fundraiser
      */
-    function createFundraiser(IPoliDaoStructs.FundraiserCreationData calldata data) 
-        external 
+    function createFundraiser(IPoliDaoStructs.FundraiserCreationData memory data)
+        external
         whenNotPaused
         nonReentrant
-        returns (uint256 fundraiserId) 
+        returns (uint256 fundraiserId)
     {
         // Basic input validation
         require(bytes(data.title).length > 0, "PoliDaoCore: Title required");
         require(data.endDate > block.timestamp, "PoliDaoCore: Invalid end date");
         require(storageContract.isTokenWhitelisted(data.token), "PoliDaoCore: Token not whitelisted");
-        
-        // Validate goal amount for fundraisers with goals
-    if (data.fundraiserType == IPoliDaoStructs.FundraiserType.WITH_GOAL) {
+
+        if (data.fundraiserType == IPoliDaoStructs.FundraiserType.WITH_GOAL) {
             require(data.goalAmount > 0, "PoliDaoCore: Goal amount required");
         }
-        
-        // Build packed fundraiser data (storage will assign id)
-        IPoliDaoStructs.PackedFundraiserData memory packed = IPoliDaoStructs.PackedFundraiserData({
-            goalAmount: uint128(data.goalAmount),
-            raisedAmount: uint128(0),
-            endDate: uint64(data.endDate),
-            originalEndDate: uint64(data.endDate),
-            id: uint32(0),
-            suspensionTime: uint32(0),
-            extensionCount: uint16(0),
-            fundraiserType: uint8(data.fundraiserType),
-            status: uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE),
-            isSuspended: false,
-            fundsWithdrawn: false,
-            isFlexible: data.isFlexible
-        });
 
-        // Create fundraiser in storage (packed data + metadata + creator + token)
-        // +++ Enforce whitelist at core level as well (defense in depth)
+        // Removed unused local `packed`
+
         require(
             storageContract.isTokenWhitelisted(data.token),
             "PoliDaoCore: Token not whitelisted"
         );
 
-        fundraiserId = storageContract.createFundraiser(
-            packed,
-            data.title,
-            data.description,
-            data.location,
-            msg.sender,
-            data.token
+        fundraiserId = FundraiserLogic.createFundraiserLogic(
+            PoliDaoStorage(address(storageContract)),
+            data,
+            msg.sender
         );
-        
-        // Notify refunds module if available (use canonical module key "REFUNDS")
+
         _notifyModule("REFUNDS", abi.encodeWithSignature(
             "registerFundraiser(uint256,bool)",
             fundraiserId,
             data.isFlexible
         ));
-        
+
         emit FundraiserCreated(
             fundraiserId,
             msg.sender,
@@ -217,7 +206,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             data.endDate,
             data.location
         );
-        
+
         return fundraiserId;
     }
 
@@ -284,9 +273,10 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     {
         require(extensionsContract != address(0), "PoliDaoCore: Extensions contract not set");
         
-        (bool success, bytes memory returnData) = extensionsContract.call(data);
-        require(success, "PoliDaoCore: Extensions call failed");
-        
+        // Address.functionCall bez errorMessage overload
+        bytes memory returnData = extensionsContract.functionCall(
+            data
+        );
         return returnData;
     }
     
@@ -306,9 +296,10 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         address module = storageContract.modules(moduleKey);
         require(module != address(0), "PoliDaoCore: Module not set");
         
-        (bool success, bytes memory returnData) = module.call(data);
-        require(success, "PoliDaoCore: Module call failed");
-        
+        // Address.functionCall bez errorMessage overload
+        bytes memory returnData = module.functionCall(
+            data
+        );
         return returnData;
     }
     
@@ -326,9 +317,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         address module = storageContract.modules(moduleKey);
         require(module != address(0), "PoliDaoCore: Module not set");
         
-        (bool success, bytes memory returnData) = module.staticcall(data);
-        require(success, "PoliDaoCore: Module call failed");
-        
+        // Address.functionStaticCall bez errorMessage overload
+        bytes memory returnData = Address.functionStaticCall(
+            module,
+            data
+        );
         return returnData;
     }
     
@@ -648,9 +641,26 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     function _notifyModule(string memory moduleKey, bytes memory data) internal {
         address module = storageContract.modules(keccak256(bytes(moduleKey)));
         if (module != address(0)) {
-            // Best effort call, don't revert if it fails
-            (bool success, ) = module.call(data);
-            success; // explicit use to silence compiler warning
+            bytes4 selector;
+            if (data.length >= 4) {
+                assembly { selector := mload(add(data, 32)) }
+            }
+            // capture success/failure bez zwrotki -> brak "unused-return"
+            try this._invokeModule(module, data) {
+                emit ModuleNotificationSucceeded(keccak256(bytes(moduleKey)), module, selector);
+            } catch (bytes memory reason) {
+                emit ModuleNotificationFailed(keccak256(bytes(moduleKey)), module, selector, reason);
+            }
+        }
+    }
+
+    // Wrapper enabling try/catch around Address.functionCall (no return value)
+    function _invokeModule(address module, bytes memory data) external {
+        require(msg.sender == address(this), "PoliDaoCore: only self");
+        bytes memory ret = module.functionCall(data);
+        // Touch the return to avoid unused-return finding
+        if (ret.length > 0) {
+            // no-op
         }
     }
     

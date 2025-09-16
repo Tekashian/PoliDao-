@@ -399,13 +399,12 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         returns (uint256 fundraiserId)
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.createFundraiser(data) returns (uint256 id) {
             fundraiserId = id;
-            lastSuccessfulTransaction = block.timestamp;
             return fundraiserId;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -424,11 +423,11 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         rateLimitDonations
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.donate(fundraiserId, amount) {
-            lastSuccessfulTransaction = block.timestamp;
+            // no state writes after external call
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -446,11 +445,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         extensionsEnabled
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.extendFundraiser(fundraiserId, additionalDays) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -467,11 +465,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.updateLocation(fundraiserId, newLocation) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -487,11 +484,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.withdrawFunds(fundraiserId) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -507,11 +503,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.refund(fundraiserId) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -531,12 +526,12 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         returns (uint256 proposalId)
     {
         _incrementTransactionCount();
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.createProposal(question, duration) returns (uint256 id) {
             proposalId = id;
-            lastSuccessfulTransaction = block.timestamp;
             return proposalId;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -552,11 +547,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         bytes32 /*s*/
     ) external whenNotPaused nonReentrant notBanned donationsEnabled rateLimitDonations {
         _incrementTransactionCount();
-        // Minimal: call core.donate (permit processing not implemented in stub)
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.donate(fundraiserId, amount) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core call failed");
         }
     }
@@ -571,10 +565,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
     {
         _incrementTransactionCount();
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.suspendFundraiser(fundraiserId, reason) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -590,12 +584,12 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         returns (uint256 proposalId)
     {
         _incrementTransactionCount();
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.createProposal(question, duration) returns (uint256 id) {
             proposalId = id;
-            lastSuccessfulTransaction = block.timestamp;
             return proposalId;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -612,11 +606,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.vote(proposalId, support) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -633,11 +626,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.addMediaToFundraiser(fundraiserId, mediaItems) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -673,11 +665,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
     {
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.postUpdate(fundraiserId, content) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }
@@ -694,7 +685,6 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
         donationsEnabled
     {
-        // Apply rate limiting based on batch size
         if (!whitelistedUsers[msg.sender]) {
             uint256 currentWindow = block.timestamp / RATE_LIMIT_WINDOW;
             require(
@@ -703,13 +693,12 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
             );
             userDonationCount[msg.sender][currentWindow] += fundraiserIds.length;
         }
-        
+
         _incrementTransactionCount();
-        
+        lastSuccessfulTransaction = block.timestamp;
+
         try coreContract.batchDonate(fundraiserIds, amounts) {
-            lastSuccessfulTransaction = block.timestamp;
         } catch {
-            failedTransactions++;
             revert("PoliDaoRouter: Core contract call failed");
         }
     }

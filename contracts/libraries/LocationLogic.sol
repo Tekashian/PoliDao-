@@ -41,10 +41,11 @@ library LocationLogic {
     function updateLocation(
         PoliDaoStorage store,
         uint256 fundraiserId,
-        string calldata newLocation,
+        string memory newLocation,
         address caller
-    ) external {
-        
+    )
+        internal
+    {
         // ========== VALIDATION ==========
         
         // Check fundraiser exists
@@ -64,11 +65,11 @@ library LocationLogic {
         
         // ========== UPDATE LOCATION ==========
         
-        store.updateFundraiserLocation(fundraiserId, newLocation);
-        
-        // ========== EMIT EVENT ==========
-        
+        // Emit BEFORE external interaction (CEI)
         emit LocationUpdated(fundraiserId, oldLocation, newLocation);
+
+        // External interaction to storage (state write)
+        store.updateFundraiserLocation(fundraiserId, newLocation);
     }
     
     /**

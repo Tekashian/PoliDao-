@@ -51,9 +51,12 @@ library FundraiserLogic {
      */
     function createFundraiserLogic(
         PoliDaoStorage store,
-        IPoliDaoStructs.FundraiserCreationData calldata data,
+        IPoliDaoStructs.FundraiserCreationData memory data,
         address creator
-    ) external returns (uint256 fundraiserId) {
+    )
+        internal
+        returns (uint256 fundraiserId)
+    {
         
         // ========== INPUT VALIDATION ==========
         
@@ -108,18 +111,8 @@ library FundraiserLogic {
             data.token
         );
         
-        // ========== EMIT EVENT ==========
-        
-        emit FundraiserCreated(
-            fundraiserId,
-            creator,
-            data.token,
-            data.title,
-            uint8(data.fundraiserType),
-            data.goalAmount,
-            data.endDate,
-            data.location
-        );
+        // REMOVE emit here to satisfy CEI in library
+        // emit FundraiserCreated(...);  // deleted
         
         return fundraiserId;
     }
