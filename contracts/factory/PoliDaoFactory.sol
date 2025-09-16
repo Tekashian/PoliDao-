@@ -158,50 +158,20 @@ contract PoliDaoFactory is Ownable {
         // Increment deployment counter
         deployedSystemsCount++;
         deploymentId = deployedSystemsCount;
-        
-        // ========== 1. DEPLOY STORAGE CONTRACT ==========
-    require(storageImplementation != address(0), "PoliDaoFactory: storage implementation not set");
-    // use clones
-    storageContract = Clones.clone(storageImplementation);
-    IStorageInit(storageContract).initialize(commissionWallet, feeToken, initialToken, msg.sender);
-        
-        // ========== 2. DEPLOY CORE CONTRACT ==========
-    require(coreImplementation != address(0), "PoliDaoFactory: core implementation not set");
-    coreContract = Clones.clone(coreImplementation);
-    ICoreInit(coreContract).initialize(storageContract, msg.sender);
-        
-        // ========== 3. DEPLOY EXTENSIONS CONTRACT ==========
-    require(extensionsImplementation != address(0), "PoliDaoFactory: extensions implementation not set");
-    extensionsContract = Clones.clone(extensionsImplementation);
-    IExtensionsInit(extensionsContract).initialize(storageContract, coreContract);
-        
-        // ========== 4. DEPLOY ROUTER CONTRACT ==========
-    require(routerImplementation != address(0), "PoliDaoFactory: router implementation not set");
-    routerContract = Clones.clone(routerImplementation);
-    IRouterInit(routerContract).initialize(coreContract, msg.sender);
-        
-        // ========== 5. CONFIGURE CONNECTIONS ==========
-        
-    // Authorize core and extensions in storage
-    IStorageInit(storageContract).authorizeContract(coreContract);
-    IStorageInit(storageContract).authorizeContract(extensionsContract);
 
-    // Set extensions contract in core
-    ICoreInit(coreContract).setExtensionsContract(extensionsContract);
+        // Ensure implementations set
+        require(storageImplementation != address(0), "PoliDaoFactory: storage implementation not set");
+        require(coreImplementation != address(0), "PoliDaoFactory: core implementation not set");
+        require(extensionsImplementation != address(0), "PoliDaoFactory: extensions implementation not set");
+        require(routerImplementation != address(0), "PoliDaoFactory: router implementation not set");
 
-    // Set router contract in core
-    ICoreInit(coreContract).setRouterContract(routerContract);
+        // 1) Deploy clones (no external calls into untrusted code)
+        storageContract = Clones.clone(storageImplementation);
+        coreContract = Clones.clone(coreImplementation);
+        extensionsContract = Clones.clone(extensionsImplementation);
+        routerContract = Clones.clone(routerImplementation);
 
-    // Set authorized router in storage
-    IStorageInit(storageContract).setAuthorizedRouter(routerContract);
-
-    // ========== 6. TRANSFER OWNERSHIP TO DEPLOYER ==========
-
-    IStorageInit(storageContract).transferOwnership(msg.sender);
-    ICoreInit(coreContract).transferOwnership(msg.sender);
-        
-        // ========== 7. RECORD DEPLOYMENT ==========
-        
+        // 2) CEI — Effects first: record deployment & emit before external interactions
         deployedSystems[deploymentId] = DeployedSystem({
             deployer: msg.sender,
             storageContract: storageContract,
@@ -212,11 +182,8 @@ contract PoliDaoFactory is Ownable {
             systemName: systemName,
             isConfigured: false
         });
-        
         deployerSystems[msg.sender].push(deploymentId);
-        
-        // ========== 8. EMIT EVENT ==========
-        
+
         emit PoliDaoDeployed(
             msg.sender,
             storageContract,
@@ -225,7 +192,28 @@ contract PoliDaoFactory is Ownable {
             routerContract,
             systemName
         );
-        
+
+        // 3) Interactions: initialize & wire contracts (if any call reverts, all above reverts atomowo)
+        IStorageInit(storageContract).initialize(commissionWallet, feeToken, initialToken, msg.sender);
+        ICoreInit(coreContract).initialize(storageContract, msg.sender);
+        IExtensionsInit(extensionsContract).initialize(storageContract, coreContract);
+        IRouterInit(routerContract).initialize(coreContract, msg.sender);
+
+        // Authorize core and extensions in storage
+        IStorageInit(storageContract).authorizeContract(coreContract);
+        IStorageInit(storageContract).authorizeContract(extensionsContract);
+
+        // Wire core <-> extensions/router
+        ICoreInit(coreContract).setExtensionsContract(extensionsContract);
+        ICoreInit(coreContract).setRouterContract(routerContract);
+
+        // Set authorized router in storage
+        IStorageInit(storageContract).setAuthorizedRouter(routerContract);
+
+        // Transfer ownerships to deployer
+        IStorageInit(storageContract).transferOwnership(msg.sender);
+        ICoreInit(coreContract).transferOwnership(msg.sender);
+
         return (
             deploymentId,
             storageContract,
@@ -267,8 +255,23 @@ contract PoliDaoFactory is Ownable {
         require(modules.security != address(0), "PoliDaoFactory: Invalid security module");
         require(modules.updates != address(0), "PoliDaoFactory: Invalid updates module");
         require(modules.web3 != address(0), "PoliDaoFactory: Invalid web3 module");
+
+        // CEI: Effects before Interactions — blokuje reentrancy
+        system.isConfigured = true;
+
+        // Emit przed zewn. wywołaniami (jeśli coś zrevertuje, event też się cofnie)
+        emit ModulesConfigured(
+            system.storageContract,
+            modules.analytics,
+            modules.governance,
+            modules.media,
+            modules.refunds,
+            modules.security,
+            modules.updates,
+            modules.web3
+        );
         
-        // Configure modules in core contract
+        // Interactions
         ICoreInit(system.coreContract).setModules(
             modules.governance,
             modules.media,
@@ -287,26 +290,12 @@ contract PoliDaoFactory is Ownable {
         IStorageInit(system.storageContract).authorizeContract(modules.updates);
         IStorageInit(system.storageContract).authorizeContract(modules.web3);
 
-        // [HARDEN] Whitelist + set + freeze modułu bezpieczeństwa w Extension
         IExtensionSecurityAdmin extAdmin = IExtensionSecurityAdmin(system.extensionsContract);
         extAdmin.setSecurityModuleWhitelist(modules.security, true);
         extAdmin.setSecurityModule(modules.security);
         extAdmin.freezeSecurityModule();
 
-        // Mark as configured
-        system.isConfigured = true;
-        
-        // Emit event
-        emit ModulesConfigured(
-            system.storageContract,
-            modules.analytics,
-            modules.governance,
-            modules.media,
-            modules.refunds,
-            modules.security,
-            modules.updates,
-            modules.web3
-        );
+        // (USUNIĘTO: poprzednie ustawienie system.isConfigured i emit na końcu)
     }
     
     // ========== DEPLOYMENT WITH MODULES ==========
