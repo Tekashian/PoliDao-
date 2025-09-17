@@ -346,11 +346,24 @@ contract PoliDaoStorage is Ownable {
         );
     }
 
-    // ===================== Modules =====================
-    mapping(bytes32 => address) internal _modules;
+    // ===================== MODULE REGISTRY
+    mapping(bytes32 => address) public modules;
 
-    function setModule(bytes32 moduleKey, address moduleAddress) external onlyOwner {
-        _modules[moduleKey] = moduleAddress;
+    event ModuleMappingUpdated(bytes32 indexed key, address indexed oldModule, address indexed newModule);
+
+    /**
+     * @notice Set or clear a module implementation.
+     * Owner: może ustawić dowolny nie‑zerowy lub wyczyścić.
+     * Autoryzowany kontrakt: może tylko czyścić (moduleAddr == 0).
+     */
+    function setModule(bytes32 key, address moduleAddr) external {
+        if (msg.sender != owner()) {
+            require(moduleAddr == address(0) && _authorizedContracts[msg.sender], "PoliDaoStorage: not owner");
+        }
+        address old = modules[key];
+        if (old == moduleAddr) return;
+        modules[key] = moduleAddr;
+        emit ModuleMappingUpdated(key, old, moduleAddr);
     }
 
     // Convenience bulk setter to satisfy interface
@@ -363,17 +376,13 @@ contract PoliDaoStorage is Ownable {
         address web3,
         address analytics
     ) external onlyOwner {
-        _modules[keccak256("GOVERNANCE")] = governance;
-        _modules[keccak256("MEDIA")] = media;
-        _modules[keccak256("UPDATES")] = updates;
-        _modules[keccak256("REFUNDS")] = refunds;
-        _modules[keccak256("SECURITY")] = security;
-        _modules[keccak256("WEB3")] = web3;
-        _modules[keccak256("ANALYTICS")] = analytics;
-    }
-
-    function modules(bytes32 moduleKey) external view returns (address) {
-        return _modules[moduleKey];
+        modules[keccak256("GOVERNANCE")] = governance;
+        modules[keccak256("MEDIA")] = media;
+        modules[keccak256("UPDATES")] = updates;
+        modules[keccak256("REFUNDS")] = refunds;
+        modules[keccak256("SECURITY")] = security;
+        modules[keccak256("WEB3")] = web3;
+        modules[keccak256("ANALYTICS")] = analytics;
     }
 
     // ===================== Funds release =====================

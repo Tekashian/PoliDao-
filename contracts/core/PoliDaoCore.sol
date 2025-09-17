@@ -28,15 +28,21 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     using Address for address;
     
     // ========== STORAGE AND DEPENDENCIES ==========
-    
-    /// @notice Unified storage contract interface
     IPoliDaoStorage public storageContract;
-    
-    /// @notice Extensions contract for advanced functionality
     address public extensionsContract;
-    
-    /// @notice Router contract for cross-module operations
     address public routerContract;
+
+    // ========== MODULE ADDRESSES (ADDED – required for upgrades) ==========
+    address public governanceModule;
+    address public mediaModule;
+    address public updatesModule;
+    address public refundsModule;
+    address public securityModule;
+    address public web3Module;
+    address public analyticsModule;
+
+    // ---- UPGRADE CONTROL ----
+    bool private _modulesMutable = true;
     
     // ========== EVENTS ==========
     
@@ -78,6 +84,10 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     /// @notice Emitted when a module notification is attempted (best-effort)
     event ModuleNotificationSucceeded(bytes32 indexed moduleKey, address indexed module, bytes4 selector);
     event ModuleNotificationFailed(bytes32 indexed moduleKey, address indexed module, bytes4 selector, bytes reason);
+    event ModuleUpgraded(string indexed moduleType, address indexed oldModule, address indexed newModule);
+    event ModuleDisabled(string indexed moduleType, address indexed oldModule);
+    event ModulesLocked();
+    event ModuleDisableFlagSet(bytes32 indexed moduleKey, bool disabled);
 
     // ========== MODIFIERS ==========
     
@@ -97,7 +107,24 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         );
         _;
     }
-    
+
+    modifier onlyAuthorizedOrOwner() {
+        require(
+            msg.sender == owner() ||
+            msg.sender == extensionsContract ||
+            msg.sender == routerContract ||
+            storageContract.isContractAuthorized(msg.sender),
+            "PoliDaoCore: Not authorized"
+        );
+        _;
+    }
+
+    // ========== ACCESS COMPAT (dla testów oczekujących starego komunikatu) ==========
+    modifier onlyOwnerCompat() {
+        require(msg.sender == owner(), "Ownable: caller is not the owner");
+        _;
+    }
+
     // ========== CONSTRUCTOR ==========
     
     /**
@@ -219,11 +246,9 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         external
         whenNotPaused
         nonReentrant
+        onlyAuthorizedOrOwner
     {
-        // Only router or authorized contracts should be able to call this in normal flow; keep minimal check here
         require(storageContract.fundraisers(fundraiserId).id != 0, "PoliDaoCore: Fundraiser not found");
-
-        // Update the end date in storage (best-effort, storage stub will accept update)
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
         f.endDate = f.endDate + uint64(additionalDays * 1 days);
         storageContract.updateFundraiser(fundraiserId, f);
@@ -469,13 +494,20 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     /**
      * @notice Suspend a fundraiser (minimal implementation)
      */
-    function suspendFundraiser(uint256 fundraiserId, string calldata /*reason*/) external whenNotPaused nonReentrant {
+    function suspendFundraiser(uint256 fundraiserId, string calldata reason)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyAuthorizedOrOwner
+    {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
         require(f.id != 0, "PoliDaoCore: Fundraiser not found");
-        f.isSuspended = true;
-        f.suspensionTime = uint32(block.timestamp);
-        storageContract.updateFundraiser(fundraiserId, f);
-        emit FundraiserSuspended(fundraiserId, msg.sender, "suspended via core", block.timestamp);
+        if (!f.isSuspended) {
+            f.isSuspended = true;
+            f.suspensionTime = uint32(block.timestamp);
+            storageContract.updateFundraiser(fundraiserId, f);
+        }
+        emit FundraiserSuspended(fundraiserId, msg.sender, reason, block.timestamp);
     }
     
     /**
@@ -512,11 +544,23 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     /**
      * @notice Batch donate (minimal stub)
      */
-    function batchDonate(uint256[] calldata fundraiserIds, uint256[] calldata amounts) external whenNotPaused nonReentrant {
+    function batchDonate(uint256[] calldata fundraiserIds, uint256[] calldata amounts)
+        external
+        whenNotPaused
+        nonReentrant
+    {
         require(fundraiserIds.length == amounts.length, "PoliDaoCore: Arrays length mismatch");
         for (uint256 i = 0; i < fundraiserIds.length; i++) {
-            // Record donation in storage without token transfer (stub)
-            storageContract.addDonation(fundraiserIds[i], msg.sender, amounts[i]);
+            uint256 fid = fundraiserIds[i];
+            uint256 amount = amounts[i];
+            if (amount == 0) continue;
+            IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fid);
+            if (f.id == 0 || f.status != uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE) || f.isSuspended) continue;
+            if (block.timestamp > f.endDate) continue;
+            address token = storageContract.fundraiserTokens(fid);
+            storageContract.addDonation(fid, msg.sender, amount);
+            IERC20(token).safeTransferFrom(msg.sender, address(storageContract), amount);
+            emit DonationMade(fid, msg.sender, token, amount, amount);
         }
     }
 
@@ -533,13 +577,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @notice Withdraw funds for a fundraiser (minimal implementation)
-+     * @param fundraiserId The fundraiser ID
-+     */
+     * @param fundraiserId The fundraiser ID
+     */
     function withdrawFunds(uint256 fundraiserId) external whenNotPaused nonReentrant {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
         require(f.id != 0, "PoliDaoCore: Fundraiser not found");
-
-        // Mark funds withdrawn in storage (minimal)
         f.fundsWithdrawn = true;
         storageContract.updateFundraiser(fundraiserId, f);
     }
@@ -548,23 +590,23 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @notice Trigger refund period for a fundraiser (minimal implementation)
      * @param fundraiserId The fundraiser ID
      */
-    function refund(uint256 fundraiserId) external whenNotPaused nonReentrant {
-        // Delegate refund orchestration to refunds module
+    function refund(uint256 fundraiserId)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyAuthorizedOrOwner
+    {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
         require(f.id != 0, "PoliDaoCore: Fundraiser not found");
-
-        address refundsModule = storageContract.modules(keccak256(bytes("REFUNDS")));
-        require(refundsModule != address(0), "PoliDaoCore: Refunds module not set");
-
-        // Update status in storage to REFUND_PERIOD so views reflect the change.
+        address refundsMod = _resolveModule("REFUNDS");
         f.status = uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD);
         storageContract.updateFundraiser(fundraiserId, f);
-
-        // Notify refunds module to start closure/refund handling (best-effort)
-        try IPoliDaoRefunds(refundsModule).initiateClosure(fundraiserId, storageContract.fundraiserCreators(fundraiserId), f.endDate) {
-            // proceed silently on success
-        } catch {
-            // best-effort: do not revert core if refunds module fails
+        if (refundsMod != address(0)) {
+            try IPoliDaoRefunds(refundsMod).initiateClosure(
+                fundraiserId,
+                storageContract.fundraiserCreators(fundraiserId),
+                f.endDate
+            ) {} catch {}
         }
     }
     
@@ -574,15 +616,23 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @notice Sets all module addresses at once
      */
     function setModules(
-        address governance, 
-        address media, 
-        address updates, 
-        address refunds,
-        address security,
-        address web3,
-        address analytics
-    ) external onlyOwner {
-        storageContract.setModules(governance, media, updates, refunds, security, web3, analytics);
+        address _governance,
+        address _media,
+        address _updates,
+        address _refunds,
+        address _security,
+        address _web3,
+        address _analytics
+    ) external onlyOwnerCompat {
+        require(governanceModule == address(0) && mediaModule == address(0), "Already initialized");
+        governanceModule = _governance;
+        mediaModule = _media;
+        updatesModule = _updates;
+        refundsModule = _refunds;
+        securityModule = _security;
+        web3Module = _web3;
+        analyticsModule = _analytics;
+        _modulesMutable = true;
     }
     
     /**
@@ -638,19 +688,24 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @param moduleKey The module key
      * @param data The call data
      */
+    /**
+     * @dev Internal helper that resolves a module (state override first, then storage fallback)
+     *      and performs a low-level call. Emits success/failure events.
+     *      If module address is zero → no-op.
+     * @param moduleKey Human‑readable key ("REFUNDS","MEDIA",...)
+     * @param data Encoded calldata for the target module.
+     */
     function _notifyModule(string memory moduleKey, bytes memory data) internal {
-        address module = storageContract.modules(keccak256(bytes(moduleKey)));
-        if (module != address(0)) {
-            bytes4 selector;
-            if (data.length >= 4) {
-                assembly { selector := mload(add(data, 32)) }
-            }
-            // capture success/failure bez zwrotki -> brak "unused-return"
-            try this._invokeModule(module, data) {
-                emit ModuleNotificationSucceeded(keccak256(bytes(moduleKey)), module, selector);
-            } catch (bytes memory reason) {
-                emit ModuleNotificationFailed(keccak256(bytes(moduleKey)), module, selector, reason);
-            }
+        address module = _resolveModule(moduleKey);
+        if (module == address(0)) return;
+
+        bytes4 selector;
+        if (data.length >= 4) { assembly { selector := mload(add(data, 32)) } }
+
+        try this._invokeModule(module, data) {
+            emit ModuleNotificationSucceeded(keccak256(bytes(moduleKey)), module, selector);
+        } catch (bytes memory reason) {
+            emit ModuleNotificationFailed(keccak256(bytes(moduleKey)), module, selector, reason);
         }
     }
 
@@ -662,6 +717,45 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         if (ret.length > 0) {
             // no-op
         }
+    }
+
+    // ---- MODULE STATE FLAGS ----
+    mapping(bytes32 => bool) private _moduleDisabled;
+
+    function isModuleDisabled(string memory label) external view returns (bool) {
+        return _moduleDisabled[_hash(label)];
+    }
+
+    function _hash(string memory s) internal pure returns (bytes32) {
+        return keccak256(bytes(s));
+    }
+
+    // Resolves module address preferring override state variable, falling back to storage mapping.
+    function _resolveModule(string memory moduleKey) internal view returns (address) {
+        bytes32 h = _hash(moduleKey);
+        if (_moduleDisabled[h]) return address(0);
+        if (h == _hash("GOVERNANCE")) {
+            return governanceModule != address(0) ? governanceModule : storageContract.modules(h);
+        }
+        if (h == _hash("MEDIA")) {
+            return mediaModule != address(0) ? mediaModule : storageContract.modules(h);
+        }
+        if (h == _hash("UPDATES")) {
+            return updatesModule != address(0) ? updatesModule : storageContract.modules(h);
+        }
+        if (h == _hash("REFUNDS")) {
+            return refundsModule != address(0) ? refundsModule : storageContract.modules(h);
+        }
+        if (h == _hash("SECURITY")) {
+            return securityModule != address(0) ? securityModule : storageContract.modules(h);
+        }
+        if (h == _hash("WEB3")) {
+            return web3Module != address(0) ? web3Module : storageContract.modules(h);
+        }
+        if (h == _hash("ANALYTICS")) {
+            return analyticsModule != address(0) ? analyticsModule : storageContract.modules(h);
+        }
+        return storageContract.modules(h);
     }
     
     // ========== CONTRACT STATUS AND DIAGNOSTICS ==========
@@ -715,4 +809,101 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         
         return (true, "");
     }
+
+    // DODAJ (helpery – sekcja internal)
+    function _assertMutable() internal view {
+        require(_modulesMutable, "Modules locked");
+    }
+
+    function _moduleKey(string memory label) internal pure returns (bytes32) {
+        return keccak256(bytes(label));
+    }
+
+    function _upgradeModule(string memory label, address oldAddr, address newAddr) internal {
+        bytes32 key = _moduleKey(label);
+
+        // Idempotent disable: jeśli prosisz o 0 i już 0 -> upewnij się, że flaga ustawiona i spróbuj jeszcze raz wyczyścić mapping
+        if (oldAddr == newAddr) {
+            if (newAddr == address(0)) {
+                // flag
+                if (!_moduleDisabled[key]) {
+                    _moduleDisabled[key] = true;
+                    emit ModuleDisabled(label, oldAddr);
+                }
+                // best-effort clear
+                try storageContract.setModule(key, address(0)) {} catch {}
+            }
+            return;
+        }
+
+        if (newAddr == address(0)) {
+            _moduleDisabled[key] = true;
+            emit ModuleDisabled(label, oldAddr);
+            // best-effort clear legacy mapping
+            try storageContract.setModule(key, address(0)) {} catch {}
+            return;
+        }
+
+        require(_hasCode(newAddr), "Not a contract");
+        _moduleDisabled[key] = false;
+        emit ModuleUpgraded(label, oldAddr, newAddr);
+
+        // Best-effort authorize + sync mapping (nie rewertuj przy braku uprawnień)
+        if (!_isAuthorized(newAddr)) {
+            try storageContract.authorizeContract(newAddr) {} catch {}
+        }
+        try storageContract.setModule(key, newAddr) {} catch {}
+    }
+
+    function _isAuthorized(address a) internal view returns (bool) {
+        return storageContract.isContractAuthorized(a);
+    }
+
+    function upgradeGovernanceModule(address newAddr) external onlyOwnerCompat {
+        _assertMutable();
+        _upgradeModule("GOVERNANCE", governanceModule, newAddr);
+        governanceModule = newAddr;
+    }
+    function upgradeMediaModule(address newAddr) external onlyOwnerCompat {
+        _assertMutable();
+        _upgradeModule("MEDIA", mediaModule, newAddr);
+        mediaModule = newAddr;
+    }
+    function upgradeUpdatesModule(address newAddr) external onlyOwnerCompat {
+        _assertMutable();
+        _upgradeModule("UPDATES", updatesModule, newAddr);
+        updatesModule = newAddr;
+    }
+    function upgradeRefundsModule(address newAddr) external onlyOwnerCompat {
+        _assertMutable();
+        _upgradeModule("REFUNDS", refundsModule, newAddr);
+        refundsModule = newAddr;
+    }
+    function upgradeSecurityModule(address newAddr) external onlyOwnerCompat {
+        _assertMutable();
+        _upgradeModule("SECURITY", securityModule, newAddr);
+        securityModule = newAddr;
+    }
+    function upgradeWeb3Module(address newAddr) external onlyOwnerCompat {
+        _assertMutable();
+        _upgradeModule("WEB3", web3Module, newAddr);
+        web3Module = newAddr;
+    }
+    function upgradeAnalyticsModule(address newAddr) external onlyOwnerCompat {
+        _assertMutable();
+        _upgradeModule("ANALYTICS", analyticsModule, newAddr);
+        analyticsModule = newAddr;
+    }
+
+    function lockModuleUpgrades() external onlyOwnerCompat {
+        _modulesMutable = false;
+        emit ModulesLocked();
+    }
+
+    function areModuleUpgradesOpen() external view returns (bool) {
+        return _modulesMutable;
+    }
+
+    // (PRZY każdym miejscu gdzie wywołujesz moduł – owiń:)
+    // if (mediaModule != address(0)) { IMedia(mediaModule).whatever(...); }
 }
