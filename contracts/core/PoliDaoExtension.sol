@@ -8,8 +8,9 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "../interfaces/IPoliDaoSecurity.sol";
 import "../interfaces/IPoliDaoStructs.sol";
+import "../interfaces/IExtensionSecurityAdmin.sol"; // <--- DODANE
 
-contract PoliDaoExtension is Ownable, ReentrancyGuard {
+contract PoliDaoExtension is Ownable, ReentrancyGuard, IPoliDaoStructs, IExtensionSecurityAdmin { // <--- rozszerzone dziedziczenie
     // ========== STORAGE AND DEPENDENCIES ==========
     PoliDaoStorage public storageContract;
     address public coreContract;
@@ -22,6 +23,8 @@ contract PoliDaoExtension is Ownable, ReentrancyGuard {
     event SecurityModuleUpdated(address indexed newModule);
     event SecurityModuleFrozen();
     event SecurityModuleWhitelistUpdated(address indexed module, bool allowed);
+    // ========== EVENTS ==========
+    event ExtensionInitialized(address indexed storageContract, address indexed coreContract, address indexed caller); // <--- NOWY EVENT
 
     constructor() Ownable(msg.sender) {}
 
@@ -35,6 +38,7 @@ contract PoliDaoExtension is Ownable, ReentrancyGuard {
         storageContract = PoliDaoStorage(_storageContract);
         coreContract = _coreContract;
         _initialized = true;
+        emit ExtensionInitialized(_storageContract, _coreContract, msg.sender); // <--- EMISJA
     }
 
     // ========== ACCESS CONTROL ==========
