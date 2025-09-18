@@ -48,6 +48,8 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
     // Dodajemy tylko unikalne eventy dla tego kontraktu
     
     event ModulesConfigured(address governance, address media, address updates, address refunds);
+    // NOWY EVENT: zmiana adresu mainContract
+    event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
 
     // ========== MODIFIERS ==========
     
@@ -78,7 +80,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
     
     function setMainContract(address _newMainContract) external onlyOwner {
         require(_newMainContract != address(0), "Invalid address");
+        address prev = mainContract;
+        require(_newMainContract != prev, "No change");
         mainContract = _newMainContract;
+        emit MainContractUpdated(prev, _newMainContract, msg.sender);
     }
     
     function setModules(

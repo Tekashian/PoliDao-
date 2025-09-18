@@ -72,6 +72,9 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     mapping(string => RateLimitConfig) public rateLimitConfigs;
     mapping(address => mapping(string => UserRateLimit)) public userRateLimits;
     
+    // DODANO: event aktualizacji mainContract
+    event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
+    
     // ========== MODIFIERS ==========
     
     modifier onlyMainContract() {
@@ -467,7 +470,10 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     
     function setMainContract(address _newMainContract) external onlyOwner {
         require(_newMainContract != address(0), "Invalid address");
+        address prev = mainContract;
+        require(prev != _newMainContract, "No change");
         mainContract = _newMainContract;
+        emit MainContractUpdated(prev, _newMainContract, msg.sender);
     }
     
     function pause() external onlyOwner { _pause(); }

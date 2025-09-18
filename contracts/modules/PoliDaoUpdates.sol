@@ -39,11 +39,13 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
     mapping(address => uint256) public userUpdateCount;
     
     // ========== EVENTS ==========
-    
+
     event UpdateUnpinned(uint256 indexed fundraiserId, uint256 indexed oldUpdateId);
     event UpdaterAuthorized(uint256 indexed fundraiserId, address indexed updater);
     event UpdaterRevoked(uint256 indexed fundraiserId, address indexed updater);
     event MediaContractUpdated(address indexed oldContract, address indexed newContract);
+    // ADDED: unified main contract update event (used across modules)
+    event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
     
     // ========== MODIFIERS ==========
     
@@ -82,7 +84,10 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
     
     function setMainContract(address _newMainContract) external onlyOwner {
         require(_newMainContract != address(0), "Invalid address");
+        address prev = mainContract;
+        require(prev != _newMainContract, "No change");
         mainContract = _newMainContract;
+        emit MainContractUpdated(prev, _newMainContract, msg.sender);
     }
     
     function setMediaContract(address _newMediaContract) external onlyOwner {

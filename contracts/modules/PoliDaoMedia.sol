@@ -32,9 +32,11 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     mapping(uint256 => mapping(address => bool)) public authorizedMediaManagers;
     
     // ========== EVENTS ==========
-    
+
     event MediaManagerAuthorized(uint256 indexed fundraiserId, address indexed manager);
     event MediaManagerRevoked(uint256 indexed fundraiserId, address indexed manager);
+    // DODANE: event zmian adresu mainContract
+    event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
     
     // ========== MODIFIERS ==========
     
@@ -66,7 +68,10 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     
     function setMainContract(address _newMainContract) external onlyOwner {
         require(_newMainContract != address(0), "Invalid address");
+        address prev = mainContract;
+        require(prev != _newMainContract, "No change");
         mainContract = _newMainContract;
+        emit MainContractUpdated(prev, _newMainContract, msg.sender);
     }
     
     // ========== MEDIA FUNCTIONS ==========

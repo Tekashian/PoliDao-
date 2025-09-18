@@ -21,6 +21,11 @@ is IPoliDaoWeb3
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
 
+    // ========== EVENTS (ADDED) ==========
+    // Slither: missing event for setMainContract
+    event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
+    // (MetaTxRateLimitUpdated already declared in interface and will now be emitted)
+
     // ========== CONSTANTS ==========
     
     bytes32 private constant DONATION_TYPEHASH = keccak256(
@@ -92,8 +97,12 @@ is IPoliDaoWeb3
     function unpause() external onlyOwner { _unpause(); }
     
     function setMainContract(address _newMainContract) external onlyOwner {
+        // ADDED: zero address + no-change guards + event
         require(_newMainContract != address(0), "Invalid address");
+        address prev = mainContract;
+        require(prev != _newMainContract, "No change");
         mainContract = _newMainContract;
+        emit MainContractUpdated(prev, _newMainContract, msg.sender);
     }
     
     function authorizeRelayer(address relayer, uint256 gasLimit) external onlyOwner {
@@ -110,9 +119,12 @@ is IPoliDaoWeb3
     }
     
     function setMetaTxRateLimit(uint256 newLimit) external onlyOwner {
-        uint256 oldLimit = maxMetaTxPerHour;
+        // ADDED: validation + no-change + event emission
+        require(newLimit > 0, "Invalid limit");
+        uint256 prev = maxMetaTxPerHour;
+        require(prev != newLimit, "No change");
         maxMetaTxPerHour = newLimit;
-        // emit MetaTxRateLimitUpdated(oldLimit, newLimit);
+        emit MetaTxRateLimitUpdated(prev, newLimit);
     }
 
     // ========== EIP-2612 PERMIT DONATIONS ==========

@@ -72,6 +72,10 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
     event EmergencyGovernanceUnfreeze(address indexed initiator, uint256 timestamp);
     event BatchProposalsExecuted(uint256[] proposalIdsArray, address indexed executor);
     event EmergencyProposalClosed(uint256 indexed proposalId, string reason, address indexed closer);
+    // REMOVE this wrong redeclaration (was conflicting):
+    // event ProposalCreated(uint256 indexed proposalId, address indexed proposer, string title);
+    // Keep VoteCast if chcesz dodatkową semantykę
+    event VoteCast(uint256 indexed proposalId, address indexed voter, uint8 support, uint256 weight);
     
     // ========== MODIFIERS ==========
     
@@ -141,6 +145,7 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
     
     function setMainContract(address _newMainContract) external onlyOwner {
         require(_newMainContract != address(0), "Invalid main contract");
+        require(_newMainContract != mainContract, "No change");
         address oldContract = mainContract;
         mainContract = _newMainContract;
         emit MainContractUpdated(oldContract, _newMainContract);
@@ -261,7 +266,7 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
         userProposalCount[msg.sender]++;
         lastProposalTime[msg.sender] = block.timestamp;
         
-        emit ProposalCreated(proposalId, _question, p.endTime, msg.sender);
+        emit ProposalCreated(proposalId, _question, p.endTime, msg.sender); // zakładamy, że taka sygnatura jest w IPoliDaoStructs
         
         return proposalId;
     }
@@ -290,7 +295,8 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
             p.noVotes++;
         }
         
-        emit Voted(msg.sender, _proposalId, _support);
+        emit Voted(msg.sender, _proposalId, _support); // z interfejsu
+        emit VoteCast(_proposalId, msg.sender, _support ? 1 : 2, 1);
     }
     
     /**
@@ -656,23 +662,26 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
         validProposal(proposalId) 
     {
         Proposal storage p = proposals[proposalId];
+        if (!p.executed) {
+            p.executed = true;
+        }
         p.endTime = block.timestamp;
-        emit ProposalExecuted(proposalId, false);
-        
-        // Additional event for emergency closure
+        bool passed = p.yesVotes > p.noVotes;
+        emit ProposalExecuted(proposalId, passed);
         emit EmergencyProposalClosed(proposalId, reason, msg.sender);
     }
-    
-    /**
-     * @notice Original emergency close for backward compatibility
-     */
+
     function emergencyCloseProposal(uint256 proposalId) 
         external 
         onlyOwner 
         validProposal(proposalId) 
     {
         Proposal storage p = proposals[proposalId];
+        if (!p.executed) {
+            p.executed = true;
+        }
         p.endTime = block.timestamp;
-        emit ProposalExecuted(proposalId, false);
+        bool passed = p.yesVotes > p.noVotes;
+        emit ProposalExecuted(proposalId, passed);
     }
 }

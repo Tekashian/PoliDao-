@@ -22,6 +22,9 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoRefunds {
     uint256 public refundCommission = 100; // 1% default
     address public commissionWallet;
 
+    // DODANE: event aktualizacji mainContract
+    event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
+
     mapping(uint256 => mapping(address => bool)) public hasRefunded;
     mapping(uint256 => mapping(address => uint256)) public refundAmounts;
     mapping(uint256 => bool) public closureInitiated;
@@ -45,7 +48,10 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoRefunds {
     // ========== ADMIN ==========
     function setMainContract(address _newMainContract) external onlyOwner {
         require(_newMainContract != address(0), "Invalid address");
+        address prev = mainContract;
+        require(prev != _newMainContract, "No change");
         mainContract = _newMainContract;
+        emit MainContractUpdated(prev, _newMainContract, msg.sender);
     }
 
     function setRefundCommission(uint256 _commission) external onlyOwner {

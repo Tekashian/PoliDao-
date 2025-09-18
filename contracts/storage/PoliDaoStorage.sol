@@ -35,9 +35,33 @@ contract PoliDaoStorage is Ownable {
 
     event ContractAuthorized(address indexed contractAddress);
     event ContractDeauthorized(address indexed contractAddress);
+    event AuthorizedRouterUpdated(address indexed previous, address indexed current, address indexed caller);
+
+    // Commission / fees events
+    event RefundCommissionUpdated(uint256 previous, uint256 current, address indexed caller);
+    event CommissionRatesUpdated(
+        uint256 prevDonation,
+        uint256 prevSuccess,
+        uint256 prevRefund,
+        uint256 newDonation,
+        uint256 newSuccess,
+        uint256 newRefund,
+        address indexed caller
+    );
+    event ExtensionFeeUpdated(uint256 previous, uint256 current, address indexed caller);
+
+    // NEW optional events
+    event CommissionWalletUpdated(address indexed previous, address indexed current, address indexed caller);
+    event FeeTokenUpdated(address indexed previous, address indexed current, address indexed caller);
+    // (UWAGA: usunięto wcześniejszą zduplikowaną deklarację FundsReleased)
 
     function setAuthorizedRouter(address router) external onlyOwner {
+        // Slither: add zero address validation + event
+        require(router != address(0), "Zero router");
+        address prev = _authorizedRouter;
+        require(prev != router, "No change");
         _authorizedRouter = router;
+        emit AuthorizedRouterUpdated(prev, router, msg.sender);
     }
 
     function authorizedRouter() external view returns (address) {
@@ -105,7 +129,7 @@ contract PoliDaoStorage is Ownable {
     // Events
     event FundraiserCreatedInStorage(uint256 indexed fundraiserId, address indexed creator);
     event DonationAddedToStorage(uint256 indexed fundraiserId, address indexed donor, uint256 amount);
-    event FundsReleased(address indexed token, address indexed to, uint256 amount, address indexed by);
+    event FundsReleased(address indexed token, address indexed to, uint256 amount, address indexed caller);
 
     // Getter returning the packed struct as expected by libraries
     function fundraisers(uint256 fundraiserId) external view returns (IPoliDaoStructs.PackedFundraiserData memory) {
@@ -292,8 +316,11 @@ contract PoliDaoStorage is Ownable {
 
     // Overload: some tests call setCommissions(uint256) to set refund only
     function setCommissions(uint256 _refundCommission) external onlyOwner {
-        require(_refundCommission <= MAX_COMMISSION_RATE, "refund > max");
+        uint256 prev = refundCommission;
+        require(_refundCommission <= MAX_COMMISSION_RATE, "Too high");
+        require(prev != _refundCommission, "No change");
         refundCommission = _refundCommission;
+        emit RefundCommissionUpdated(prev, _refundCommission, msg.sender);
     }
 
     function setCommissions(
@@ -301,27 +328,52 @@ contract PoliDaoStorage is Ownable {
         uint256 _successCommission,
         uint256 _refundCommission
     ) external onlyOwner {
-        require(_donationCommission <= MAX_COMMISSION_RATE, "donation > max");
-        require(_successCommission <= MAX_COMMISSION_RATE, "success > max");
-        require(_refundCommission <= MAX_COMMISSION_RATE, "refund > max");
+        uint256 prevDonation = donationCommission;
+        uint256 prevSuccess = successCommission;
+        uint256 prevRefund = refundCommission;
+        require(_donationCommission <= MAX_COMMISSION_RATE, "Donation too high");
+        require(_successCommission <= MAX_COMMISSION_RATE, "Success too high");
+        require(_refundCommission <= MAX_COMMISSION_RATE, "Refund too high");
+        bool changed = _donationCommission != prevDonation
+            || _successCommission != prevSuccess
+            || _refundCommission != prevRefund;
+        require(changed, "No change");
         donationCommission = _donationCommission;
         successCommission = _successCommission;
         refundCommission = _refundCommission;
+        emit CommissionRatesUpdated(
+            prevDonation,
+            prevSuccess,
+            prevRefund,
+            _donationCommission,
+            _successCommission,
+            _refundCommission,
+            msg.sender
+        );
     }
 
     function setExtensionFee(uint256 _extensionFee) external onlyOwner {
-        require(_extensionFee <= MAX_EXTENSION_FEE, "fee > max");
+        uint256 prev = extensionFee;
+        require(_extensionFee <= MAX_EXTENSION_FEE, "Too high");
+        require(prev != _extensionFee, "No change");
         extensionFee = _extensionFee;
+        emit ExtensionFeeUpdated(prev, _extensionFee, msg.sender);
     }
 
     function setCommissionWallet(address _commissionWallet) external onlyOwner {
         require(_commissionWallet != address(0), "zero wallet");
+        address prev = commissionWallet;
+        require(prev != _commissionWallet, "No change");
         commissionWallet = _commissionWallet;
+        emit CommissionWalletUpdated(prev, _commissionWallet, msg.sender);
     }
 
     function setFeeToken(address _feeToken) external onlyOwner {
         require(_feeToken != address(0), "zero token");
+        address prev = feeToken;
+        require(prev != _feeToken, "No change");
         feeToken = _feeToken;
+        emit FeeTokenUpdated(prev, _feeToken, msg.sender);
     }
 
     function getFeeInfo()
