@@ -833,35 +833,23 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     }
 
     function _upgradeModule(string memory label, address oldAddr, address newAddr) internal {
-        bytes32 key = _moduleKey(label);
+        bytes32 key = keccak256(bytes(label));
 
-        // Idempotent disable: jeśli prosisz o 0 i już 0 -> upewnij się, że flaga ustawiona i spróbuj jeszcze raz wyczyścić mapping
-        if (oldAddr == newAddr) {
-            if (newAddr == address(0)) {
-                // flag
-                if (!_moduleDisabled[key]) {
-                    _moduleDisabled[key] = true;
-                    emit ModuleDisabled(label, oldAddr);
-                }
-                // best-effort clear
-                try storageContract.setModule(key, address(0)) {} catch {}
-            }
-            return;
-        }
-
+        // DISABLE PATH: allow zero address to fully disable + clear mapping, set flag, emit event
         if (newAddr == address(0)) {
-            _moduleDisabled[key] = true;
-            emit ModuleDisabled(label, oldAddr);
-            // best-effort clear legacy mapping
+            _moduleDisabled[key] = true;                 // moved: always set flag
+            emit ModuleDisabled(label, oldAddr);          // moved: always emit, even if oldAddr == 0
+            // best-effort: clear storage mapping (ignore errors)
             try storageContract.setModule(key, address(0)) {} catch {}
             return;
         }
 
+        // ENABLE/UPGRADE PATH
         require(_hasCode(newAddr), "Not a contract");
         _moduleDisabled[key] = false;
         emit ModuleUpgraded(label, oldAddr, newAddr);
 
-        // Best-effort authorize + sync mapping (nie rewertuj przy braku uprawnień)
+        // best-effort: authorize + sync mapping (ignore errors)
         if (!_isAuthorized(newAddr)) {
             try storageContract.authorizeContract(newAddr) {} catch {}
         }
@@ -874,44 +862,51 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
     function upgradeGovernanceModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
-        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
-        _upgradeModule("GOVERNANCE", governanceModule, newAddr);
+        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
+        address oldEffective = _resolveModule("GOVERNANCE");
+        _upgradeModule("GOVERNANCE", oldEffective, newAddr);
         governanceModule = newAddr;
     }
     function upgradeMediaModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
-        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
-        _upgradeModule("MEDIA", mediaModule, newAddr);
+        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
+        address oldEffective = _resolveModule("MEDIA");
+        _upgradeModule("MEDIA", oldEffective, newAddr);
         mediaModule = newAddr;
     }
     function upgradeUpdatesModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
-        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
-        _upgradeModule("UPDATES", updatesModule, newAddr);
+        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
+        address oldEffective = _resolveModule("UPDATES");
+        _upgradeModule("UPDATES", oldEffective, newAddr);
         updatesModule = newAddr;
     }
     function upgradeRefundsModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
-        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
-        _upgradeModule("REFUNDS", refundsModule, newAddr);
+        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
+        address oldEffective = _resolveModule("REFUNDS");
+        _upgradeModule("REFUNDS", oldEffective, newAddr);
         refundsModule = newAddr;
     }
     function upgradeSecurityModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
-        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
-        _upgradeModule("SECURITY", securityModule, newAddr);
+        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
+        address oldEffective = _resolveModule("SECURITY");
+        _upgradeModule("SECURITY", oldEffective, newAddr);
         securityModule = newAddr;
     }
     function upgradeWeb3Module(address newAddr) external onlyOwnerCompat {
         _assertMutable();
-        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
-        _upgradeModule("WEB3", web3Module, newAddr);
+        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
+        address oldEffective = _resolveModule("WEB3");
+        _upgradeModule("WEB3", oldEffective, newAddr);
         web3Module = newAddr;
     }
     function upgradeAnalyticsModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
-        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
-        _upgradeModule("ANALYTICS", analyticsModule, newAddr);
+        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
+        address oldEffective = _resolveModule("ANALYTICS");
+        _upgradeModule("ANALYTICS", oldEffective, newAddr);
         analyticsModule = newAddr;
     }
 

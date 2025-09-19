@@ -236,7 +236,28 @@ contract PoliDaoFactory is Ownable {
     }
 
     // ========== ADMIN: set implementation addresses for clones ==========
-    function setImplementations(address _storageImpl, address _coreImpl, address _extensionsImpl, address _routerImpl) external onlyOwner {
+    function setImplementations(
+        address _storageImpl,
+        address _coreImpl,
+        address _extensionsImpl,
+        address _routerImpl
+    ) external onlyOwner {
+        // added: zero and code checks
+        require(
+            _storageImpl != address(0) &&
+            _coreImpl != address(0) &&
+            _extensionsImpl != address(0) &&
+            _routerImpl != address(0),
+            "PoliDaoFactory: zero impl"
+        );
+        require(
+            _hasCode(_storageImpl) &&
+            _hasCode(_coreImpl) &&
+            _hasCode(_extensionsImpl) &&
+            _hasCode(_routerImpl),
+            "PoliDaoFactory: impl not contract"
+        );
+
         storageImplementation = _storageImpl;
         coreImplementation = _coreImpl;
         extensionsImplementation = _extensionsImpl;

@@ -11,6 +11,7 @@ contract ReentrancyAttackMock {
     }
     
     function setTarget(address _target) external {
+        require(_target != address(0), "ReentrancyAttackMock: zero target"); // added
         target = _target;
     }
     

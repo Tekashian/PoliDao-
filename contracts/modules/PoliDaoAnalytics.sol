@@ -92,6 +92,15 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         address _updates,
         address _refunds
     ) external onlyOwner {
+        // added: zero-address validation
+        require(
+            _governance != address(0) &&
+            _media != address(0) &&
+            _updates != address(0) &&
+            _refunds != address(0),
+            "PoliDaoAnalytics: zero module addr"
+        );
+
         governanceModule = _governance;
         mediaModule = _media;
         updatesModule = _updates;
