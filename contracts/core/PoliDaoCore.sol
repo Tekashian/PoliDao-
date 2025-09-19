@@ -625,6 +625,19 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         address _analytics
     ) external onlyOwnerCompat {
         require(governanceModule == address(0) && mediaModule == address(0), "Already initialized");
+
+        // zero-address validation (added)
+        require(
+            _governance != address(0) &&
+            _media != address(0) &&
+            _updates != address(0) &&
+            _refunds != address(0) &&
+            _security != address(0) &&
+            _web3 != address(0) &&
+            _analytics != address(0),
+            "PoliDaoCore: zero module addr"
+        );
+
         governanceModule = _governance;
         mediaModule = _media;
         updatesModule = _updates;
@@ -861,36 +874,43 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
     function upgradeGovernanceModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
+        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
         _upgradeModule("GOVERNANCE", governanceModule, newAddr);
         governanceModule = newAddr;
     }
     function upgradeMediaModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
+        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
         _upgradeModule("MEDIA", mediaModule, newAddr);
         mediaModule = newAddr;
     }
     function upgradeUpdatesModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
+        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
         _upgradeModule("UPDATES", updatesModule, newAddr);
         updatesModule = newAddr;
     }
     function upgradeRefundsModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
+        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
         _upgradeModule("REFUNDS", refundsModule, newAddr);
         refundsModule = newAddr;
     }
     function upgradeSecurityModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
+        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
         _upgradeModule("SECURITY", securityModule, newAddr);
         securityModule = newAddr;
     }
     function upgradeWeb3Module(address newAddr) external onlyOwnerCompat {
         _assertMutable();
+        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
         _upgradeModule("WEB3", web3Module, newAddr);
         web3Module = newAddr;
     }
     function upgradeAnalyticsModule(address newAddr) external onlyOwnerCompat {
         _assertMutable();
+        require(newAddr != address(0), "PoliDaoCore: zero address"); // added
         _upgradeModule("ANALYTICS", analyticsModule, newAddr);
         analyticsModule = newAddr;
     }
