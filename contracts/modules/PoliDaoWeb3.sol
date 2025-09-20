@@ -34,7 +34,8 @@ is IPoliDaoWeb3
         "Donation(address donor,uint256 fundraiserId,uint256 amount,uint256 nonce,uint256 deadline)"
     );
     
-    uint256 public constant MAX_BATCH_SIZE = 20;
+    // Keep in sync with PoliDaoCore.MAX_BATCH_SIZE
+    uint256 public constant MAX_BATCH_SIZE = 50;
     uint256 public constant MAX_META_TX_DELAY = 1 hours;
 
     // ========== STORAGE ==========
@@ -193,11 +194,14 @@ is IPoliDaoWeb3
 
     // ========== BATCH OPERATIONS ==========
     
-    function batchDonate(
-        uint256[] calldata fundraiserIds,
-        uint256[] calldata amounts
-    ) external nonReentrant validBatchSize(fundraiserIds.length) {
+    function batchDonate(uint256[] calldata fundraiserIds, uint256[] calldata amounts)
+        external
+        nonReentrant
+        validBatchSize(fundraiserIds.length)
+    {
         require(fundraiserIds.length == amounts.length, "Array length mismatch");
+        uint256 len = fundraiserIds.length;
+        require(len > 0 && len <= MAX_BATCH_SIZE, "Batch too large");
         
         // Generate unique batch ID
         bytes32 batchId = keccak256(
@@ -215,7 +219,8 @@ is IPoliDaoWeb3
         uint256 totalAmount = 0;
         
         // Execute each donation
-        for (uint256 i = 0; i < fundraiserIds.length; i++) {
+        // slither-disable-next-line calls-loop
+        for (uint256 i = 0; i < len; i++) {
             require(amounts[i] > 0, "Zero amount");
             
             // Get fundraiser token
@@ -229,7 +234,6 @@ is IPoliDaoWeb3
             
             totalAmount += amounts[i];
         }
-        
         emit BatchDonationExecuted(batchId, msg.sender, totalAmount);
     }
     
@@ -251,8 +255,8 @@ is IPoliDaoWeb3
 
     // Pomocnicza: wykonuje serię permitów (zmniejsza presję na stos)
     function _applyPermits(
-        address token,
         address tokenOwner,
+        address token,
         uint256[] calldata amounts,
         uint256[] calldata deadlines,
         uint8[] calldata vs,
@@ -261,23 +265,14 @@ is IPoliDaoWeb3
     ) internal {
         uint256 len = amounts.length;
         require(
-            len == deadlines.length &&
-            len == vs.length &&
-            len == rs.length &&
-            len == ss.length,
-            "Web3: permit arrays mismatch"
+            deadlines.length == len && vs.length == len && rs.length == len && ss.length == len,
+            "Permit arrays length mismatch"
         );
+        require(len > 0 && len <= MAX_BATCH_SIZE, "Permit batch too large");
 
+        // slither-disable-next-line calls-loop
         for (uint256 i = 0; i < len; ) {
-            IERC20Permit(token).permit(
-                tokenOwner,
-                address(this),
-                amounts[i],
-                deadlines[i],
-                vs[i],
-                rs[i],
-                ss[i]
-            );
+            IERC20Permit(token).permit(tokenOwner, address(this), amounts[i], deadlines[i], vs[i], rs[i], ss[i]);
             unchecked { ++i; }
         }
     }
@@ -294,7 +289,7 @@ is IPoliDaoWeb3
         (address token, uint256 totalAmount) = _aggregateTokenAndTotal(fundraiserIds, amounts);
 
         // 2) Permity (każda pozycja osobno – zachowujemy dotychczasową semantykę)
-        _applyPermits(token, msg.sender, amounts, deadlines, vs, rs, ss);
+        _applyPermits(msg.sender, token, amounts, deadlines, vs, rs, ss);
 
         // 3) Jeden transfer za całość (tak jak wcześniej)
         IERC20(token).safeTransferFrom(msg.sender, mainContract, totalAmount);

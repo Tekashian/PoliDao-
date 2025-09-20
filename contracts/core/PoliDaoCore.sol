@@ -41,6 +41,9 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     address public web3Module;
     address public analyticsModule;
 
+    // Batch limits (keep in sync with Web3)
+    uint256 public constant MAX_BATCH_SIZE = 50;
+
     // ---- UPGRADE CONTROL ----
     bool private _modulesMutable = true;
     
@@ -549,8 +552,12 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         whenNotPaused
         nonReentrant
     {
-        require(fundraiserIds.length == amounts.length, "PoliDaoCore: Arrays length mismatch");
-        for (uint256 i = 0; i < fundraiserIds.length; i++) {
+        require(fundraiserIds.length == amounts.length, "Array length mismatch");
+        uint256 len = fundraiserIds.length;
+        require(len > 0 && len <= MAX_BATCH_SIZE, "Batch too large");
+
+        // slither-disable-next-line calls-loop
+        for (uint256 i = 0; i < len; i++) {
             uint256 fid = fundraiserIds[i];
             uint256 amount = amounts[i];
             if (amount == 0) continue;

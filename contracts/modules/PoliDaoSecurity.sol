@@ -135,6 +135,8 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
         external 
         onlyGuardianOrOwner(GUARDIAN_PERMISSIONS_EMERGENCY)
         nonReentrant
+        rateLimited("securityAdmin")
+        circuitBreaker("securityAdmin")
     {
         require(!emergencyPaused, "Already emergency paused");
         
@@ -166,6 +168,8 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     function setSecurityLevel(SecurityLevel newLevel, string calldata reason) 
         external 
         onlyGuardianOrOwner(GUARDIAN_PERMISSIONS_EMERGENCY)
+        rateLimited("securityAdmin")
+        circuitBreaker("securityAdmin")
     {
         SecurityLevel oldLevel = currentSecurityLevel;
         currentSecurityLevel = newLevel;
@@ -285,6 +289,8 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     function addSecurityGuardian(address guardian, uint256 permissions) 
         external 
         onlyOwner
+        rateLimited("securityAdmin")
+        circuitBreaker("securityAdmin")
     {
         require(guardian != address(0), "Invalid guardian");
         require(permissions <= GUARDIAN_PERMISSIONS_ALL, "Invalid permissions");
@@ -300,6 +306,8 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     function removeSecurityGuardian(address guardian) 
         external 
         onlyOwner
+        rateLimited("securityAdmin")
+        circuitBreaker("securityAdmin")
     {
         require(guardianPermissions[guardian] != 0, "Not guardian");
         
@@ -323,6 +331,8 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     function setGasThreshold(string calldata functionName, uint256 gasThreshold) 
         external 
         onlyGuardianOrOwner(GUARDIAN_PERMISSIONS_CIRCUIT)
+        rateLimited("securityAdmin")
+        circuitBreaker("securityAdmin")
     {
         gasThresholds[functionName] = gasThreshold;
     }
@@ -334,6 +344,8 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     ) 
         external 
         onlyGuardianOrOwner(GUARDIAN_PERMISSIONS_CIRCUIT)
+        rateLimited("securityAdmin")
+        circuitBreaker("securityAdmin")
     {
         require(maxCalls > 0, "Invalid max calls");
         require(windowSize > 0, "Invalid window size");
@@ -480,7 +492,13 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     function unpause() external onlyOwner { _unpause(); }
     
     // ========== UTILITY FUNCTIONS ==========
-    
+
+    function _isCurrentlySuspended(SuspensionInfo memory s) internal view returns (bool) {
+        if (!s.isSuspended) return false;
+        if (s.suspensionEnd > 0 && block.timestamp >= s.suspensionEnd) return false;
+        return true;
+    }
+
     function getGuardiansList() external view returns (address[] memory) {
         return guardiansList;
     }
@@ -492,8 +510,7 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     {
         suspended = new bool[](users.length);
         for (uint256 i = 0; i < users.length; i++) {
-            (bool isSuspended, , ) = this.isUserSuspended(users[i]);
-            suspended[i] = isSuspended;
+            suspended[i] = _isCurrentlySuspended(userSuspensions[users[i]]);
         }
     }
     
