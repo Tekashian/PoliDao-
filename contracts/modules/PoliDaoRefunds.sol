@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IPoliDaoRefunds.sol";
 import "../interfaces/IPoliDaoStorage.sol";
 
@@ -12,7 +13,7 @@ import "../interfaces/IPoliDaoStorage.sol";
  * @notice Refunds management module (minimal, PoC)
  * @dev Keeps refund logic outside core; mainContract is the PoliDao core/router
  */
-contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoRefunds {
+contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
     // ========== CONSTANTS ==========
     uint256 public constant RECLAIM_PERIOD = 14 days;
     uint256 public constant MAX_REFUND_COMMISSION = 500; // 5% in bps
@@ -116,22 +117,25 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoRefunds {
     function processRefund(
         uint256 fundraiserId,
         address donor,
-        uint256 donationAmount,
+        uint256 amount,
         address token,
-        uint8 fundraiserStatus,
-        uint256 fundraiserEndTime,
-        bool goalReached
-    ) external whenNotPaused onlyMainContract {
+        uint8 mode,
+        uint256 proof,
+        bool waiveCommission
+    )
+        external
+        nonReentrant
+    {
         require(!hasRefunded[fundraiserId][donor], "Already refunded");
-        require(donationAmount > 0, "No donation to refund");
+        require(amount > 0, "No donation to refund");
 
-        _validateRefundConditionsInternal(fundraiserId, fundraiserStatus, fundraiserEndTime, goalReached);
+        _validateRefundConditionsInternal(fundraiserId, mode, proof, waiveCommission);
 
         hasRefunded[fundraiserId][donor] = true;
-        refundAmounts[fundraiserId][donor] = donationAmount;
+        refundAmounts[fundraiserId][donor] = amount;
 
-        uint256 commission = (donationAmount * refundCommission) / 10000;
-        uint256 refundAmount = donationAmount - commission;
+        uint256 refundAmount = waiveCommission ? amount : (amount * (10000 - refundCommission)) / 10000;
+        uint256 commission = amount - refundAmount;
 
         // Use storage as custodian: ask mainContract for storage address via getContractStatus()
         bytes memory statusData = abi.encodeWithSignature("getContractStatus()");
@@ -141,6 +145,7 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoRefunds {
     IPoliDaoStorage(storageAddress).releaseFunds(token, commissionWallet, commission);
     IPoliDaoStorage(storageAddress).releaseFunds(token, donor, refundAmount);
 
+        // Emit BEFORE external interactions
         emit RefundProcessed(fundraiserId, donor, refundAmount, commission);
     }
 
@@ -155,7 +160,15 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoRefunds {
         emit ClosureInitiated(fundraiserId, reclaimDeadline[fundraiserId], creator);
     }
 
-    function processFlexibleWithdrawal(uint256 fundraiserId, address creator, uint256 withdrawAmount, address token) external whenNotPaused onlyMainContract {
+    function processFlexibleWithdrawal(
+        uint256 fundraiserId,
+        address creator,
+        uint256 withdrawAmount,
+        address token
+    )
+        external
+        nonReentrant
+    {
         require(isFlexibleFundraiser[fundraiserId], "Not a flexible fundraiser");
         require(withdrawAmount > 0, "Nothing to withdraw");
 
@@ -167,6 +180,7 @@ contract PoliDaoRefunds is Ownable, Pausable, IPoliDaoRefunds {
     (address storageAddress, , , ) = abi.decode(statusRes2, (address, address, address, bool));
     IPoliDaoStorage(storageAddress).releaseFunds(token, creator, withdrawAmount);
 
+        // Emit BEFORE external interactions
         emit FlexibleWithdrawal(fundraiserId, creator, withdrawAmount, totalWithdrawnByCreator[fundraiserId]);
     }
 

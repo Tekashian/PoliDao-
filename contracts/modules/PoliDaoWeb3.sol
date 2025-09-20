@@ -9,6 +9,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
+import "../interfaces/IPoliDao.sol";
 import "../interfaces/IPoliDaoWeb3.sol";
 
 contract PoliDaoWeb3
@@ -143,14 +144,8 @@ is IPoliDaoWeb3
         IERC20Permit(token).permit(msg.sender, address(this), amount, deadline, v, r, s);
         IERC20(token).safeTransferFrom(msg.sender, mainContract, amount);
 
-        // Call main contract donation logic
-        bytes memory data = abi.encodeWithSignature(
-            "donate(uint256,uint256)",
-            fundraiserId,
-            amount
-        );
-        (bool success, ) = mainContract.call(data);
-        require(success, "Donation failed");
+        // Call main contract donation logic (bez low-level call)
+        IPoliDao(mainContract).donate(fundraiserId, amount);
         
         emit DonationMadeWithPermit(fundraiserId, msg.sender, token, amount);
     }
@@ -189,14 +184,8 @@ is IPoliDaoWeb3
         // Kluczowa zmiana: zawsze from = msg.sender
         IERC20(token).safeTransferFrom(msg.sender, mainContract, amount);
 
-        // Call main contract donation logic
-        bytes memory data = abi.encodeWithSignature(
-            "donate(uint256,uint256)",
-            fundraiserId,
-            amount
-        );
-        (bool success, ) = mainContract.call(data);
-        require(success, "Donation failed");
+        // Call main contract donation logic (bez low-level call)
+        IPoliDao(mainContract).donate(fundraiserId, amount);
         
         emit DonationMadeWithMetaTx(fundraiserId, donor, msg.sender, amount);
     }
@@ -234,14 +223,8 @@ is IPoliDaoWeb3
             // Transfer tokens to main contract
             IERC20(token).safeTransferFrom(msg.sender, mainContract, amounts[i]);
             
-            // Call main contract donation logic
-            bytes memory data = abi.encodeWithSignature(
-                "donate(uint256,uint256)",
-                fundraiserIds[i],
-                amounts[i]
-            );
-            (bool success, ) = mainContract.call(data);
-            require(success, "Donation failed");
+            // Call main contract donation logic (bez low-level call)
+            IPoliDao(mainContract).donate(fundraiserIds[i], amounts[i]);
             
             totalAmount += amounts[i];
         }
@@ -315,14 +298,8 @@ is IPoliDaoWeb3
         // 3) Jeden transfer za całość (tak jak wcześniej)
         IERC20(token).safeTransferFrom(msg.sender, mainContract, totalAmount);
 
-        // 4) Wołanie logiki głównej (bez zmian)
-        bytes memory data = abi.encodeWithSignature(
-            "donate(uint256,uint256)",
-            fundraiserIds[0],
-            totalAmount
-        );
-        (bool success, ) = mainContract.call(data);
-        require(success, "Donation failed");
+        // 4) Wołanie logiki głównej (bez low-level call)
+        IPoliDao(mainContract).donate(fundraiserIds[0], totalAmount);
         
         emit BatchDonationExecuted(
             keccak256(abi.encode(msg.sender, block.timestamp, fundraiserIds, amounts, nonces[msg.sender])),
@@ -402,17 +379,7 @@ is IPoliDaoWeb3
     // ========== INTERNAL FUNCTIONS ==========
     
     function _getFundraiserToken(uint256 fundraiserId) internal view returns (address) {
-        bytes memory data = abi.encodeWithSignature(
-            "getFundraiserData(uint256)",
-            fundraiserId
-        );
-        (bool success, bytes memory result) = mainContract.staticcall(data);
-        require(success, "Failed to get fundraiser data");
-        
-        (, address token, , , , , ) = abi.decode(
-            result,
-            (address, address, uint256, uint256, uint256, uint8, bool)
-        );
+        (, address token, , , , ,) = IPoliDao(mainContract).getFundraiserData(fundraiserId);
         return token;
     }
 
@@ -425,7 +392,7 @@ is IPoliDaoWeb3
             (bool success, ) = to.call{value: amount}("");
             require(success, "ETH transfer failed");
         } else {
-            require(IERC20(token).transfer(to, amount), "Token transfer failed");
+            IERC20(token).safeTransfer(to, amount);
         }
     }
     

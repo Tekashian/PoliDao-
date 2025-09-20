@@ -438,10 +438,11 @@ contract PoliDaoStorage is Ownable {
     }
 
     // ===================== Funds release =====================
-    function releaseFunds(address token, address to, uint256 amount) external {
-        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+    function releaseFunds(address token, address to, uint256 amount) external onlyAuthorized {
         require(to != address(0) && amount > 0, "Invalid");
-        IERC20(token).safeTransfer(to, amount);
+        // CEI: emit before external interaction (event zostanie wycofany przy ewentualnym revert)
         emit FundsReleased(token, to, amount, msg.sender);
+        // Interakcja zewnętrzna
+        IERC20(token).safeTransfer(to, amount);
     }
 }
