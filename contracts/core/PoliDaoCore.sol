@@ -142,6 +142,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         
         storageContract = IPoliDaoStorage(_storageContract);
         routerContract = _routerContract;
+        _initialized = true; // <<< zablokuj initialize po direct deploy
     }
 
     // initializer for clone deployments
@@ -150,6 +151,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     function initialize(address _storageContract, address initialOwner) external {
         require(!_initialized, "PoliDaoCore: already initialized");
         require(_storageContract != address(0), "PoliDaoCore: Invalid storage contract");
+        require(initialOwner != address(0), "PoliDaoCore: Invalid owner"); // opcjonalnie
         _initialized = true;
         storageContract = IPoliDaoStorage(_storageContract);
         transferOwnership(initialOwner);
@@ -209,10 +211,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
         // Removed unused local `packed`
 
-        require(
-            storageContract.isTokenWhitelisted(data.token),
-            "PoliDaoCore: Token not whitelisted"
-        );
+        // DUPLICATE CHECK REMOVED
+        // require(
+        //     storageContract.isTokenWhitelisted(data.token),
+        //     "PoliDaoCore: Token not whitelisted"
+        // );
 
         fundraiserId = FundraiserLogic.createFundraiserLogic(
             PoliDaoStorage(address(storageContract)),
@@ -276,11 +279,15 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
         address token = storageContract.fundraiserTokens(fundraiserId);
 
-        // ADDED: transfer przed zapisem (CEI), całość i tak jest atomowa przy revercie
+        // Sprawdź realnie otrzymaną kwotę (blokujemy taxed/deflacyjne)
+        uint256 beforeBal = IERC20(token).balanceOf(address(storageContract));
         IERC20(token).safeTransferFrom(msg.sender, address(storageContract), amount);
+        uint256 afterBal = IERC20(token).balanceOf(address(storageContract));
+        uint256 received = afterBal - beforeBal;
+        require(received == amount, "PoliDaoCore: Taxed/deflationary token not supported");
 
-        storageContract.addDonation(fundraiserId, msg.sender, amount);
-        emit DonationMade(fundraiserId, msg.sender, token, amount, amount);
+        storageContract.addDonation(fundraiserId, msg.sender, received);
+        emit DonationMade(fundraiserId, msg.sender, token, amount, received);
     }
     
     /**
@@ -307,21 +314,25 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
                 uint256 amt = amounts[i];
                 require(amt > 0, "Core: zero amount");
 
-                // Validate fundraiser state
                 IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(id);
                 require(f.id != 0, "Core: fundraiser not found");
                 require(f.status == uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE), "Core: fundraiser not active");
                 require(!f.isSuspended, "Core: fundraiser suspended");
                 require(block.timestamp <= f.endDate, "Core: fundraiser ended");
 
-                // Enforce same token across batch
                 require(storageContract.fundraiserTokens(id) == token, "Core: mixed tokens in batch");
 
                 total += amt;
             }
         }
         require(total > 0, "Core: zero total");
+
+        uint256 beforeBal = IERC20(token).balanceOf(address(storageContract));
         IERC20(token).safeTransferFrom(donor, address(storageContract), total);
+        uint256 afterBal = IERC20(token).balanceOf(address(storageContract));
+        uint256 received = afterBal - beforeBal;
+        require(received == total, "Core: taxed/deflationary token not supported");
+
         storageContract.batchAddDonations(donor, token, fundraiserIds, amounts);
     }
 
@@ -473,6 +484,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         )
     {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        require(f.id != 0, "PoliDaoCore: Fundraiser not found"); // DODANE
         title = storageContract.fundraiserTitles(fundraiserId);
         description = storageContract.fundraiserDescriptions(fundraiserId);
         location = storageContract.fundraiserLocations(fundraiserId);
@@ -506,6 +518,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         )
     {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        require(f.id != 0, "PoliDaoCore: Fundraiser not found"); // opcjonalnie
         raised = f.raisedAmount;
         goal = f.goalAmount;
         donorsCount = storageContract.getFundraiserDonors(fundraiserId).length;
@@ -908,49 +921,49 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         return storageContract.isContractAuthorized(a);
     }
 
-    function upgradeGovernanceModule(address newAddr) external onlyOwnerCompat {
+    function upgradeGovernanceModule(address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule("GOVERNANCE");
         _upgradeModule("GOVERNANCE", oldEffective, newAddr);
         governanceModule = newAddr;
     }
-    function upgradeMediaModule(address newAddr) external onlyOwnerCompat {
+    function upgradeMediaModule(address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule("MEDIA");
         _upgradeModule("MEDIA", oldEffective, newAddr);
         mediaModule = newAddr;
     }
-    function upgradeUpdatesModule(address newAddr) external onlyOwnerCompat {
+    function upgradeUpdatesModule(address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule("UPDATES");
         _upgradeModule("UPDATES", oldEffective, newAddr);
         updatesModule = newAddr;
     }
-    function upgradeRefundsModule(address newAddr) external onlyOwnerCompat {
+    function upgradeRefundsModule(address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule("REFUNDS");
         _upgradeModule("REFUNDS", oldEffective, newAddr);
         refundsModule = newAddr;
     }
-    function upgradeSecurityModule(address newAddr) external onlyOwnerCompat {
+    function upgradeSecurityModule(address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule("SECURITY");
         _upgradeModule("SECURITY", oldEffective, newAddr);
         securityModule = newAddr;
     }
-    function upgradeWeb3Module(address newAddr) external onlyOwnerCompat {
+    function upgradeWeb3Module(address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule("WEB3");
         _upgradeModule("WEB3", oldEffective, newAddr);
         web3Module = newAddr;
     }
-    function upgradeAnalyticsModule(address newAddr) external onlyOwnerCompat {
+    function upgradeAnalyticsModule(address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule("ANALYTICS");
