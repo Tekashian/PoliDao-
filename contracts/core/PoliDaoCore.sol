@@ -268,25 +268,66 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant 
     {
         require(amount > 0, "PoliDaoCore: Amount must be greater than 0");
-        
-        // Get fundraiser data and validate
-    IPoliDaoStructs.PackedFundraiserData memory fundraiserData = storageContract.fundraisers(fundraiserId);
-    require(fundraiserData.id != 0, "PoliDaoCore: Fundraiser not found");
-    require(fundraiserData.status == uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE), "PoliDaoCore: Fundraiser not active");
-    require(block.timestamp <= fundraiserData.endDate, "PoliDaoCore: Fundraiser ended");
-    require(!fundraiserData.isSuspended, "PoliDaoCore: Fundraiser suspended");
-        
+        IPoliDaoStructs.PackedFundraiserData memory fundraiserData = storageContract.fundraisers(fundraiserId);
+        require(fundraiserData.id != 0, "PoliDaoCore: Fundraiser not found");
+        require(fundraiserData.status == uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE), "PoliDaoCore: Fundraiser not active");
+        require(block.timestamp <= fundraiserData.endDate, "PoliDaoCore: Fundraiser ended");
+        require(!fundraiserData.isSuspended, "PoliDaoCore: Fundraiser suspended");
+
         address token = storageContract.fundraiserTokens(fundraiserId);
-        
-    // Record donation in storage
-    storageContract.addDonation(fundraiserId, msg.sender, amount);
-        
-        // Transfer tokens
+
+        // ADDED: transfer przed zapisem (CEI), całość i tak jest atomowa przy revercie
         IERC20(token).safeTransferFrom(msg.sender, address(storageContract), amount);
-        
+
+        storageContract.addDonation(fundraiserId, msg.sender, amount);
         emit DonationMade(fundraiserId, msg.sender, token, amount, amount);
     }
     
+    /**
+     * @notice Batch donacja w imieniu wskazanego donora; 1 zewnętrzny call do storage
+     */
+    function donateBatchFrom(
+        address donor,
+        address token,
+        uint256[] calldata fundraiserIds,
+        uint256[] calldata amounts
+    )
+        public
+        nonReentrant
+        whenNotPaused
+    {
+        require(fundraiserIds.length == amounts.length, "Core: length mismatch");
+        require(fundraiserIds.length > 0, "Core: empty batch");
+        require(fundraiserIds.length <= MAX_BATCH_SIZE, "Core: batch too large");
+
+        // ADDED: sum wsadu i pojedynczy transferFrom donor -> storage
+        uint256 total;
+        unchecked {
+            for (uint256 i = 0; i < amounts.length; ++i) {
+                total += amounts[i];
+            }
+        }
+        require(total > 0, "Core: zero total");
+        IERC20(token).safeTransferFrom(donor, address(storageContract), total);
+
+        // Wewnętrzna pętla zapisów: weryfikuje spójność tokena per fundraiser
+        storageContract.batchAddDonations(donor, token, fundraiserIds, amounts);
+    }
+
+    /**
+     * @notice Batch donate (minimal stub)
+     */
+    function batchDonate(uint256[] calldata fundraiserIds, uint256[] calldata amounts)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        require(fundraiserIds.length == amounts.length, "Core: length mismatch");
+        require(fundraiserIds.length > 0, "Core: empty batch");
+        require(fundraiserIds.length <= MAX_BATCH_SIZE, "Core: batch too large");
+        address token = storageContract.fundraiserTokens(fundraiserIds[0]);
+        donateBatchFrom(msg.sender, token, fundraiserIds, amounts);
+    }
     // ========== DELEGATION TO EXTENSIONS ==========
     
     /**
@@ -533,7 +574,10 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     /**
      * @notice Adds media items to a fundraiser (minimal stub)
      */
-    function addMediaToFundraiser(uint256 /*fundraiserId*/, IPoliDao.MediaItem[] calldata /*mediaItems*/) external whenNotPaused nonReentrant {
+    function addMediaToFundraiser(
+        uint256 /*fundraiserId*/,
+        IPoliDaoStructs.MediaItem[] calldata /*mediaItems*/
+    ) external whenNotPaused nonReentrant {
         // No-op placeholder for compilation; modules should handle actual media storage
     }
 
@@ -542,33 +586,6 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      */
     function postUpdate(uint256 /*fundraiserId*/, string calldata /*content*/) external whenNotPaused nonReentrant {
         // No-op placeholder
-    }
-
-    /**
-     * @notice Batch donate (minimal stub)
-     */
-    function batchDonate(uint256[] calldata fundraiserIds, uint256[] calldata amounts)
-        external
-        whenNotPaused
-        nonReentrant
-    {
-        require(fundraiserIds.length == amounts.length, "Array length mismatch");
-        uint256 len = fundraiserIds.length;
-        require(len > 0 && len <= MAX_BATCH_SIZE, "Batch too large");
-
-        // slither-disable-next-line calls-loop
-        for (uint256 i = 0; i < len; i++) {
-            uint256 fid = fundraiserIds[i];
-            uint256 amount = amounts[i];
-            if (amount == 0) continue;
-            IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fid);
-            if (f.id == 0 || f.status != uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE) || f.isSuspended) continue;
-            if (block.timestamp > f.endDate) continue;
-            address token = storageContract.fundraiserTokens(fid);
-            storageContract.addDonation(fid, msg.sender, amount);
-            IERC20(token).safeTransferFrom(msg.sender, address(storageContract), amount);
-            emit DonationMade(fid, msg.sender, token, amount, amount);
-        }
     }
 
     /**
@@ -925,7 +942,4 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     function areModuleUpgradesOpen() external view returns (bool) {
         return _modulesMutable;
     }
-
-    // (PRZY każdym miejscu gdzie wywołujesz moduł – owiń:)
-    // if (mediaModule != address(0)) { IMedia(mediaModule).whatever(...); }
 }

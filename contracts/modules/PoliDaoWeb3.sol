@@ -13,13 +13,7 @@ import "@openzeppelin/contracts/utils/Address.sol";
 import "../interfaces/IPoliDao.sol";
 import "../interfaces/IPoliDaoWeb3.sol";
 
-contract PoliDaoWeb3
-is IPoliDaoWeb3
-, Ownable
-, Pausable
-, ReentrancyGuard
-, EIP712
-{
+contract PoliDaoWeb3 is IPoliDaoWeb3, Ownable, Pausable, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
 
@@ -203,7 +197,6 @@ is IPoliDaoWeb3
         uint256 len = fundraiserIds.length;
         require(len > 0 && len <= MAX_BATCH_SIZE, "Batch too large");
         
-        // Generate unique batch ID
         bytes32 batchId = keccak256(
             abi.encode(
                 msg.sender,
@@ -215,40 +208,22 @@ is IPoliDaoWeb3
         );
         require(!executedBatches[batchId], "Batch already executed");
         executedBatches[batchId] = true;
-        
-        uint256 totalAmount = 0;
-        
-        // Execute each donation
-        // slither-disable-next-line calls-loop
-        for (uint256 i = 0; i < len; i++) {
-            require(amounts[i] > 0, "Zero amount");
-            
-            // Get fundraiser token
-            address token = _getFundraiserToken(fundraiserIds[i]);
-            
-            // Transfer tokens to main contract
-            IERC20(token).safeTransferFrom(msg.sender, mainContract, amounts[i]);
-            
-            // Call main contract donation logic (bez low-level call)
-            IPoliDao(mainContract).donate(fundraiserIds[i], amounts[i]);
-            
-            totalAmount += amounts[i];
-        }
+
+        // 1) Token pierwszej zbiórki (1 odczyt)
+        address token = _getFundraiserToken(fundraiserIds[0]);
+        // 2) Suma lokalnie (bez zewnętrznych calli)
+        uint256 totalAmount = _sumAmounts(amounts);
+        // 3) Jeden transfer całej kwoty
+        IERC20(token).safeTransferFrom(msg.sender, mainContract, totalAmount);
+        // 4) Jedno wywołanie do Core
+        IPoliDao(mainContract).donateBatchFrom(msg.sender, token, fundraiserIds, amounts);
         emit BatchDonationExecuted(batchId, msg.sender, totalAmount);
     }
     
-    // Pomocnicza: wylicza wspólny token i sumę kwot; weryfikuje zgodność długości i tokenów
-    function _aggregateTokenAndTotal(
-        uint256[] calldata fundraiserIds,
-        uint256[] calldata amounts
-    ) internal view returns (address token, uint256 totalAmount) {
-        uint256 len = fundraiserIds.length;
-        require(len == amounts.length, "Web3: length mismatch");
-
-        token = _getFundraiserToken(fundraiserIds[0]);
+    function _sumAmounts(uint256[] calldata amounts) internal pure returns (uint256 total) {
+        uint256 len = amounts.length;
         for (uint256 i = 0; i < len; ) {
-            require(_getFundraiserToken(fundraiserIds[i]) == token, "Web3: mixed tokens");
-            totalAmount += amounts[i];
+            total += amounts[i];
             unchecked { ++i; }
         }
     }
@@ -263,18 +238,10 @@ is IPoliDaoWeb3
         bytes32[] calldata rs,
         bytes32[] calldata ss
     ) internal {
-        uint256 len = amounts.length;
-        require(
-            deadlines.length == len && vs.length == len && rs.length == len && ss.length == len,
-            "Permit arrays length mismatch"
-        );
-        require(len > 0 && len <= MAX_BATCH_SIZE, "Permit batch too large");
-
-        // slither-disable-next-line calls-loop
-        for (uint256 i = 0; i < len; ) {
-            IERC20Permit(token).permit(tokenOwner, address(this), amounts[i], deadlines[i], vs[i], rs[i], ss[i]);
-            unchecked { ++i; }
-        }
+        // Zmienione podejście: pojedynczy permit na sumę (brak pętli i zewn. calli w pętli)
+        require(deadlines.length > 0 && vs.length > 0 && rs.length > 0 && ss.length > 0, "Permit params required");
+        uint256 totalAmount = _sumAmounts(amounts);
+        IERC20Permit(token).permit(tokenOwner, address(this), totalAmount, deadlines[0], vs[0], rs[0], ss[0]);
     }
 
     function batchDonateWithPermits(
@@ -285,18 +252,12 @@ is IPoliDaoWeb3
         bytes32[] calldata rs,
         bytes32[] calldata ss
     ) external nonReentrant validBatchSize(fundraiserIds.length) {
-        // 1) Wylicz token i sumę
-        (address token, uint256 totalAmount) = _aggregateTokenAndTotal(fundraiserIds, amounts);
-
-        // 2) Permity (każda pozycja osobno – zachowujemy dotychczasową semantykę)
+        require(fundraiserIds.length == amounts.length, "Array length mismatch");
+        address token = _getFundraiserToken(fundraiserIds[0]);
         _applyPermits(msg.sender, token, amounts, deadlines, vs, rs, ss);
-
-        // 3) Jeden transfer za całość (tak jak wcześniej)
+        uint256 totalAmount = _sumAmounts(amounts);
         IERC20(token).safeTransferFrom(msg.sender, mainContract, totalAmount);
-
-        // 4) Wołanie logiki głównej (bez low-level call)
-        IPoliDao(mainContract).donate(fundraiserIds[0], totalAmount);
-        
+        IPoliDao(mainContract).donateBatchFrom(msg.sender, token, fundraiserIds, amounts);
         emit BatchDonationExecuted(
             keccak256(abi.encode(msg.sender, block.timestamp, fundraiserIds, amounts, nonces[msg.sender])),
             msg.sender,

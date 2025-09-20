@@ -36,6 +36,12 @@ interface IPoliDaoStorage {
     function setFundraiserDescription(uint256 fundraiserId, string memory newDescription) external;
 
     function addDonation(uint256 fundraiserId, address donor, uint256 amount) external;
+    function batchAddDonations(
+        address donor,
+        address expectedToken,
+        uint256[] calldata fundraiserIds,
+        uint256[] calldata amounts
+    ) external;
 
     function fundraiserCreators(uint256 fundraiserId) external view returns (address);
     function fundraiserTokens(uint256 fundraiserId) external view returns (address);

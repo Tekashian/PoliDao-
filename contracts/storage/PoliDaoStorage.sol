@@ -260,7 +260,7 @@ contract PoliDaoStorage is Ownable {
         uint256 fundraiserId,
         address donor,
         uint256 amount
-    ) external {
+    ) public {
         require(amount > 0, "Amount must be greater than zero");
         require(fundraiserId <= fundraiserCounter, "Invalid fundraiser ID");
         require(fundraiserId > 0, "Fundraiser does not exist");
@@ -444,5 +444,26 @@ contract PoliDaoStorage is Ownable {
         emit FundsReleased(token, to, amount, msg.sender);
         // Interakcja zewnętrzna
         IERC20(token).safeTransfer(to, amount);
+    }
+
+    /**
+     * @notice Batch dodawanie darowizn jednym zewnętrznym wywołaniem
+     * @dev Pętla jest wewnątrz kontraktu; brak zewnętrznych calli w pętli.
+     *      Weryfikuje spójność tokenu dla każdej zbiórki.
+     */
+    function batchAddDonations(
+        address donor,
+        address expectedToken,
+        uint256[] calldata fundraiserIds,
+        uint256[] calldata amounts
+    ) external {
+        require(fundraiserIds.length == amounts.length, "Storage: length mismatch");
+        uint256 len = fundraiserIds.length;
+        for (uint256 i = 0; i < len; ) {
+            uint256 fid = fundraiserIds[i];
+            require(fundraiserTokens[fid] == expectedToken, "Storage: token mismatch");
+            addDonation(fid, donor, amounts[i]);
+            unchecked { ++i; }
+        }
     }
 }

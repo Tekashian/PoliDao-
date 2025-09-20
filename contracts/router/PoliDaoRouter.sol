@@ -3,6 +3,8 @@ pragma solidity ^0.8.20;
 
 import "../core/PoliDaoCore.sol";
 import "../interfaces/IPoliDao.sol";
+import "../interfaces/IPoliDaoStorage.sol";
+import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -619,7 +621,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      * @param fundraiserId The fundraiser ID
      * @param mediaItems Media items to add
      */
-    function addMediaToFundraiser(uint256 fundraiserId, IPoliDao.MediaItem[] calldata mediaItems)
+    function addMediaToFundraiser(
+        uint256 fundraiserId,
+        IPoliDaoStructs.MediaItem[] calldata mediaItems
+    )
         external
         whenNotPaused
         nonReentrant
@@ -912,7 +917,4 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
     function unpause() external onlyOwner {
         _unpause();
     }
-    
-    // ========== HEALTH MONITORING ==========
-
 }
