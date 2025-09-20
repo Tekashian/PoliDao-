@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 
 import "../interfaces/IPoliDao.sol";
 import "../interfaces/IPoliDaoWeb3.sol";
@@ -251,7 +252,7 @@ is IPoliDaoWeb3
     // Pomocnicza: wykonuje serię permitów (zmniejsza presję na stos)
     function _applyPermits(
         address token,
-        address owner,
+        address tokenOwner,
         uint256[] calldata amounts,
         uint256[] calldata deadlines,
         uint8[] calldata vs,
@@ -269,7 +270,7 @@ is IPoliDaoWeb3
 
         for (uint256 i = 0; i < len; ) {
             IERC20Permit(token).permit(
-                owner,
+                tokenOwner,
                 address(this),
                 amounts[i],
                 deadlines[i],
@@ -311,8 +312,8 @@ is IPoliDaoWeb3
     // ========== UTILITY FUNCTIONS ==========
     
     function supportsPermit(address token) external view returns (bool) {
-        try IERC20Permit(token).DOMAIN_SEPARATOR() returns (bytes32) {
-            return true;
+        try IERC20Permit(token).DOMAIN_SEPARATOR() returns (bytes32 ds) {
+            return ds != bytes32(0);
         } catch {
             return false;
         }
@@ -389,8 +390,7 @@ is IPoliDaoWeb3
         require(to != address(0), "Invalid address");
         
         if (token == address(0)) {
-            (bool success, ) = to.call{value: amount}("");
-            require(success, "ETH transfer failed");
+            Address.sendValue(payable(to), amount);
         } else {
             IERC20(token).safeTransfer(to, amount);
         }
