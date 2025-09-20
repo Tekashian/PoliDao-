@@ -300,11 +300,24 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         require(fundraiserIds.length > 0, "Core: empty batch");
         require(fundraiserIds.length <= MAX_BATCH_SIZE, "Core: batch too large");
 
-        // ADDED: sum wsadu i pojedynczy transferFrom donor -> storage
         uint256 total = 0;
         unchecked {
             for (uint256 i = 0; i < amounts.length; ++i) {
-                total += amounts[i];
+                uint256 id = fundraiserIds[i];
+                uint256 amt = amounts[i];
+                require(amt > 0, "Core: zero amount");
+
+                // Validate fundraiser state
+                IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(id);
+                require(f.id != 0, "Core: fundraiser not found");
+                require(f.status == uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE), "Core: fundraiser not active");
+                require(!f.isSuspended, "Core: fundraiser suspended");
+                require(block.timestamp <= f.endDate, "Core: fundraiser ended");
+
+                // Enforce same token across batch
+                require(storageContract.fundraiserTokens(id) == token, "Core: mixed tokens in batch");
+
+                total += amt;
             }
         }
         require(total > 0, "Core: zero total");
@@ -323,6 +336,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         require(fundraiserIds.length == amounts.length, "Core: length mismatch");
         require(fundraiserIds.length > 0, "Core: empty batch");
         require(fundraiserIds.length <= MAX_BATCH_SIZE, "Core: batch too large");
+
         address token = storageContract.fundraiserTokens(fundraiserIds[0]);
         donateBatchFrom(msg.sender, token, fundraiserIds, amounts);
     }
@@ -591,8 +605,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @param fundraiserId The fundraiser ID
      * @param newLocation New location string
      */
-    function updateLocation(uint256 fundraiserId, string calldata newLocation) external whenNotPaused nonReentrant {
-        // Minimal access control: allow router or authorized contracts; router calls this normally
+    function updateLocation(uint256 fundraiserId, string calldata newLocation) external whenNotPaused nonReentrant onlyRouter {
         require(storageContract.fundraisers(fundraiserId).id != 0, "PoliDaoCore: Fundraiser not found");
         storageContract.updateFundraiserLocation(fundraiserId, newLocation);
     }
@@ -601,9 +614,22 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @notice Withdraw funds for a fundraiser (minimal implementation)
      * @param fundraiserId The fundraiser ID
      */
-    function withdrawFunds(uint256 fundraiserId) external whenNotPaused nonReentrant {
+    function withdrawFunds(uint256 fundraiserId) external whenNotPaused nonReentrant onlyAuthorizedOrOwner {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
         require(f.id != 0, "PoliDaoCore: Fundraiser not found");
+        require(!f.fundsWithdrawn, "PoliDaoCore: Already withdrawn");
+        require(block.timestamp > f.endDate, "PoliDaoCore: Fundraiser not ended");
+
+        // Restrict to creator or authorized/owner/router
+        address creator = storageContract.fundraiserCreators(fundraiserId);
+        require(
+            msg.sender == creator ||
+            msg.sender == owner() ||
+            msg.sender == routerContract ||
+            storageContract.isContractAuthorized(msg.sender),
+            "PoliDaoCore: Not creator or authorized"
+        );
+
         f.fundsWithdrawn = true;
         storageContract.updateFundraiser(fundraiserId, f);
     }
