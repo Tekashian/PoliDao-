@@ -301,7 +301,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         require(fundraiserIds.length <= MAX_BATCH_SIZE, "Core: batch too large");
 
         // ADDED: sum wsadu i pojedynczy transferFrom donor -> storage
-        uint256 total;
+        uint256 total = 0;
         unchecked {
             for (uint256 i = 0; i < amounts.length; ++i) {
                 total += amounts[i];
@@ -309,8 +309,6 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         }
         require(total > 0, "Core: zero total");
         IERC20(token).safeTransferFrom(donor, address(storageContract), total);
-
-        // Wewnętrzna pętla zapisów: weryfikuje spójność tokena per fundraiser
         storageContract.batchAddDonations(donor, token, fundraiserIds, amounts);
     }
 
