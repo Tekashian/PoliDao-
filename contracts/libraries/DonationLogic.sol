@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "../storage/PoliDaoStorage.sol";
+import "../interfaces/IPoliDaoStorage.sol";
 import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/**
- * @title DonationLogic
- * @notice Library containing business logic for donation operations
- * @dev Used by PoliDaoCore to handle donation processing
- * @author PoliDAO Team
- * @custom:version 1.0.0-UNIFIED
- */
 library DonationLogic {
     using SafeERC20 for IERC20;
 
@@ -48,16 +41,16 @@ library DonationLogic {
      * @param amount The donation amount
      */
     function processDonationLogic(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId,
         address donor,
         uint256 amount
     )
-        internal
+        public
     {
         // SECURITY: prevent arbitrary-from
         require(
-            msg.sender == donor || store.isAuthorized(msg.sender),
+            msg.sender == donor || store.isContractAuthorized(msg.sender),
             "DonationLogic: unauthorized transferFrom(from)"
         );
 
@@ -74,7 +67,7 @@ library DonationLogic {
         
         // Check fundraiser status
         if (fundraiser.status != uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE)) revert FundraiserNotActive();
-        if (block.timestamp > fundraiser.endDate) revert FundraiserEnded();
+        if (fundraiser.endDate > 0 && block.timestamp > fundraiser.endDate) revert FundraiserEnded();
         if (fundraiser.isSuspended) revert FundraiserSuspended();
         
         // Check for overflow protection
@@ -84,11 +77,9 @@ library DonationLogic {
         // ========== PROCESS DONATION ==========
 
         // Dodatkowa autoryzacja (opcjonalnie zachowaj)
-        require(msg.sender == donor || store.isAuthorized(msg.sender), "DonationLogic: unauthorized");
+        require(msg.sender == donor || store.isContractAuthorized(msg.sender), "DonationLogic: unauthorized");
 
         address token = store.fundraiserTokens(fundraiserId);
-
-        // Kluczowa zmiana: from = msg.sender (nie donor)
         IERC20(token).safeTransferFrom(msg.sender, address(store), amount);
 
         // Emit BEFORE external interaction (CEI)
@@ -106,10 +97,10 @@ library DonationLogic {
      * @return amount Donation amount
      */
     function getDonationAmount(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId,
         address donor
-    ) external view returns (uint256 amount) {
+    ) public view returns (uint256 amount) {
         if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
         return store.donations(fundraiserId, donor);
     }
@@ -121,9 +112,9 @@ library DonationLogic {
      * @return donors Array of donor addresses
      */
     function getFundraiserDonors(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId
-    ) external view returns (address[] memory donors) {
+    ) public view returns (address[] memory donors) {
         if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
         return store.getFundraiserDonors(fundraiserId);
     }
@@ -135,9 +126,9 @@ library DonationLogic {
      * @return count Number of unique donors
      */
     function getDonorCount(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId
-    ) external view returns (uint256 count) {
+    ) public view returns (uint256 count) {
         if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
         return store.getFundraiserDonors(fundraiserId).length;
     }
@@ -151,10 +142,10 @@ library DonationLogic {
      * @return reason Reason if invalid
      */
     function validateDonation(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId,
         uint256 amount
-    ) external view returns (bool isValid, string memory reason) {
+    ) public view returns (bool isValid, string memory reason) {
         IPoliDaoStructs.PackedFundraiserData memory fundraiser = store.fundraisers(fundraiserId);
         
         if (fundraiser.id == 0) {
@@ -173,7 +164,7 @@ library DonationLogic {
             return (false, "Fundraiser not active");
         }
         
-        if (block.timestamp > fundraiser.endDate) {
+        if (fundraiser.endDate > 0 && block.timestamp > fundraiser.endDate) {
             return (false, "Fundraiser ended");
         }
         
@@ -200,9 +191,9 @@ library DonationLogic {
      * @return progressPercentage Progress percentage (in basis points)
      */
     function getDonationStats(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId
-    ) external view returns (
+    ) public view returns (
         uint256 totalRaised,
         uint256 donorCount,
         uint256 averageDonation,
@@ -235,10 +226,10 @@ library DonationLogic {
     * @return amount Amount donated
      */
     function hasDonated(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId,
         address donor
-    ) external view returns (bool donated, uint256 amount) {
+    ) public view returns (bool donated, uint256 amount) {
     if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
 
     amount = store.donations(fundraiserId, donor);
@@ -256,10 +247,10 @@ library DonationLogic {
      * @return amounts Array of donation amounts
      */
     function getTopDonors(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId,
         uint256 limit
-    ) external view returns (address[] memory donors, uint256[] memory amounts) {
+    ) public view returns (address[] memory donors, uint256[] memory amounts) {
         if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
         
         address[] memory allDonors = store.getFundraiserDonors(fundraiserId);
@@ -319,12 +310,33 @@ library DonationLogic {
      * @param newAmount New donation amount
      */
     function updateDonationAmount(
-        PoliDaoStorage store,
+        IPoliDaoStorage store,
         uint256 fundraiserId,
         address donor,
         uint256 newAmount
-    ) external {
+    ) public {
         if (store.fundraisers(fundraiserId).id == 0) revert FundraiserNotFound();
         store.updateDonationAmount(fundraiserId, donor, newAmount);
+    }
+
+    // Delegacja donacji do storage (public – brak inline w Core)
+    function processDonation(
+        IPoliDaoStorage stor,
+        uint256 fundraiserId,
+        address donor,
+        uint256 amount
+    ) public {
+        stor.addDonation(fundraiserId, donor, amount);
+    }
+
+    // Delegacja batch donacji do storage (public – brak inline w Core)
+    function processBatchDonation(
+        IPoliDaoStorage stor,
+        address donor,
+        address expectedToken,
+        uint256[] calldata fundraiserIds,
+        uint256[] calldata amounts
+    ) public {
+        stor.batchAddDonations(donor, expectedToken, fundraiserIds, amounts);
     }
 }

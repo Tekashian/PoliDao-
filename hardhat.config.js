@@ -7,42 +7,13 @@ require("dotenv").config();
 module.exports = {
   // ========== SOLIDITY CONFIGURATION ==========
   solidity: {
-    version: "0.8.20", // ⭐ ZMIENIONE z 0.8.25 - lepsze dla optimizacji rozmiaru
+    version: "0.8.20",
     settings: {
-      optimizer: {
-        enabled: true,
-        runs: 1, // ⭐ KLUCZOWA ZMIANA: 1 run = maksymalna optymalizacja rozmiaru!
-        details: {
-          peephole: true,
-          inliner: true,
-          jumpdestRemover: true,
-          orderLiterals: true,
-          deduplicate: true,
-          cse: true,
-          constantOptimizer: true,
-          yul: true,
-          yulDetails: {
-            stackAllocation: true,
-            optimizerSteps: "dhfoDgvulfnTUtnIf"
-          }
-        }
-      },
-      viaIR: true, // ⭐ POZOSTAWIONE - najlepsze optymalizacje rozmiaru!
-      metadata: {
-        bytecodeHash: "none", // ⭐ Usuwa metadata hash - oszczędza ~53 bytes
-        appendCBOR: false     // ⭐ Usuwa CBOR encoding - oszczędza ~100 bytes
-      },
-      outputSelection: {
-        "*": {
-          "*": [
-            "evm.bytecode",
-            "evm.deployedBytecode",
-            "abi"
-          ]
-        }
-      },
-      evmVersion: "paris"
-    },
+      optimizer: { enabled: true, runs: 800 },
+      viaIR: true,
+      metadata: { bytecodeHash: "none" }
+      // debug: { revertStrings: "strip" } // tylko dla buildów prod, NIE dla testów
+    }
   },
 
   // ========== NETWORKS CONFIGURATION ==========
