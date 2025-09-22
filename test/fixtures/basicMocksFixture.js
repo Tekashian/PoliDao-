@@ -222,3 +222,46 @@ module.exports = {
     createFundraiserWithMaxLengths,
     addDonationWithUpdate
 };
+
+module.exports.deployExtensionWithStubCore = async function (hre) {
+  const [coreSigner, owner] = await hre.ethers.getSigners();
+
+  // 1) Deploy libraries
+  const ExtLibF = await hre.ethers.getContractFactory("ExtensionLogic", owner);
+  const extLib = await ExtLibF.deploy();
+  await extLib.waitForDeployment();
+
+  const LocLibF = await hre.ethers.getContractFactory("LocationLogic", owner);
+  const locLib = await LocLibF.deploy();
+  await locLib.waitForDeployment();
+
+  // 1a) Deploy MockToken (potrzebny do tworzenia fundraiserów)
+  const MockTokenF = await hre.ethers.getContractFactory("MockToken", owner);
+  const mockToken = await MockTokenF.deploy(
+    "Mock Token",
+    "MOCK",
+    hre.ethers.parseEther("1000000")
+  );
+  await mockToken.waitForDeployment();
+
+  // 2) Deploy storage
+  const StorageF = await hre.ethers.getContractFactory("PoliDaoStorage", owner);
+  const storage = await StorageF.deploy();
+  await storage.waitForDeployment();
+
+  // 3) Get linked factory for PoliDaoExtension
+  const ExtensionF = await hre.ethers.getContractFactory("PoliDaoExtension", {
+    libraries: {
+      ExtensionLogic: await extLib.getAddress(),
+      LocationLogic: await locLib.getAddress()
+    },
+    signer: owner
+  });
+
+  // 4) Deploy and initialize
+  const extension = await ExtensionF.deploy();
+  await extension.waitForDeployment();
+  await extension.initialize(await storage.getAddress(), coreSigner.address);
+
+  return { storage, extension, core: coreSigner, owner, mockToken };
+};
