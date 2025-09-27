@@ -11,6 +11,11 @@ import "../interfaces/IPoliDaoStructs.sol";
  * @dev Provides comprehensive platform and fundraiser analytics including donors functionality
  */
 contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
+   address public core;
+   bool public coreFrozen;
+   modifier onlyCore() { require(msg.sender == core, "Analytics: only Core"); _; }
+   function setCore(address _core) external onlyOwner { require(!coreFrozen,"Analytics: core frozen"); require(_core!=address(0),"Analytics: zero core"); core=_core; }
+   function freezeCore() external onlyOwner { require(core!=address(0),"Analytics: core not set"); coreFrozen=true; }
 
     // ========== CONSTANTS ==========
     
@@ -551,9 +556,10 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
             
             if (isSuspended) {
                 suspendedFundraisers++;
-            } else if (status == uint8(FundraiserStatus.ACTIVE)) {
+            // CHANGE: qualify enum to ensure symbol resolution
+            } else if (status == uint8(IPoliDaoStructs.FundraiserStatus.ACTIVE)) {
                 activeFundraisers++;
-            } else if (status == uint8(FundraiserStatus.SUCCESSFUL)) {
+            } else if (status == uint8(IPoliDaoStructs.FundraiserStatus.SUCCESSFUL)) {
                 successfulFundraisers++;
             }
         }
@@ -771,7 +777,6 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
     }
 
     // ========== EMERGENCY FUNCTIONS ==========
-    
     function emergencyPause() external onlyOwner {
         _pause();
     }

@@ -9,12 +9,12 @@ import "../interfaces/IPoliDaoStructs.sol";
 contract PoliDaoStorage is Ownable {
     using SafeERC20 for IERC20;
 
-    // OZ v5 Ownable requires initialOwner in constructor
     constructor() Ownable(msg.sender) {}
 
     // ===================== Core binding (hard ACL) =====================
     address public core;
     bool public coreFrozen;
+
     event CoreUpdated(address indexed previous, address indexed current, address indexed caller);
     event CoreFrozen(address indexed core, address indexed caller);
 
@@ -477,7 +477,7 @@ contract PoliDaoStorage is Ownable {
      * Owner: może ustawić dowolny nie‑zerowy lub wyczyścić.
      * Autoryzowany kontrakt: może tylko czyścić (moduleAddr == 0).
      */
-    function setModule(bytes32 key, address moduleAddr) external {
+    function setModule(bytes32 key, address moduleAddr) external onlyOwner {
         if (msg.sender != owner()) {
             require(moduleAddr == address(0) && _authorizedContracts[msg.sender], "PoliDaoStorage: not owner");
         }
@@ -538,5 +538,10 @@ contract PoliDaoStorage is Ownable {
 
             unchecked { ++i; }
         }
+    }
+
+    // ===================== Token whitelist (mutacje -> owner) =====================
+    function setFundraiserTokenWhitelist(address token, bool allowed) external onlyOwner {
+        _isWhitelisted[token] = allowed;
     }
 }

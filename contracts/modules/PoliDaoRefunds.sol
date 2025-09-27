@@ -23,6 +23,23 @@ contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
     uint256 public refundCommission = 100; // 1% default
     address public commissionWallet;
 
+    // Core binding (ACL)
+    address public core;
+    bool public coreFrozen;
+    modifier onlyCore() {
+        require(msg.sender == core, "Refunds: only Core");
+        _;
+    }
+    function setCore(address _core) external onlyOwner {
+        require(!coreFrozen, "Refunds: core frozen");
+        require(_core != address(0), "Refunds: zero core");
+        core = _core;
+    }
+    function freezeCore() external onlyOwner {
+        require(core != address(0), "Refunds: core not set");
+        coreFrozen = true;
+    }
+
     // DODANE: event aktualizacji mainContract
     event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
 
@@ -149,9 +166,9 @@ contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
         emit RefundProcessed(fundraiserId, donor, refundAmount, commission);
     }
 
-    function initiateClosure(uint256 fundraiserId, address creator, uint256 fundraiserEndTime) external whenNotPaused onlyMainContract {
+    function initiateClosure(uint256 fundraiserId, address creator, uint256 endDate) external onlyCore {
         require(!isFlexibleFundraiser[fundraiserId], "Flexible fundraisers cannot initiate closure");
-        require(block.timestamp > fundraiserEndTime, "Fundraiser still active");
+        require(block.timestamp > endDate, "Fundraiser still active");
         require(!closureInitiated[fundraiserId], "Closure already initiated");
 
         closureInitiated[fundraiserId] = true;

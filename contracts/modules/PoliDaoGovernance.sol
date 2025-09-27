@@ -10,8 +10,13 @@ import "../interfaces/IPoliDaoStructs.sol";
  * @notice Enhanced Governance module for PoliDAO with selective pausing and emergency functions
  * @dev Manages proposal creation, voting mechanism, selective pausing, and emergency governance
  */
-contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
-    
+contract PoliDaoGovernance is Ownable, Pausable {
+    address public core;
+    bool public coreFrozen;
+    modifier onlyCore() { require(msg.sender == core, "Governance: only Core"); _; }
+    function setCore(address _core) external onlyOwner { require(!coreFrozen,"Governance: core frozen"); require(_core!=address(0),"Governance: zero core"); core=_core; }
+    function freezeCore() external onlyOwner { require(core!=address(0),"Governance: core not set"); coreFrozen=true; }
+
     // ========== CONSTANTS ==========
     
     uint256 public constant MAX_PROPOSAL_DURATION = 30 days;
@@ -57,7 +62,11 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
     
     // ========== ENHANCED EVENTS ==========
     
-    // NOTE: ProposalCreated and Voted are inherited from IPoliDaoStructs
+    // NOTE: ProposalCreated and Voted są deklarowane lokalnie, aby były w zasięgu emit
+    event ProposalCreated(uint256 indexed proposalId, string question, uint256 endTime, address indexed proposer);
+    event Voted(address indexed voter, uint256 indexed proposalId, bool support);
+    // Dodano: zgodne z użyciem emit VoteCast(_proposalId, msg.sender, _support ? 1 : 2, 1);
+    event VoteCast(uint256 indexed proposalId, address indexed voter, uint8 support, uint256 weight);
     event ProposalExecuted(uint256 indexed proposalId, bool passed);
     event ProposerAuthorized(address indexed proposer);
     event ProposerRevoked(address indexed proposer);
@@ -72,10 +81,6 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
     event EmergencyGovernanceUnfreeze(address indexed initiator, uint256 timestamp);
     event BatchProposalsExecuted(uint256[] proposalIdsArray, address indexed executor);
     event EmergencyProposalClosed(uint256 indexed proposalId, string reason, address indexed closer);
-    // REMOVE this wrong redeclaration (was conflicting):
-    // event ProposalCreated(uint256 indexed proposalId, address indexed proposer, string title);
-    // Keep VoteCast if chcesz dodatkową semantykę
-    event VoteCast(uint256 indexed proposalId, address indexed voter, uint8 support, uint256 weight);
     
     // ========== MODIFIERS ==========
     
@@ -135,13 +140,9 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
     
     // ========== ADMIN FUNCTIONS ==========
     
-    function pause() external onlyOwner {
-        _pause();
-    }
-    
-    function unpause() external onlyOwner {
-        _unpause();
-    }
+    // Admin pause control (jeśli brak)
+    function pause() external onlyOwner { _pause(); }
+    function unpause() external onlyOwner { _unpause(); }
     
     function setMainContract(address _newMainContract) external onlyOwner {
         require(_newMainContract != address(0), "Invalid main contract");
@@ -431,7 +432,7 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
             bool exists,
             bool executed,
             uint256 createdAt,
-            ProposalStatus status,
+            IPoliDaoStructs.ProposalStatus status,
             uint256 timeRemaining,
             uint256 participationRate
         ) 
@@ -439,13 +440,15 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
         Proposal storage p = proposals[proposalId];
         
         // Calculate status
-        ProposalStatus currentStatus;
+        IPoliDaoStructs.ProposalStatus currentStatus;
         if (p.executed) {
-            currentStatus = ProposalStatus.EXECUTED;
+            currentStatus = IPoliDaoStructs.ProposalStatus.EXECUTED;
         } else if (block.timestamp <= p.endTime) {
-            currentStatus = ProposalStatus.ACTIVE;
+            currentStatus = IPoliDaoStructs.ProposalStatus.ACTIVE;
         } else {
-            currentStatus = p.yesVotes > p.noVotes ? ProposalStatus.PASSED : ProposalStatus.FAILED;
+            currentStatus = p.yesVotes > p.noVotes 
+                ? IPoliDaoStructs.ProposalStatus.PASSED 
+                : IPoliDaoStructs.ProposalStatus.FAILED;
         }
         
         // Calculate time remaining
@@ -514,19 +517,21 @@ contract PoliDaoGovernance is Ownable, Pausable, IPoliDaoStructs {
         external 
         view 
         validProposal(proposalId) 
-        returns (ProposalStatus) 
+        returns (IPoliDaoStructs.ProposalStatus) 
     {
         Proposal storage p = proposals[proposalId];
         
         if (p.executed) {
-            return ProposalStatus.EXECUTED;
+            return IPoliDaoStructs.ProposalStatus.EXECUTED;
         }
         
         if (block.timestamp <= p.endTime) {
-            return ProposalStatus.ACTIVE;
+            return IPoliDaoStructs.ProposalStatus.ACTIVE;
         }
         
-        return p.yesVotes > p.noVotes ? ProposalStatus.PASSED : ProposalStatus.FAILED;
+        return p.yesVotes > p.noVotes 
+            ? IPoliDaoStructs.ProposalStatus.PASSED 
+            : IPoliDaoStructs.ProposalStatus.FAILED;
     }
     
     function getProposalResults(uint256 proposalId) 

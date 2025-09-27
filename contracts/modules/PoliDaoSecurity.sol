@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IPoliDaoSecurity.sol";
+import "../interfaces/IPoliDaoStructs.sol";
 
 /**
  * @title PoliDaoSecurity - POPRAWIONA WERSJA EVENTÓW
@@ -12,8 +13,13 @@ import "../interfaces/IPoliDaoSecurity.sol";
  * @dev Handles circuit breakers, emergency controls, suspensions, and security monitoring
  * @dev WSZYSTKIE EVENTY POCHODZĄ Z IPoliDaoStructs - USUNIĘTO DUPLIKATY
  */
-contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity {
-    
+contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard {
+   address public core;
+   bool public coreFrozen;
+   modifier onlyCore() { require(msg.sender == core, "Security: only Core"); _; }
+   function setCore(address _core) external onlyOwner { require(!coreFrozen,"Security: core frozen"); require(_core!=address(0),"Security: zero core"); core=_core; }
+   function freezeCore() external onlyOwner { require(core!=address(0),"Security: core not set"); coreFrozen=true; }
+
     // ========== CONSTANTS ==========
     
     uint256 public constant MAX_SUSPENSION_DURATION = 365 days;
@@ -27,7 +33,7 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     address public mainContract;
     
     // Security state
-    SecurityLevel public currentSecurityLevel = SecurityLevel.NORMAL;
+    IPoliDaoSecurity.SecurityLevel public currentSecurityLevel = IPoliDaoSecurity.SecurityLevel.NORMAL;
     uint256 public securityLevelChangedAt;
     string public securityLevelReason;
     
@@ -74,7 +80,22 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     
     // DODANO: event aktualizacji mainContract
     event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
-    
+
+    // DODANO: brakujące eventy używane w emit
+    event EmergencyPauseActivated(address indexed triggeredBy, string reason, uint256 timestamp);
+    event EmergencyPauseDeactivated(address indexed triggeredBy, uint256 timestamp);
+    event SecurityLevelChanged(uint8 previousLevel, uint8 newLevel, address indexed actor, string reason);
+    event UserSuspended(address indexed user, address indexed by, string reason, uint256 duration, uint256 timestamp);
+    event UserUnsuspended(address indexed user, address indexed by, uint256 timestamp);
+    event FundraiserSuspended(uint256 indexed fundraiserId, address indexed by, string reason, uint256 timestamp);
+    event FundraiserUnsuspended(uint256 indexed fundraiserId, address indexed by, uint256 timestamp);
+    event TokenSuspended(address indexed token, address indexed by, string reason, uint256 timestamp);
+    event TokenUnsuspended(address indexed token, address indexed by, uint256 timestamp);
+    event SecurityGuardianAdded(address indexed guardian, address indexed by, uint256 permissions);
+    event SecurityGuardianRemoved(address indexed guardian, address indexed by);
+    event CircuitBreakerTriggered(string functionName, address indexed by, uint256 gasUsed, uint256 threshold, uint256 timestamp);
+    event RateLimitExceeded(address indexed user, string functionName, uint256 calls, uint256 maxCalls, uint256 windowStart);
+
     // ========== MODIFIERS ==========
     
     modifier onlyMainContract() {
@@ -96,7 +117,7 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
         _;
     }
     
-    modifier securityLevelCheck(SecurityLevel minLevel) {
+    modifier securityLevelCheck(IPoliDaoSecurity.SecurityLevel minLevel) {
         require(currentSecurityLevel <= minLevel, "Security level too high");
         _;
     }
@@ -165,18 +186,17 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
         emit EmergencyPauseDeactivated(msg.sender, block.timestamp);
     }
     
-    function setSecurityLevel(SecurityLevel newLevel, string calldata reason) 
+    function setSecurityLevel(IPoliDaoSecurity.SecurityLevel newLevel, string calldata reason) 
         external 
         onlyGuardianOrOwner(GUARDIAN_PERMISSIONS_EMERGENCY)
         rateLimited("securityAdmin")
         circuitBreaker("securityAdmin")
     {
-        SecurityLevel oldLevel = currentSecurityLevel;
+        IPoliDaoSecurity.SecurityLevel oldLevel = currentSecurityLevel;
         currentSecurityLevel = newLevel;
         securityLevelChangedAt = block.timestamp;
         securityLevelReason = reason;
-        
-        // Event z IPoliDaoStructs - używamy uint8 dla kompatybilności
+
         emit SecurityLevelChanged(uint8(oldLevel), uint8(newLevel), msg.sender, reason);
     }
     
@@ -219,36 +239,34 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
         emit UserUnsuspended(user, msg.sender, block.timestamp);
     }
     
-    function suspendFundraiser(uint256 fundraiserId, string calldata reason) 
+    function suspendFundraiser(uint256 fundraiserId, address requester, string calldata reason) 
         external 
-        onlyGuardianOrOwner(GUARDIAN_PERMISSIONS_SUSPEND)
-        nonReentrant
+        onlyCore
     {
         require(!fundraiserSuspensions[fundraiserId].isSuspended, "Already suspended");
+        require(requester != address(0), "Security: zero requester");
         
         fundraiserSuspensions[fundraiserId] = SuspensionInfo({
             isSuspended: true,
             suspendedAt: block.timestamp,
             suspensionEnd: 0, // Fundraiser suspensions are manual
             reason: reason,
-            suspendedBy: msg.sender
+            suspendedBy: requester
         });
         
-        // Event z IPoliDaoStructs - BEZ DUPLIKACJI
-        emit FundraiserSuspended(fundraiserId, msg.sender, reason, block.timestamp);
+        emit FundraiserSuspended(fundraiserId, requester, reason, block.timestamp);
     }
     
-    function unsuspendFundraiser(uint256 fundraiserId) 
+    function unsuspendFundraiser(uint256 fundraiserId, address requester) 
         external 
-        onlyGuardianOrOwner(GUARDIAN_PERMISSIONS_SUSPEND)
-        nonReentrant
+        onlyCore
     {
         require(fundraiserSuspensions[fundraiserId].isSuspended, "Not suspended");
+        require(requester != address(0), "Security: zero requester");
         
         delete fundraiserSuspensions[fundraiserId];
         
-        // Event z IPoliDaoStructs - BEZ DUPLIKACJI
-        emit FundraiserUnsuspended(fundraiserId, msg.sender, block.timestamp);
+        emit FundraiserUnsuspended(fundraiserId, requester, block.timestamp);
     }
     
     function suspendToken(address token, string calldata reason) 
@@ -356,16 +374,19 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     function _checkCircuitBreaker(string memory functionName, uint256 gasUsed) internal {
         uint256 threshold = gasThresholds[functionName];
         if (threshold > 0 && gasUsed > threshold) {
-            // Event z IPoliDaoStructs - BEZ DUPLIKACJI
             emit CircuitBreakerTriggered(functionName, msg.sender, gasUsed, threshold, block.timestamp);
-            
-            // Auto-elevate security level on repeated breaches
-            if (currentSecurityLevel == SecurityLevel.NORMAL) {
-                currentSecurityLevel = SecurityLevel.ELEVATED;
-                emit SecurityLevelChanged(uint8(SecurityLevel.NORMAL), uint8(SecurityLevel.ELEVATED), address(this), "Circuit breaker triggered");
+
+            if (currentSecurityLevel == IPoliDaoSecurity.SecurityLevel.NORMAL) {
+                currentSecurityLevel = IPoliDaoSecurity.SecurityLevel.ELEVATED;
+                emit SecurityLevelChanged(
+                    uint8(IPoliDaoSecurity.SecurityLevel.NORMAL),
+                    uint8(IPoliDaoSecurity.SecurityLevel.ELEVATED),
+                    address(this),
+                    "Circuit breaker triggered"
+                );
             }
         }
-        
+
         lastGasUsage[functionName][msg.sender] = gasUsed;
     }
     
@@ -433,7 +454,7 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
     function getSecurityLevel() 
         external 
         view 
-        returns (SecurityLevel level, uint256 lastChanged, string memory reason) 
+        returns (IPoliDaoSecurity.SecurityLevel level, uint256 lastChanged, string memory reason) 
     {
         return (currentSecurityLevel, securityLevelChangedAt, securityLevelReason);
     }
@@ -522,14 +543,11 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard, IPoliDaoSecurity
             uint256 suspendedUsers,
             uint256 suspendedFundraisers,
             uint256 suspendedTokens,
-            SecurityLevel currentLevel
+            IPoliDaoSecurity.SecurityLevel currentLevel
         ) 
     {
         totalGuardians = guardiansList.length;
         currentLevel = currentSecurityLevel;
-        
-        // Note: For gas efficiency, we don't count suspended items here
-        // This would require iterating through all items
         suspendedUsers = 0;
         suspendedFundraisers = 0;
         suspendedTokens = 0;

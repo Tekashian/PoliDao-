@@ -10,8 +10,7 @@ import "../interfaces/IPoliDaoStructs.sol";
  * @notice Simple media management module for PoliDAO
  * @dev Handles basic media operations for fundraisers
  */
-contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
-    
+contract PoliDaoMedia is Ownable, Pausable {
     // ========== CONSTANTS ==========
     
     uint256 public constant MAX_MEDIA_BATCH = 10;
@@ -25,7 +24,7 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     bool public coreFrozen;
 
     // Fundraiser ID => Media Gallery
-    mapping(uint256 => MediaItem[]) public fundraiserGallery;
+    mapping(uint256 => IPoliDaoStructs.MediaItem[]) public fundraiserGallery;
     
     // Media tracking per fundraiser [images, videos, audio, documents]
     mapping(uint256 => uint256[4]) public mediaTypeCounts;
@@ -39,6 +38,8 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     event MediaManagerRevoked(uint256 indexed fundraiserId, address indexed manager);
     // DODANE: event zmian adresu mainContract
     event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
+    event MediaAdded(uint256 indexed fundraiserId, string ipfsHash, uint8 mediaType, address indexed uploader);
+    event MediaRemoved(uint256 indexed fundraiserId, uint256 index, string ipfsHash);
     
     // ========== MODIFIERS ==========
     
@@ -56,9 +57,9 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
         _;
     }
 
-    modifier onlyCore() {
-        require(msg.sender == core, "Media: only Core");
-        _;
+    modifier onlyCore() { 
+        require(msg.sender == core, "Media: only Core"); 
+        _; 
     }
     
     // ========== CONSTRUCTOR ==========
@@ -101,7 +102,7 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
      */
     function addMediaToFundraiser(
         uint256 fundraiserId,
-        MediaItem[] calldata mediaItems
+        IPoliDaoStructs.MediaItem[] calldata mediaItems
     ) 
         external 
         whenNotPaused 
@@ -109,13 +110,13 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     {
         require(mediaItems.length <= MAX_MEDIA_BATCH, "Too many media items");
         
-        MediaItem[] storage gallery = fundraiserGallery[fundraiserId];
+        IPoliDaoStructs.MediaItem[] storage gallery = fundraiserGallery[fundraiserId];
         require(gallery.length + mediaItems.length <= MAX_TOTAL_MEDIA, "Media limit exceeded");
         
         uint256[4] storage typeCounts = mediaTypeCounts[fundraiserId];
         
         for (uint256 i = 0; i < mediaItems.length; i++) {
-            MediaItem memory item = mediaItems[i];
+            IPoliDaoStructs.MediaItem memory item = mediaItems[i];
             
             // Basic validation
             require(bytes(item.ipfsHash).length > 0, "Empty IPFS hash");
@@ -123,7 +124,7 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
             require(item.mediaType <= 3, "Invalid media type");
             
             // Create media item
-            MediaItem memory newItem = MediaItem({
+            IPoliDaoStructs.MediaItem memory newItem = IPoliDaoStructs.MediaItem({
                 ipfsHash: item.ipfsHash,
                 mediaType: item.mediaType,
                 filename: item.filename,
@@ -158,14 +159,14 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
         require(initialImages.length <= 10, "Too many images");
         require(initialVideos.length <= 3, "Too many videos");
         
-        MediaItem[] storage gallery = fundraiserGallery[fundraiserId];
+        IPoliDaoStructs.MediaItem[] storage gallery = fundraiserGallery[fundraiserId];
         uint256[4] storage typeCounts = mediaTypeCounts[fundraiserId];
         
         // Add images
         for (uint256 i = 0; i < initialImages.length; i++) {
             require(bytes(initialImages[i]).length > 0, "Empty image hash");
             
-            MediaItem memory newImage = MediaItem({
+            IPoliDaoStructs.MediaItem memory newImage = IPoliDaoStructs.MediaItem({
                 ipfsHash: initialImages[i],
                 mediaType: 0, // image
                 filename: string.concat("image_", _toString(i + 1), ".jpg"),
@@ -184,7 +185,7 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
         for (uint256 i = 0; i < initialVideos.length; i++) {
             require(bytes(initialVideos[i]).length > 0, "Empty video hash");
             
-            MediaItem memory newVideo = MediaItem({
+            IPoliDaoStructs.MediaItem memory newVideo = IPoliDaoStructs.MediaItem({
                 ipfsHash: initialVideos[i],
                 mediaType: 1, // video
                 filename: string.concat("video_", _toString(i + 1), ".mp4"),
@@ -213,10 +214,10 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
         whenNotPaused 
         onlyMediaManager(fundraiserId)
     {
-        MediaItem[] storage gallery = fundraiserGallery[fundraiserId];
+        IPoliDaoStructs.MediaItem[] storage gallery = fundraiserGallery[fundraiserId];
         require(mediaIndex < gallery.length, "Invalid media index");
         
-        MediaItem storage mediaToRemove = gallery[mediaIndex];
+        IPoliDaoStructs.MediaItem storage mediaToRemove = gallery[mediaIndex];
         uint8 mediaType = mediaToRemove.mediaType;
         string memory ipfsHash = mediaToRemove.ipfsHash;
         
@@ -264,7 +265,7 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     function getFundraiserGallery(uint256 fundraiserId) 
         external 
         view 
-        returns (MediaItem[] memory) 
+        returns (IPoliDaoStructs.MediaItem[] memory) 
     {
         return fundraiserGallery[fundraiserId];
     }
@@ -290,7 +291,7 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     function getMediaItem(uint256 fundraiserId, uint256 mediaIndex) 
         external 
         view 
-        returns (MediaItem memory) 
+        returns (IPoliDaoStructs.MediaItem memory) 
     {
         require(mediaIndex < fundraiserGallery[fundraiserId].length, "Invalid index");
         return fundraiserGallery[fundraiserId][mediaIndex];

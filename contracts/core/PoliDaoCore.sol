@@ -28,7 +28,6 @@ import "../libraries/RefundLogic.sol";
 contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     using Address for address;
 
-    // Dodane: brakujące custom errors używane w donateFrom/batchDonateFrom
     error FundraiserNotFound();
     error TokenNotSet();
 
@@ -285,12 +284,12 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         if (amount == 0) revert InvalidAmount();
         IPoliDaoStructs.PackedFundraiserData memory fPrev = storageContract.fundraisers(fundraiserId);
         if (fPrev.id == 0) revert FundraiserNotFound();
-        uint256 newRaised = uint256(fPrev.raisedAmount) + amount;
         address token = storageContract.fundraiserTokens(fundraiserId);
         if (token == address(0)) revert TokenNotSet();
 
-        DonationLogic.donate(storageContract, fundraiserId, donor, amount);
-        emit DonationMade(fundraiserId, donor, token, amount, newRaised);
+        uint256 received = DonationLogic.donate(storageContract, fundraiserId, donor, amount);
+        uint256 newRaised = uint256(fPrev.raisedAmount) + received;
+        emit DonationMade(fundraiserId, donor, token, received, newRaised);
     }
 
     function batchDonateFrom(address donor, uint256[] calldata fundraiserIds, uint256[] calldata amounts)
@@ -299,7 +298,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        if (fundraiserIds.length == 0 || fundraiserIds.length != amounts.length) revert InvalidInput();
+        require(fundraiserIds.length == amounts.length && fundraiserIds.length > 0, "PoliDaoCore: arrays mismatch");
         IPoliDaoStorage s = storageContract;
         for (uint256 i = 0; i < fundraiserIds.length; i++) {
             uint256 amt = amounts[i];
@@ -307,13 +306,12 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
             IPoliDaoStructs.PackedFundraiserData memory fPrev = s.fundraisers(fundraiserIds[i]);
             if (fPrev.id == 0) revert FundraiserNotFound();
-            uint256 newRaised = uint256(fPrev.raisedAmount) + amt;
-
             address token = s.fundraiserTokens(fundraiserIds[i]);
             if (token == address(0)) revert TokenNotSet();
 
-            DonationLogic.donate(s, fundraiserIds[i], donor, amt);
-            emit DonationMade(fundraiserIds[i], donor, token, amt, newRaised);
+            uint256 received = DonationLogic.donate(s, fundraiserIds[i], donor, amt);
+            uint256 newRaised = uint256(fPrev.raisedAmount) + received;
+            emit DonationMade(fundraiserIds[i], donor, token, received, newRaised);
         }
     }
 

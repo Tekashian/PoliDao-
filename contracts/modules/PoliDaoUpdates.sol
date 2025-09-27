@@ -10,8 +10,13 @@ import "../interfaces/IPoliDaoStructs.sol";
  * @notice Updates management module for PoliDAO
  * @dev Handles fundraiser updates, pinning system, and media attachments
  */
-contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
-    
+contract PoliDaoUpdates is Ownable, Pausable {
+   address public core;
+   bool public coreFrozen;
+   modifier onlyCore() { require(msg.sender == core, "Updates: only Core"); _; }
+   function setCore(address _core) external onlyOwner { require(!coreFrozen,"Updates: core frozen"); require(_core!=address(0),"Updates: zero core"); core=_core; }
+   function freezeCore() external onlyOwner { require(core!=address(0),"Updates: core not set"); coreFrozen=true; }
+
     // ========== CONSTANTS ==========
     
     uint256 public constant MAX_UPDATE_LENGTH = 1000;
@@ -24,7 +29,7 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
     uint256 public updateCount;
     
     // Update ID => Update
-    mapping(uint256 => FundraiserUpdate) public updates;
+    mapping(uint256 => IPoliDaoStructs.FundraiserUpdate) public updates;
     
     // Fundraiser ID => Update IDs array
     mapping(uint256 => uint256[]) public fundraiserUpdates;
@@ -46,6 +51,9 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
     event MediaContractUpdated(address indexed oldContract, address indexed newContract);
     // ADDED: unified main contract update event (used across modules)
     event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
+    // DODANE: eventy używane w emit
+    event UpdatePosted(uint256 indexed updateId, uint256 indexed fundraiserId, address indexed author, string content, uint8 updateType);
+    event UpdatePinned(uint256 indexed updateId, uint256 indexed fundraiserId);
     
     // ========== MODIFIERS ==========
     
@@ -107,12 +115,12 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
      */
     function postUpdate(
         uint256 fundraiserId,
-        string calldata content,
-        address author
+        address author,
+        string calldata content
     ) 
         external 
         whenNotPaused 
-        onlyMainContract
+        onlyCore
         returns (uint256 updateId)
     {
         require(bytes(content).length > 0, "Empty content");
@@ -121,7 +129,7 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
         updateCount++;
         updateId = updateCount;
         
-        FundraiserUpdate storage update = updates[updateId];
+        IPoliDaoStructs.FundraiserUpdate storage update = updates[updateId];
         update.id = updateId;
         update.fundraiserId = fundraiserId;
         update.author = author;
@@ -169,7 +177,7 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
         updateCount++;
         updateId = updateCount;
         
-        FundraiserUpdate storage update = updates[updateId];
+        IPoliDaoStructs.FundraiserUpdate storage update = updates[updateId];
         update.id = updateId;
         update.fundraiserId = fundraiserId;
         update.author = author;
@@ -218,7 +226,7 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
         updateCount++;
         updateId = updateCount;
         
-        FundraiserUpdate storage update = updates[updateId];
+        IPoliDaoStructs.FundraiserUpdate storage update = updates[updateId];
         update.id = updateId;
         update.fundraiserId = fundraiserId;
         update.author = author;
@@ -251,7 +259,7 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
         whenNotPaused 
         validUpdateId(updateId)
     {
-        FundraiserUpdate storage update = updates[updateId];
+        IPoliDaoStructs.FundraiserUpdate storage update = updates[updateId];
         uint256 fundraiserId = update.fundraiserId;
         
         // Check authorization through main contract
@@ -338,7 +346,7 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
             uint256[] memory mediaIds
         ) 
     {
-        FundraiserUpdate storage update = updates[updateId];
+        IPoliDaoStructs.FundraiserUpdate storage update = updates[updateId];
         return (
             update.id,
             update.fundraiserId,

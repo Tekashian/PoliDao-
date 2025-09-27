@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
@@ -13,7 +14,7 @@ import "@openzeppelin/contracts/utils/Address.sol";
 import "../interfaces/IPoliDao.sol";
 import "../interfaces/IPoliDaoWeb3.sol";
 
-contract PoliDaoWeb3 is IPoliDaoWeb3, Ownable, Pausable, ReentrancyGuard, EIP712 {
+contract PoliDaoWeb3 is Ownable, Pausable, ReentrancyGuard, EIP712, IPoliDaoWeb3 {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
 
@@ -35,6 +36,8 @@ contract PoliDaoWeb3 is IPoliDaoWeb3, Ownable, Pausable, ReentrancyGuard, EIP712
     // ========== STORAGE ==========
     
     address public mainContract;
+    address public core;
+    bool public coreFrozen;
     
     // Meta-transaction support
     mapping(address => uint256) public nonces;
@@ -74,6 +77,11 @@ contract PoliDaoWeb3 is IPoliDaoWeb3, Ownable, Pausable, ReentrancyGuard, EIP712
             "Meta-tx rate limit exceeded"
         );
         hourlyMetaTxCount[user][currentHour]++;
+        _;
+    }
+    
+    modifier onlyCore() {
+        require(msg.sender == core, "Web3: only Core");
         _;
     }
 
@@ -122,6 +130,17 @@ contract PoliDaoWeb3 is IPoliDaoWeb3, Ownable, Pausable, ReentrancyGuard, EIP712
         require(prev != newLimit, "No change");
         maxMetaTxPerHour = newLimit;
         emit MetaTxRateLimitUpdated(prev, newLimit);
+    }
+    
+    function setCore(address _core) external onlyOwner {
+        require(!coreFrozen,"Web3: core frozen"); 
+        require(_core!=address(0),"Web3: zero core"); 
+        core=_core; 
+    }
+    
+    function freezeCore() external onlyOwner { 
+        require(core!=address(0),"Web3: core not set"); 
+        coreFrozen=true; 
     }
 
     // ========== EIP-2612 PERMIT DONATIONS ==========

@@ -886,7 +886,6 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
     // ====== MODULE ALLOWLIST FOR GENERIC ROUTING ======
     // moduleKey -> selector -> allowed
     mapping(bytes32 => mapping(bytes4 => bool)) private _allowedSelectors;
-
     event ModuleSelectorAllowed(bytes32 indexed moduleKey, bytes4 indexed selector, bool allowed);
 
     function setAllowedSelector(bytes32 moduleKey, bytes4 selector, bool allowed) external onlyOwner {
@@ -901,10 +900,6 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         }
     }
 
-    function isSelectorAllowed(bytes32 moduleKey, bytes4 selector) external view returns (bool) {
-        return _allowedSelectors[moduleKey][selector];
-    }
-
     function routeModule(bytes32 moduleKey, bytes calldata data)
         external
         coreNotPaused
@@ -912,12 +907,12 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         returns (bytes memory)
     {
         require(data.length >= 4, "Router: data too short");
-        bytes4 sel;
+         bytes4 sel;
         assembly ("memory-safe") {
             sel := calldataload(data.offset)
         }
-        require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");
-        return coreContract.callModule(moduleKey, data);
+         require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");
+         return coreContract.callModule(moduleKey, data);
     }
 
     function routeModuleStatic(bytes32 moduleKey, bytes calldata data)
@@ -926,12 +921,12 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         returns (bytes memory)
     {
         require(data.length >= 4, "Router: data too short");
-        bytes4 sel;
+         bytes4 sel;
         assembly ("memory-safe") {
             sel := calldataload(data.offset)
         }
-        require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");
-        return coreContract.staticCallModule(moduleKey, data);
+         require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");
+         return coreContract.staticCallModule(moduleKey, data);
     }
 
     // Router has no local pause; use coreNotPaused modifier to gate calls
