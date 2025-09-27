@@ -77,7 +77,7 @@ contract PoliDaoUpdates is Ownable, Pausable, IPoliDaoStructs {
         mediaContract = _mediaContract;
     }
     
-    // ========== ADMIN FUNCTIONS ==========
+    // ========== ADMIN FUNCTIONS ========== 
     
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }

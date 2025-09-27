@@ -1,7 +1,11 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("@openzeppelin/hardhat-upgrades");
 require("hardhat-contract-sizer");
+require("@nomicfoundation/hardhat-verify");
 require("dotenv").config();
+
+const { SEPOLIA_RPC_URL, PRIVATE_KEY, ETHERSCAN_API_KEY } = process.env;
+const pk = PRIVATE_KEY ? (PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : `0x${PRIVATE_KEY}`) : undefined;
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -36,10 +40,17 @@ module.exports = {
       }
     },
 
+    sepolia: {
+      url: SEPOLIA_RPC_URL,
+      accounts: pk ? [pk] : [],
+      timeout: 120000,
+      confirmations: 2
+    },
+
     polygonAmoy: {
       url: process.env.POLYGON_AMOY_RPC || "https://rpc-amoy.polygon.technology/",
       chainId: 80002,
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      accounts: pk ? [pk] : [],
       gas: 30000000,
       gasPrice: 80000000000,
       timeout: 60000,
@@ -52,22 +63,12 @@ module.exports = {
     polygonMainnet: {
       url: process.env.POLYGON_MAINNET_RPC || "https://polygon-rpc.com/",
       chainId: 137,
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      accounts: pk ? [pk] : [],
       gas: 25000000,
       gasPrice: 50000000000,
       timeout: 120000,
       confirmations: 5,
       allowUnlimitedContractSize: false
-    },
-
-    sepolia: {
-      url: process.env.SEPOLIA_RPC || "https://eth-sepolia.g.alchemy.com/v2/demo",
-      chainId: 11155111,
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      gas: 25000000,
-      gasPrice: 20000000000,
-      timeout: 120000,
-      confirmations: 3
     }
   },
 
@@ -76,7 +77,7 @@ module.exports = {
     apiKey: {
       polygon: process.env.POLYGONSCAN_API_KEY || "",
       polygonAmoy: process.env.POLYGONSCAN_API_KEY || "",
-      sepolia: process.env.ETHERSCAN_API_KEY || ""
+      sepolia: ETHERSCAN_API_KEY,
     },
     customChains: [
       {

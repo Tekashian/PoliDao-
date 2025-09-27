@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../interfaces/IPoliDaoStorage.sol";
-import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "../storage/PoliDaoStorage.sol";
+import "../interfaces/IPoliDaoStorage.sol";
+import "../interfaces/IPoliDaoStructs.sol";
 
 library DonationLogic {
     using SafeERC20 for IERC20;
@@ -338,5 +339,31 @@ library DonationLogic {
         uint256[] calldata amounts
     ) public {
         stor.batchAddDonations(donor, expectedToken, fundraiserIds, amounts);
+    }
+
+    /**
+     * @notice Donate to a fundraiser
+     * @param s The storage contract instance
+     * @param fundraiserId The fundraiser ID
+     * @param donor The donor address
+     * @param amount The donation amount
+     */
+    function donate(
+        PoliDaoStorage s,
+        uint256 fundraiserId,
+        address donor,
+        uint256 amount
+    ) internal {
+        require(amount > 0, "Donation: zero amount");
+
+        // pobierz token przypisany do zbiorki
+        address token = s.fundraiserTokens(fundraiserId);
+        require(token != address(0), "Donation: invalid fundraiser");
+
+        // przenies srodki od darczyncy do storage (spender = Core)
+        IERC20(token).safeTransferFrom(donor, address(s), amount);
+
+        // zarejestruj darowizne w storage
+        s.addDonation(fundraiserId, donor, amount);
     }
 }

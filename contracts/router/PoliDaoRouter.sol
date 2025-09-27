@@ -398,24 +398,11 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         creationEnabled
         rateLimitCreation
         checkMinimumBalance
-        returns (uint256 fundraiserId)
+        returns (uint256)
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.createFundraiser(data) returns (uint256 id) {
-            fundraiserId = id;
-            return fundraiserId;
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        return coreContract.createFundraiserFor(msg.sender, data);
     }
-    
-    /**
-     * @notice Routes donation to core contract
-     * @param fundraiserId The fundraiser ID
-     * @param amount The donation amount
-     */
+
     function donate(uint256 fundraiserId, uint256 amount)
         external
         whenNotPaused
@@ -424,16 +411,27 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         donationsEnabled
         rateLimitDonations
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.donate(fundraiserId, amount) {
-            // no state writes after external call
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.donateFrom(fundraiserId, msg.sender, amount);
     }
-    
+
+    // Opcjonalnie: generyczne forwardery, gdy chcesz jeden endpoint
+    function routeModule(bytes32 moduleKey, bytes calldata data)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (bytes memory)
+    {
+        return coreContract.callModule(moduleKey, data);
+    }
+
+    function routeModuleStatic(bytes32 moduleKey, bytes calldata data)
+        external
+        view
+        returns (bytes memory)
+    {
+        return coreContract.staticCallModule(moduleKey, data);
+    }
+
     /**
      * @notice Routes fundraiser extension to core contract
      * @param fundraiserId The fundraiser ID
@@ -446,15 +444,10 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
         extensionsEnabled
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.extendFundraiser(fundraiserId, additionalDays) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        // bez try/catch – bubbliujemy prawdziwy powód z Core
+        coreContract.extendFundraiserFor(fundraiserId, msg.sender, additionalDays);
     }
-    
+
     /**
      * @notice Routes location update to core contract
      * @param fundraiserId The fundraiser ID
@@ -466,15 +459,9 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         notBanned
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.updateLocation(fundraiserId, newLocation) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.updateLocationFor(fundraiserId, msg.sender, newLocation);
     }
-    
+
     /**
      * @notice Routes withdrawal to core contract
      * @param fundraiserId The fundraiser ID
@@ -485,15 +472,9 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         notBanned
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.withdrawFunds(fundraiserId) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.withdrawFundsFor(fundraiserId, msg.sender);
     }
-    
+
     /**
      * @notice Routes refund to core contract
      * @param fundraiserId The fundraiser ID
@@ -504,17 +485,9 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         notBanned
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.refund(fundraiserId) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.refundFor(fundraiserId, msg.sender);
     }
-    
-    // ========== MODULE FUNCTION ROUTING ==========
-    
+
     /**
      * @notice Routes governance proposal creation
      * @param question Proposal question
@@ -527,16 +500,9 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
         returns (uint256 proposalId)
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.createProposal(question, duration) returns (uint256 id) {
-            proposalId = id;
-            return proposalId;
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        proposalId = coreContract.createProposalFor(msg.sender, question, duration);
     }
+
     /**
      * @notice Donate using permit (EIP-2612) - minimal stub to satisfy tests
      */
@@ -548,13 +514,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         bytes32 /*r*/,
         bytes32 /*s*/
     ) external whenNotPaused nonReentrant notBanned donationsEnabled rateLimitDonations {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.donate(fundraiserId, amount) {
-        } catch {
-            revert("PoliDaoRouter: Core call failed");
-        }
+        coreContract.donateFrom(fundraiserId, msg.sender, amount);
     }
 
     /**
@@ -566,13 +526,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         notBanned
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.suspendFundraiser(fundraiserId, reason) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.suspendFundraiserFor(fundraiserId, msg.sender, reason);
     }
 
     /**
@@ -585,15 +539,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         notBanned
         returns (uint256 proposalId)
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.createProposal(question, duration) returns (uint256 id) {
-            proposalId = id;
-            return proposalId;
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        proposalId = coreContract.createProposalFor(msg.sender, question, duration);
     }
     
     /**
@@ -607,13 +553,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         notBanned
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.vote(proposalId, support) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.voteFor(proposalId, msg.sender, support);
     }
     
     /**
@@ -630,13 +570,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         notBanned
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.addMediaToFundraiser(fundraiserId, mediaItems) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.addMediaToFundraiserFor(fundraiserId, msg.sender, mediaItems);
     }
 
     /**
@@ -669,13 +603,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         notBanned
     {
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.postUpdate(fundraiserId, content) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.postUpdateFor(fundraiserId, msg.sender, content);
     }
     
     /**
@@ -698,14 +626,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
             );
             userDonationCount[msg.sender][currentWindow] += fundraiserIds.length;
         }
-
-        _incrementTransactionCount();
-        lastSuccessfulTransaction = block.timestamp;
-
-        try coreContract.batchDonate(fundraiserIds, amounts) {
-        } catch {
-            revert("PoliDaoRouter: Core contract call failed");
-        }
+        coreContract.batchDonateFrom(msg.sender, fundraiserIds, amounts);
     }
     
     // ========== VIEW FUNCTIONS (PASSTHROUGH) ==========

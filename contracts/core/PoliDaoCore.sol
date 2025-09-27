@@ -14,8 +14,12 @@ import "@openzeppelin/contracts/utils/Address.sol";
 
 import "../libraries/FundraiserLogic.sol";
 import "../storage/PoliDaoStorage.sol";
-// DODANE: delegacja donacji do biblioteki
-/**
+// DODANE
+import "../libraries/DonationLogic.sol";
+import "../libraries/WithdrawLogic.sol";
+import "../libraries/RefundLogic.sol";
+
+ /**
  * @title PoliDaoCore
  * @notice Lightweight core contract - coordinates between storage, extensions, and modules
  * @dev Thin controller that delegates complex logic to specialized contracts
@@ -51,7 +55,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
     // ---- UPGRADE CONTROL ----
     bool private _modulesMutable = true;
-    
+
     // ========== EVENTS ==========
     /// @notice Emitted when a fundraiser is created
     event FundraiserCreated(
@@ -64,7 +68,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         uint256 endDate,
         string location
     );
-    
+
     /// @notice Emitted when a donation is made
     event DonationMade(
         uint256 indexed fundraiserId,
@@ -76,34 +80,21 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
     // DODANE: event wymagany przez test withdraw.integration.test.js
     event FundsWithdrawn(uint256 indexed fundraiserId, address indexed creator, address indexed token, uint256 amount);
-
-    /// @notice Emitted when extensions contract is updated
     event ExtensionsContractUpdated(address indexed oldExtensions, address indexed newExtensions);
-    
-    /// @notice Emitted when router contract is updated
     event RouterContractUpdated(address indexed oldRouter, address indexed newRouter);
 
-    /// @notice Emitted when a fundraiser is suspended
-    event FundraiserSuspended(
-        uint256 indexed id,
-        address indexed suspendedBy,
-        string reason,
-        uint256 timestamp
-    );
-
-    /// @notice Emitted when a module notification is attempted (best-effort)
-    event ModuleNotificationSucceeded(bytes32 indexed moduleKey, address indexed module, bytes4 selector);
-    event ModuleNotificationFailed(bytes32 indexed moduleKey, address indexed module, bytes4 selector, bytes reason);
-    event ModuleUpgraded(string indexed moduleType, address indexed oldModule, address indexed newModule);
-    event ModuleDisabled(string indexed moduleType, address indexed oldModule);
+// DODANE: brakujące eventy używane w kodzie
+    event FundraiserSuspended(uint256 indexed fundraiserId, address indexed by, string reason, uint256 timestamp);
+    event ModuleNotificationSucceeded(bytes32 indexed moduleKey, address module, bytes4 selector);
+    event ModuleNotificationFailed(bytes32 indexed moduleKey, address module, bytes4 selector, bytes reason);
+    event ModuleDisabled(string label, address oldAddr);
+    event ModuleUpgraded(string label, address oldAddr, address newAddr);
     event ModulesLocked();
-    event ModuleDisableFlagSet(bytes32 indexed moduleKey, bool disabled);
 
     // ========== MODIFIERS ==========
-    
     /// @notice Ensures only router can call certain functions
     modifier onlyRouter() {
-        require(msg.sender == routerContract, "PoliDaoCore: Only router");
+        require(msg.sender == routerContract, "PoliDaoCore: only router");
         _;
     }
     
@@ -136,20 +127,13 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     }
 
     // ========== CONSTRUCTOR ==========
-    
-    /**
-     * @notice Initializes the core contract
-     * @param _storageContract Address of the unified storage contract
-     * @param _routerContract Address of the router contract
-     */
-    // Keep constructor for legacy direct deployments
-    constructor(address _storageContract, address _routerContract) Ownable(msg.sender) {
+    constructor(address _storageContract, address _routerContract) Ownable(msg.sender) { 
         require(_storageContract != address(0), "PoliDaoCore: Invalid storage contract");
         require(_routerContract != address(0), "PoliDaoCore: Invalid router contract");
         
         storageContract = IPoliDaoStorage(_storageContract);
         routerContract = _routerContract;
-        _initialized = true; // <<< zablokuj initialize po direct deploy
+        emit RouterContractUpdated(address(0), _routerContract);
     }
 
     // initializer for clone deployments
@@ -180,20 +164,14 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         emit ExtensionsContractUpdated(oldExtensions, _extensionsContract);
     }
     
-    /**
-     * @notice Sets the router contract address
-     * @param _routerContract Address of the router contract
-     */
-    function setRouterContract(address _routerContract) external onlyOwner {
-        require(_routerContract != address(0), "PoliDaoCore: Invalid router contract");
-        require(_hasCode(_routerContract), "PoliDaoCore: Router must be a contract");
-        
-        address oldRouter = routerContract;
-        routerContract = _routerContract;
-        
-        emit RouterContractUpdated(oldRouter, _routerContract);
+    // ========== ADMIN: SET ROUTER ==========
+    function setRouterContract(address _router) external onlyOwner {
+        require(_router != address(0), "PoliDaoCore: invalid router");
+        address old = routerContract;
+        routerContract = _router;
+        emit RouterContractUpdated(old, _router);
     }
-    
+
     // ========== CORE BUSINESS LOGIC ==========
     
     /**
@@ -251,6 +229,39 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice Creates a new fundraiser (for router)
+     * @param creator The creator address
+     * @param data Struct containing all fundraiser creation parameters
+     * @return fundraiserId The ID of the newly created fundraiser
+     */
+    function createFundraiserFor(
+        address creator,
+        IPoliDaoStructs.FundraiserCreationData memory data
+    )
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+        returns (uint256 fundraiserId)
+    {
+        require(creator != address(0), "PoliDaoCore: Creator required");
+        require(bytes(data.title).length > 0, "PoliDaoCore: Title required");
+        require(data.endDate > block.timestamp, "PoliDaoCore: Invalid end date");
+        require(storageContract.isTokenWhitelisted(data.token), "PoliDaoCore: Token not whitelisted");
+        if (data.fundraiserType == IPoliDaoStructs.FundraiserType.WITH_GOAL) {
+            require(data.goalAmount > 0, "PoliDaoCore: Goal amount required");
+        }
+
+        fundraiserId = FundraiserLogic.createFundraiserLogic(
+            PoliDaoStorage(address(storageContract)),
+            data,
+            creator
+        );
+        // opcjonalne notyfikacje do modułów...
+        return fundraiserId;
+    }
+
+    /**
      * @notice Extends a fundraiser by adding additional days
      * @param fundraiserId The fundraiser ID to extend
      * @param additionalDays Number of days to extend
@@ -287,6 +298,20 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         storageContract.addDonation(fundraiserId, msg.sender, amount);
     }
     
+    function donateFrom(uint256 fundraiserId, address donor, uint256 amount)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        if (amount == 0) revert InvalidAmount();
+        address token = storageContract.fundraiserTokens(fundraiserId);
+        require(token != address(0), "Core: no token");
+        IERC20(token).safeTransferFrom(donor, address(storageContract), amount);
+        storageContract.addDonation(fundraiserId, donor, amount);
+        emit DonationMade(fundraiserId, donor, token, amount, amount);
+    }
+
     function donateBatchFrom(
         uint256[] calldata /* amounts */
     )
@@ -964,5 +989,161 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
     function areModuleUpgradesOpen() external view returns (bool) {
         return _modulesMutable;
+    }
+    function extendFundraiserFor(uint256 fundraiserId, address requester, uint256 additionalDays)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
+        address creator = storageContract.fundraiserCreators(fundraiserId);
+        require(
+            requester == creator || requester == owner() || _isAuthorized(requester),
+            "PoliDaoCore: Not authorized"
+        );
+        require(!f.isSuspended, "PoliDaoCore: Suspended");
+        f.endDate = f.endDate + uint64(additionalDays * 1 days);
+        storageContract.updateFundraiser(fundraiserId, f);
+    }
+
+    function updateLocationFor(uint256 fundraiserId, address requester, string calldata newLocation)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
+        address creator = storageContract.fundraiserCreators(fundraiserId);
+        require(
+            requester == creator || requester == owner() || _isAuthorized(requester),
+            "PoliDaoCore: Not authorized"
+        );
+        storageContract.updateFundraiserLocation(fundraiserId, newLocation);
+    }
+
+    function withdrawFundsFor(uint256 fundraiserId, address requester)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        require(f.id != 0, "PoliDaoCore: Invalid fundraiser");
+        require(!f.fundsWithdrawn, "PoliDaoCore: Already withdrawn");
+
+        require(
+            f.endDate == 0 || block.timestamp > f.endDate || f.isFlexible,
+            "PoliDaoCore: Fundraiser not ended"
+        );
+
+        address creator = storageContract.fundraiserCreators(fundraiserId);
+        require(
+            requester == creator || requester == owner() || _isAuthorized(requester),
+            "PoliDaoCore: Not authorized"
+        );
+
+        address token = storageContract.fundraiserTokens(fundraiserId);
+        uint256 amount = uint256(f.raisedAmount);
+        require(amount > 0, "PoliDaoCore: Nothing to withdraw");
+        require(token != address(0), "PoliDaoCore: Token not set");
+
+        storageContract.releaseFunds(token, creator, amount);
+
+        f.fundsWithdrawn = true;
+        storageContract.updateFundraiser(fundraiserId, f);
+
+        emit FundsWithdrawn(fundraiserId, creator, token, amount);
+    }
+
+    function refundFor(uint256 fundraiserId, address donor)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        // delegacja do modułu REFUNDS – bez twardej zależności od sygnatury biblioteki
+        _notifyModule("REFUNDS", abi.encodeWithSignature(
+            "claimRefund(uint256,address)", fundraiserId, donor
+        ));
+    }
+
+    function batchDonateFrom(address donor, uint256[] calldata fundraiserIds, uint256[] calldata amounts)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        require(fundraiserIds.length == amounts.length && fundraiserIds.length > 0, "PoliDaoCore: arrays mismatch");
+        PoliDaoStorage s = PoliDaoStorage(address(storageContract));
+        for (uint256 i = 0; i < fundraiserIds.length; i++) {
+            uint256 amt = amounts[i];
+            if (amt == 0) continue;
+            DonationLogic.donate(s, fundraiserIds[i], donor, amt);
+        }
+    }
+
+    function createProposalFor(address /*proposer*/, string calldata /*question*/, uint256 /*duration*/)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+        returns (uint256)
+    {
+        // opcjonalnie: _notifyModule("GOVERNANCE", ...)
+        return 0;
+    }
+
+    function voteFor(uint256 /*proposalId*/, address /*voter*/, bool /*support*/)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        _notifyModule("GOVERNANCE", abi.encodeWithSignature("vote(uint256,bool)", uint256(0), false));
+    }
+
+    function addMediaToFundraiserFor(
+        uint256 /*fundraiserId*/,
+        address /*requester*/,
+        IPoliDaoStructs.MediaItem[] calldata /*mediaItems*/
+    )
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        _notifyModule("MEDIA", abi.encodeWithSignature("addMedia(uint256,(string,string)[])", uint256(0), new IPoliDaoStructs.MediaItem[](0)));
+    }
+
+    function postUpdateFor(uint256 /*fundraiserId*/, address /*requester*/, string calldata /*content*/)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        _notifyModule("UPDATES", abi.encodeWithSignature("postUpdate(uint256,string)", uint256(0), ""));
+    }
+
+    function suspendFundraiserFor(uint256 fundraiserId, address requester, string calldata reason)
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRouter
+    {
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
+        require(
+            requester == owner() || _isAuthorized(requester),
+            "PoliDaoCore: Not authorized"
+        );
+        if (!f.isSuspended) {
+            f.isSuspended = true;
+            f.suspensionTime = uint32(block.timestamp);
+            storageContract.updateFundraiser(fundraiserId, f);
+        }
+        emit FundraiserSuspended(fundraiserId, requester, reason, block.timestamp);
     }
 }

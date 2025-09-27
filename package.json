@@ -6,7 +6,8 @@
     "test": "test"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:abi": "hardhat compile && node scripts/build-abi.js"
   },
   "keywords": [],
   "author": "",
