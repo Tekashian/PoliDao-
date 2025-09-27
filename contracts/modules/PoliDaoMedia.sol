@@ -21,7 +21,9 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
     // ========== STORAGE ==========
     
     address public mainContract;
-    
+    address public core;
+    bool public coreFrozen;
+
     // Fundraiser ID => Media Gallery
     mapping(uint256 => MediaItem[]) public fundraiserGallery;
     
@@ -53,6 +55,11 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
         );
         _;
     }
+
+    modifier onlyCore() {
+        require(msg.sender == core, "Media: only Core");
+        _;
+    }
     
     // ========== CONSTRUCTOR ==========
     
@@ -72,6 +79,17 @@ contract PoliDaoMedia is Ownable, Pausable, IPoliDaoStructs {
         require(prev != _newMainContract, "No change");
         mainContract = _newMainContract;
         emit MainContractUpdated(prev, _newMainContract, msg.sender);
+    }
+
+    function setCore(address _core) external onlyOwner {
+        require(!coreFrozen, "Media: core frozen");
+        require(_core != address(0), "Media: zero core");
+        core = _core;
+    }
+
+    function freezeCore() external onlyOwner {
+        require(core != address(0), "Media: core not set");
+        coreFrozen = true;
     }
     
     // ========== MEDIA FUNCTIONS ==========

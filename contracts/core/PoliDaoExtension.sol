@@ -94,6 +94,18 @@ contract PoliDaoExtension is Ownable, ReentrancyGuard, IPoliDaoStructs, IExtensi
         IPoliDaoSecurity(securityModule).suspendFundraiser(fundraiserId, reason);
     }
 
+    // Overload wymagany przez Core: suspendFundraiser(uint256,address,string)
+    // requester przekazywany przez Core – obecny security module nie wymaga go, więc param jest informacyjny.
+    function suspendFundraiser(uint256 fundraiserId, address /*requester*/, string calldata reason)
+        external
+        onlyCore
+        nonReentrant
+    {
+        // Powtórz lekką logikę, aby uniknąć this.call i konfliktu z nonReentrant
+        require(securityModule != address(0), "Extension: securityModule not set");
+        IPoliDaoSecurity(securityModule).suspendFundraiser(fundraiserId, reason);
+    }
+
     function unsuspendFundraiser(uint256 fundraiserId)
         external
         onlyCore
@@ -112,10 +124,29 @@ contract PoliDaoExtension is Ownable, ReentrancyGuard, IPoliDaoStructs, IExtensi
         ExtensionLogic.extendFundraiser(storageContract, fundraiserId, additionalDays, caller);
     }
 
+    // Overload wymagany przez Core: extendFundraiser(uint256,address,uint256)
+    function extendFundraiser(uint256 fundraiserId, address caller, uint256 additionalDays)
+        external
+        onlyCore
+        nonReentrant
+    {
+        // Deleguj do tej samej logiki (zamiana kolejności argumentów)
+        ExtensionLogic.extendFundraiser(storageContract, fundraiserId, additionalDays, caller);
+    }
+
     function updateLocation(uint256 fundraiserId, string calldata newLocation, address caller)
         external
         onlyCore
     {
+        LocationLogic.updateLocation(storageContract, fundraiserId, newLocation, caller);
+    }
+
+    // Overload wymagany przez Core: updateLocation(uint256,address,string)
+    function updateLocation(uint256 fundraiserId, address caller, string calldata newLocation)
+        external
+        onlyCore
+    {
+        // Deleguj do tej samej logiki (zamiana kolejności argumentów)
         LocationLogic.updateLocation(storageContract, fundraiserId, newLocation, caller);
     }
 

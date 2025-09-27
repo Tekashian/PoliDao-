@@ -12,6 +12,33 @@ contract PoliDaoStorage is Ownable {
     // OZ v5 Ownable requires initialOwner in constructor
     constructor() Ownable(msg.sender) {}
 
+    // ===================== Core binding (hard ACL) =====================
+    address public core;
+    bool public coreFrozen;
+    event CoreUpdated(address indexed previous, address indexed current, address indexed caller);
+    event CoreFrozen(address indexed core, address indexed caller);
+
+    modifier onlyCore() {
+        require(msg.sender == core, "Storage: only Core");
+        _;
+    }
+
+    function setCore(address _core) external onlyOwner {
+        require(!coreFrozen, "Storage: core frozen");
+        require(_core != address(0), "Storage: zero core");
+        address prev = core;
+        require(prev != _core, "Storage: no change");
+        core = _core;
+        emit CoreUpdated(prev, _core, msg.sender);
+    }
+
+    function freezeCore() external onlyOwner {
+        require(core != address(0), "Storage: core not set");
+        require(!coreFrozen, "Storage: already frozen");
+        coreFrozen = true;
+        emit CoreFrozen(core, msg.sender);
+    }
+
     // ===================== Constants (libraries expect public getters) =====================
     // Extension/creation constraints
     uint256 public constant MAX_EXTENSION_DAYS = 365;
@@ -168,7 +195,7 @@ contract PoliDaoStorage is Ownable {
         string memory location,
         address creator,
         address token
-    ) external returns (uint256 fundraiserId) {
+    ) external onlyCore returns (uint256 fundraiserId) {
         require(creator != address(0), "Invalid creator");
         require(token != address(0), "Invalid token");
         require(isTokenWhitelisted(token), "Token not whitelisted");
@@ -189,7 +216,7 @@ contract PoliDaoStorage is Ownable {
     }
 
     // Starter: prosty wariant używany w testach/demach
-    function createFundraiser(address token) external returns (uint256 fundraiserId) {
+    function createFundraiser(address token) external onlyCore returns (uint256 fundraiserId) {
         require(token != address(0), "Invalid token");
         require(isTokenWhitelisted(token), "Token not whitelisted");
         IPoliDaoStructs.PackedFundraiserData memory data = IPoliDaoStructs.PackedFundraiserData({
@@ -218,15 +245,7 @@ contract PoliDaoStorage is Ownable {
     function updateFundraiser(
         uint256 fundraiserId,
         IPoliDaoStructs.PackedFundraiserData calldata data
-    ) external {
-        // kontrola dostępu
-        require(
-            msg.sender == owner() ||
-            isContractAuthorized(msg.sender) ||
-            msg.sender == _authorizedRouter,
-            "Storage: not authorized"
-        );
-
+    ) external onlyCore {
         // weryfikacja istnienia
         IPoliDaoStructs.PackedFundraiserData storage f = _fundraisers[fundraiserId];
         require(f.id != 0, "Fundraiser not found");
@@ -241,14 +260,12 @@ contract PoliDaoStorage is Ownable {
     }
 
     // Update status (used by modules)
-    function updateFundraiserStatus(uint256 fundraiserId, uint8 newStatus) external {
-        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+    function updateFundraiserStatus(uint256 fundraiserId, uint8 newStatus) external onlyCore {
         _fundraisers[fundraiserId].status = newStatus;
     }
 
     // Update raised amount (used by donation/withdraw/refund flows)
-    function updateRaisedAmount(uint256 fundraiserId, uint256 newAmount) external {
-        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+    function updateRaisedAmount(uint256 fundraiserId, uint256 newAmount) external onlyCore {
         require(newAmount <= type(uint128).max, "Overflow");
         _fundraisers[fundraiserId].raisedAmount = uint128(newAmount);
     }
@@ -259,30 +276,17 @@ contract PoliDaoStorage is Ownable {
     event FundraiserLocationUpdated(uint256 indexed fundraiserId, string newLocation, address indexed caller);
 
     // Location/title/description updates (wrappers expected by LocationLogic)
-    function updateFundraiserLocation(uint256 fundraiserId, string memory newLocation) external {
-        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+    function updateFundraiserLocation(uint256 fundraiserId, string memory newLocation) external onlyCore {
         fundraiserLocations[fundraiserId] = newLocation;
     }
 
     // Optional helpers (not strictly required by libs, but useful)
-    function setFundraiserTitle(uint256 fundraiserId, string memory newTitle) external {
-        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+    function setFundraiserTitle(uint256 fundraiserId, string memory newTitle) external onlyCore {
         fundraiserTitles[fundraiserId] = newTitle;
     }
 
-    function setFundraiserDescription(uint256 fundraiserId, string memory newDescription) external {
-        require(msg.sender == owner() || isContractAuthorized(msg.sender), "Not authorized");
+    function setFundraiserDescription(uint256 fundraiserId, string memory newDescription) external onlyCore {
         fundraiserDescriptions[fundraiserId] = newDescription;
-    }
-
-    // === ADDED: authorization modifier (uses existing vars) ===
-    modifier onlyAuthorized() {
-        // _authorizedContracts and _authorizedRouter already exist in this contract
-        require(
-            _authorizedContracts[msg.sender] || msg.sender == owner() || msg.sender == _authorizedRouter,
-            "PoliDaoStorage: Not authorized"
-        );
-        _;
     }
 
     // Helper: public-auth check for libraries/modules without exposing internal mappings
@@ -300,7 +304,7 @@ contract PoliDaoStorage is Ownable {
         uint256 fundraiserId,
         address donor,
         uint256 amount
-    ) public {
+    ) public onlyCore {
         require(amount > 0, "Amount must be greater than zero");
         require(fundraiserId > 0 && fundraiserId <= fundraiserCounter, "Invalid fundraiser ID");
 
@@ -339,7 +343,7 @@ contract PoliDaoStorage is Ownable {
         uint256 fundraiserId,
         address donor,
         uint256 newAmount
-    ) external {
+    ) external onlyCore {
         require(fundraiserId > 0 && fundraiserId <= fundraiserCounter, "Invalid fundraiser ID");
         require(donor != address(0), "Invalid donor");
 
@@ -503,11 +507,9 @@ contract PoliDaoStorage is Ownable {
     }
 
     // ===================== Funds release =====================
-    function releaseFunds(address token, address to, uint256 amount) external onlyAuthorized {
+    function releaseFunds(address token, address to, uint256 amount) external onlyCore {
         require(to != address(0) && amount > 0, "Invalid");
-        // CEI: emit before external interaction (event zostanie wycofany przy ewentualnym revert)
         emit FundsReleased(token, to, amount, msg.sender);
-        // Interakcja zewnętrzna
         IERC20(token).safeTransfer(to, amount);
     }
 
@@ -521,7 +523,7 @@ contract PoliDaoStorage is Ownable {
         address expectedToken,
         uint256[] calldata fundraiserIds,
         uint256[] calldata amounts
-    ) external {
+    ) external onlyCore {
         require(fundraiserIds.length == amounts.length, "Storage: length mismatch");
         uint256 len = fundraiserIds.length;
         for (uint256 i = 0; i < len; ) {

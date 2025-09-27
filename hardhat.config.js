@@ -13,10 +13,8 @@ module.exports = {
   solidity: {
     version: "0.8.20",
     settings: {
-      optimizer: { enabled: true, runs: 800 },
-      viaIR: true,
-      metadata: { bytecodeHash: "none" }
-      // debug: { revertStrings: "strip" } // tylko dla buildów prod, NIE dla testów
+      optimizer: { enabled: true, runs: 200 },
+      viaIR: true
     }
   },
 

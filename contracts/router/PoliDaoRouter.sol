@@ -6,8 +6,16 @@ import "../interfaces/IPoliDao.sol";
 import "../interfaces/IPoliDaoStorage.sol";
 import "../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+// Minimalny interfejs EIP-2612 (permit)
+interface IERC20Permit {
+    function permit(
+        address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s
+    ) external;
+    function nonces(address owner) external view returns (uint256);
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+}
 
 /**
  * @title PoliDaoRouter
@@ -17,7 +25,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  * @custom:version 1.0.0-UNIFIED
  * @custom:security-contact security@polidao.org
  */
-contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
+contract PoliDaoRouter is Ownable, ReentrancyGuard {
     
     // ========== CORE CONTRACT ==========
     
@@ -224,8 +232,6 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         donationsDisabled = true;
         creationDisabled = true;
         extensionsDisabled = true;
-        _pause();
-        
         emit EmergencyControlToggled("all", true);
     }
     
@@ -236,8 +242,6 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         donationsDisabled = false;
         creationDisabled = false;
         extensionsDisabled = false;
-        _unpause();
-        
         emit EmergencyControlToggled("all", false);
     }
     
@@ -392,7 +396,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function createFundraiser(IPoliDaoStructs.FundraiserCreationData calldata data)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
         creationEnabled
@@ -405,31 +409,13 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
 
     function donate(uint256 fundraiserId, uint256 amount)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
         donationsEnabled
         rateLimitDonations
     {
         coreContract.donateFrom(fundraiserId, msg.sender, amount);
-    }
-
-    // Opcjonalnie: generyczne forwardery, gdy chcesz jeden endpoint
-    function routeModule(bytes32 moduleKey, bytes calldata data)
-        external
-        whenNotPaused
-        nonReentrant
-        returns (bytes memory)
-    {
-        return coreContract.callModule(moduleKey, data);
-    }
-
-    function routeModuleStatic(bytes32 moduleKey, bytes calldata data)
-        external
-        view
-        returns (bytes memory)
-    {
-        return coreContract.staticCallModule(moduleKey, data);
     }
 
     /**
@@ -439,12 +425,11 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function extendFundraiser(uint256 fundraiserId, uint256 additionalDays)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
         extensionsEnabled
     {
-        // bez try/catch – bubbliujemy prawdziwy powód z Core
         coreContract.extendFundraiserFor(fundraiserId, msg.sender, additionalDays);
     }
 
@@ -455,7 +440,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function updateLocation(uint256 fundraiserId, string calldata newLocation)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
     {
@@ -468,7 +453,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function withdrawFunds(uint256 fundraiserId)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
     {
@@ -481,7 +466,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function refund(uint256 fundraiserId)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
     {
@@ -495,7 +480,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function createProposal(string calldata question, uint256 duration) 
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
         returns (uint256 proposalId)
@@ -509,11 +494,23 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
     function donateWithPermit(
         uint256 fundraiserId,
         uint256 amount,
-        uint256 /*deadline*/,
-        uint8 /*v*/,
-        bytes32 /*r*/,
-        bytes32 /*s*/
-    ) external whenNotPaused nonReentrant notBanned donationsEnabled rateLimitDonations {
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    )
+        external
+        coreNotPaused
+        nonReentrant
+        notBanned
+        donationsEnabled
+        rateLimitDonations
+    {
+        // Ustal token zbiórki i zrób permit dla Core jako spender
+        address token = coreContract.storageContract().fundraiserTokens(fundraiserId);
+        require(token != address(0), "Router: invalid fundraiser/token");
+        IERC20Permit(token).permit(msg.sender, address(coreContract), amount, deadline, v, r, s);
+        // Po udanym permit wykonaj donate
         coreContract.donateFrom(fundraiserId, msg.sender, amount);
     }
 
@@ -522,7 +519,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function suspendFundraiser(uint256 fundraiserId, string calldata reason)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
     {
@@ -534,7 +531,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function createProposal(string calldata question, string calldata /*metadata*/, uint256 duration)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
         returns (uint256 proposalId)
@@ -549,7 +546,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function vote(uint256 proposalId, bool support)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
     {
@@ -566,7 +563,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         IPoliDaoStructs.MediaItem[] calldata mediaItems
     )
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
     {
@@ -599,7 +596,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function postUpdate(uint256 fundraiserId, string calldata content)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
     {
@@ -613,7 +610,7 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
      */
     function batchDonate(uint256[] calldata fundraiserIds, uint256[] calldata amounts)
         external
-        whenNotPaused
+        coreNotPaused
         nonReentrant
         notBanned
         donationsEnabled
@@ -627,6 +624,60 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
             userDonationCount[msg.sender][currentWindow] += fundraiserIds.length;
         }
         coreContract.batchDonateFrom(msg.sender, fundraiserIds, amounts);
+    }
+
+    // ========== PAGINATION / LISTING ==========
+    /**
+     * @notice Returns fundraiser IDs in a paginated window (IDs assumed 1..count)
+     */
+    function listFundraisers(uint256 offset, uint256 limit) external view returns (uint256[] memory ids) {
+        uint256 count = coreContract.getFundraiserCount();
+        if (offset >= count || limit == 0) return new uint256[](0);
+        uint256 end = offset + limit;
+        if (end > count) end = count;
+        uint256 len = end - offset;
+        ids = new uint256[](len);
+        for (uint256 i = 0; i < len; i++) {
+            ids[i] = offset + i + 1;
+        }
+    }
+
+    /**
+     * @notice Returns user donations for a scan window of fundraiser IDs
+     * @param user address to scan
+     * @param startId first fundraiser id (>=1)
+     * @param limit max ids to scan
+     */
+    function listUserDonations(address user, uint256 startId, uint256 limit)
+        external
+        view
+        returns (uint256[] memory ids, uint256[] memory amounts)
+    {
+        uint256 count = coreContract.getFundraiserCount();
+        if (startId < 1 || startId > count || limit == 0) {
+            return (new uint256[](0), new uint256[](0));
+        }
+        uint256 endId = startId + limit - 1;
+        if (endId > count) endId = count;
+        uint256 cap = endId - startId + 1;
+
+        uint256[] memory tmpIds = new uint256[](cap);
+        uint256[] memory tmpAmts = new uint256[](cap);
+        uint256 n = 0;
+        for (uint256 id = startId; id <= endId; id++) {
+            uint256 a = coreContract.getDonationAmount(id, user);
+            if (a > 0) {
+                tmpIds[n] = id;
+                tmpAmts[n] = a;
+                n++;
+            }
+        }
+        ids = new uint256[](n);
+        amounts = new uint256[](n);
+        for (uint256 i = 0; i < n; i++) {
+            ids[i] = tmpIds[i];
+            amounts[i] = tmpAmts[i];
+        }
     }
     
     // ========== VIEW FUNCTIONS (PASSTHROUGH) ==========
@@ -713,18 +764,19 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Indicates whether a token supports permit (EIP-2612)
-     * @dev Minimal stub: returns false for unknown tokens. Tests use this for branching.
+     * @notice Sprawdza wsparcie EIP-2612 przez token (na podstawie obecności nonces i DOMAIN_SEPARATOR)
      */
-    function supportsPermit(address /*token*/) external pure returns (bool) {
-        return false;
+    function supportsPermit(address token) external view returns (bool) {
+        (bool ok1, ) = token.staticcall(abi.encodeWithSelector(IERC20Permit.nonces.selector, address(0)));
+        (bool ok2, ) = token.staticcall(abi.encodeWithSelector(IERC20Permit.DOMAIN_SEPARATOR.selector));
+        return ok1 && ok2;
     }
 
     /**
-     * @notice Returns nonce for permit flows (stub)
+     * @notice Zwraca nonce dla danego tokena i właściciela (EIP-2612)
      */
-    function getNonce(address /*owner*/) external pure returns (uint256) {
-        return 0;
+    function getPermitNonce(address token, address owner) external view returns (uint256) {
+        return IERC20Permit(token).nonces(owner);
     }
 
     /**
@@ -825,17 +877,62 @@ contract PoliDaoRouter is Ownable, Pausable, ReentrancyGuard {
         emit EmergencyControlToggled("extensions", extensionsDisabled);
     }
     
-    /**
-     * @notice Pauses the router
-     */
-    function pause() external onlyOwner {
-        _pause();
+    // ====== CORE PAUSE BRIDGE ======
+    modifier coreNotPaused() {
+        require(!coreContract.paused(), "PoliDaoRouter: Core paused");
+        _;
     }
-    
-    /**
-     * @notice Unpauses the router
-     */
-    function unpause() external onlyOwner {
-        _unpause();
+
+    // ====== MODULE ALLOWLIST FOR GENERIC ROUTING ======
+    // moduleKey -> selector -> allowed
+    mapping(bytes32 => mapping(bytes4 => bool)) private _allowedSelectors;
+
+    event ModuleSelectorAllowed(bytes32 indexed moduleKey, bytes4 indexed selector, bool allowed);
+
+    function setAllowedSelector(bytes32 moduleKey, bytes4 selector, bool allowed) external onlyOwner {
+        _allowedSelectors[moduleKey][selector] = allowed;
+        emit ModuleSelectorAllowed(moduleKey, selector, allowed);
     }
+
+    function setAllowedSelectorsBatch(bytes32 moduleKey, bytes4[] calldata selectors, bool allowed) external onlyOwner {
+        for (uint256 i = 0; i < selectors.length; i++) {
+            _allowedSelectors[moduleKey][selectors[i]] = allowed;
+            emit ModuleSelectorAllowed(moduleKey, selectors[i], allowed);
+        }
+    }
+
+    function isSelectorAllowed(bytes32 moduleKey, bytes4 selector) external view returns (bool) {
+        return _allowedSelectors[moduleKey][selector];
+    }
+
+    function routeModule(bytes32 moduleKey, bytes calldata data)
+        external
+        coreNotPaused
+        nonReentrant
+        returns (bytes memory)
+    {
+        require(data.length >= 4, "Router: data too short");
+        bytes4 sel;
+        assembly ("memory-safe") {
+            sel := calldataload(data.offset)
+        }
+        require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");
+        return coreContract.callModule(moduleKey, data);
+    }
+
+    function routeModuleStatic(bytes32 moduleKey, bytes calldata data)
+        external
+        view
+        returns (bytes memory)
+    {
+        require(data.length >= 4, "Router: data too short");
+        bytes4 sel;
+        assembly ("memory-safe") {
+            sel := calldataload(data.offset)
+        }
+        require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");
+        return coreContract.staticCallModule(moduleKey, data);
+    }
+
+    // Router has no local pause; use coreNotPaused modifier to gate calls
 }

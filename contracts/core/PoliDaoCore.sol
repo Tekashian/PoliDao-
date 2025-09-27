@@ -7,8 +7,6 @@ import "./../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../interfaces/IPoliDaoRefunds.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 
@@ -28,8 +26,11 @@ import "../libraries/RefundLogic.sol";
  * @custom:security-contact security@polidao.org
  */
 contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
-    using SafeERC20 for IERC20;
     using Address for address;
+
+    // Dodane: brakujące custom errors używane w donateFrom/batchDonateFrom
+    error FundraiserNotFound();
+    error TokenNotSet();
 
     // ========== CUSTOM ERRORS (tańsze niż stringi) ==========
     error InvalidAmount();
@@ -61,7 +62,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     event FundraiserCreated(
         uint256 indexed fundraiserId,
         address indexed creator,
-        address token,
+        address indexed token,
         string title,
         uint8 fundraiserType,
         uint256 goalAmount,
@@ -75,7 +76,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         address indexed donor,
         address indexed token,
         uint256 amount,
-        uint256 netAmount
+        uint256 newRaised
     );
 
     // DODANE: event wymagany przez test withdraw.integration.test.js
@@ -173,7 +174,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     }
 
     // ========== CORE BUSINESS LOGIC ==========
-    
+
     /**
      * @notice Creates a new fundraiser
      * @param data Struct containing all fundraiser creation parameters
@@ -189,50 +190,22 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         require(bytes(data.title).length > 0, "PoliDaoCore: Title required");
         require(data.endDate > block.timestamp, "PoliDaoCore: Invalid end date");
         require(storageContract.isTokenWhitelisted(data.token), "PoliDaoCore: Token not whitelisted");
-
         if (data.fundraiserType == IPoliDaoStructs.FundraiserType.WITH_GOAL) {
             require(data.goalAmount > 0, "PoliDaoCore: Goal amount required");
         }
-
-        // Removed unused local `packed`
-
-        // DUPLICATE CHECK REMOVED
-        // require(
-        //     storageContract.isTokenWhitelisted(data.token),
-        //     "PoliDaoCore: Token not whitelisted"
-        // );
-
         fundraiserId = FundraiserLogic.createFundraiserLogic(
-            PoliDaoStorage(address(storageContract)),
-            data,
-            msg.sender
+            PoliDaoStorage(address(storageContract)), data, msg.sender
         );
-
-        _notifyModule("REFUNDS", abi.encodeWithSignature(
-            "registerFundraiser(uint256,bool)",
-            fundraiserId,
-            data.isFlexible
-        ));
-
+        _notifyModule("REFUNDS", abi.encodeWithSignature("registerFundraiser(uint256,bool)", fundraiserId, data.isFlexible));
         emit FundraiserCreated(
-            fundraiserId,
-            msg.sender,
-            data.token,
-            data.title,
-            uint8(data.fundraiserType),
-            data.goalAmount,
-            data.endDate,
-            data.location
+            fundraiserId, msg.sender, data.token, data.title,
+            uint8(data.fundraiserType), data.goalAmount, data.endDate, data.location
         );
-
         return fundraiserId;
     }
 
     /**
      * @notice Creates a new fundraiser (for router)
-     * @param creator The creator address
-     * @param data Struct containing all fundraiser creation parameters
-     * @return fundraiserId The ID of the newly created fundraiser
      */
     function createFundraiserFor(
         address creator,
@@ -251,13 +224,9 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         if (data.fundraiserType == IPoliDaoStructs.FundraiserType.WITH_GOAL) {
             require(data.goalAmount > 0, "PoliDaoCore: Goal amount required");
         }
-
         fundraiserId = FundraiserLogic.createFundraiserLogic(
-            PoliDaoStorage(address(storageContract)),
-            data,
-            creator
+            PoliDaoStorage(address(storageContract)), data, creator
         );
-        // opcjonalne notyfikacje do modułów...
         return fundraiserId;
     }
 
@@ -287,17 +256,26 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     { 
         if (amount == 0) revert InvalidAmount();
 
-        // 1) Pobierz token tej zbiórki
+        IPoliDaoStructs.PackedFundraiserData memory fPrev = storageContract.fundraisers(fundraiserId);
+        if (fPrev.id == 0) revert FundraiserNotFound();
+
         address token = storageContract.fundraiserTokens(fundraiserId);
-        require(token != address(0), "Core: no token");
+        if (token == address(0)) revert TokenNotSet();
 
-        // 2) Przenieś środki od darczyńcy do Storage (Core musi być approved przez darczyńcę)
-        IERC20(token).safeTransferFrom(msg.sender, address(storageContract), amount);
+        uint256 newRaised = uint256(fPrev.raisedAmount) + amount;
 
-        // 3) Zapisz darowiznę w unified storage
-        storageContract.addDonation(fundraiserId, msg.sender, amount);
+        // Przenieś transfer + zapis do biblioteki (SafeERC20 użyte w DonationLogic)
+        DonationLogic.donate(storageContract, fundraiserId, msg.sender, amount);
+
+        // Emit ustandaryzowanego eventu
+        emit DonationMade(fundraiserId, msg.sender, token, amount, newRaised);
     }
     
+    /**
+     * @notice Donate to a fundraiser on behalf of donor (router context)
+     * @dev FE musi wykonać approve przed donacją: IERC20(token).approve(spender = address(this), amount)
+     *      Alternatywnie użyj router.donateWithPermit (EIP-2612).
+     */
     function donateFrom(uint256 fundraiserId, address donor, uint256 amount)
         external
         whenNotPaused
@@ -305,65 +283,49 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         onlyRouter
     {
         if (amount == 0) revert InvalidAmount();
+        IPoliDaoStructs.PackedFundraiserData memory fPrev = storageContract.fundraisers(fundraiserId);
+        if (fPrev.id == 0) revert FundraiserNotFound();
+        uint256 newRaised = uint256(fPrev.raisedAmount) + amount;
         address token = storageContract.fundraiserTokens(fundraiserId);
-        require(token != address(0), "Core: no token");
-        IERC20(token).safeTransferFrom(donor, address(storageContract), amount);
-        storageContract.addDonation(fundraiserId, donor, amount);
-        emit DonationMade(fundraiserId, donor, token, amount, amount);
+        if (token == address(0)) revert TokenNotSet();
+
+        DonationLogic.donate(storageContract, fundraiserId, donor, amount);
+        emit DonationMade(fundraiserId, donor, token, amount, newRaised);
     }
 
-    function donateBatchFrom(
-        uint256[] calldata /* amounts */
-    )
-        external
-        whenNotPaused
-        // nonReentrant // usunięte, bo funkcja zawsze revertuje i powoduje "unreachable code" w OZ
-    {
-        revert NotImplemented();
-    }
-
-    function batchDonate(uint256[] calldata fundraiserIds, uint256[] calldata amounts)
+    function batchDonateFrom(address donor, uint256[] calldata fundraiserIds, uint256[] calldata amounts)
         external
         whenNotPaused
         nonReentrant
-    { 
+        onlyRouter
+    {
         if (fundraiserIds.length == 0 || fundraiserIds.length != amounts.length) revert InvalidInput();
+        IPoliDaoStorage s = storageContract;
+        for (uint256 i = 0; i < fundraiserIds.length; i++) {
+            uint256 amt = amounts[i];
+            if (amt == 0) continue;
 
-        // 1) Spodziewany token (Storage egzekwuje spójność dla pozostałych pozycji)
-        address expectedToken = storageContract.fundraiserTokens(fundraiserIds[0]);
-        require(expectedToken != address(0), "Core: no token");
+            IPoliDaoStructs.PackedFundraiserData memory fPrev = s.fundraisers(fundraiserIds[i]);
+            if (fPrev.id == 0) revert FundraiserNotFound();
+            uint256 newRaised = uint256(fPrev.raisedAmount) + amt;
 
-        // 2) Zsumuj kwoty i zrób pojedynczy transfer do Storage
-        uint256 total;
-        unchecked {
-            for (uint256 i = 0; i < amounts.length; ++i) {
-                total += amounts[i];
-            }
+            address token = s.fundraiserTokens(fundraiserIds[i]);
+            if (token == address(0)) revert TokenNotSet();
+
+            DonationLogic.donate(s, fundraiserIds[i], donor, amt);
+            emit DonationMade(fundraiserIds[i], donor, token, amt, newRaised);
         }
-        require(total > 0, "Core: zero total");
-        IERC20(expectedToken).safeTransferFrom(msg.sender, address(storageContract), total);
-
-        // 3) Zapisz batchem w unified storage
-        storageContract.batchAddDonations(msg.sender, expectedToken, fundraiserIds, amounts);
     }
+
     // ========== DELEGATION TO EXTENSIONS ==========
-    
-    /**
-     * @notice Delegates extension-related calls to extensions contract
-     * @param data The call data to forward
-     * @return result The return data from the call
-     */
+
     function delegateToExtensions(bytes calldata data) 
         external 
         onlyRouter
         returns (bytes memory result) 
     {
         require(extensionsContract != address(0), "PoliDaoCore: Extensions contract not set");
-        
-        // Address.functionCall bez errorMessage overload
-        bytes memory returnData = extensionsContract.functionCall(
-            data
-        );
+        bytes memory returnData = extensionsContract.functionCall(data);
         return returnData;
     }
     
@@ -415,14 +377,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     // ========== BASIC VIEW FUNCTIONS ==========
     
     /**
-     * @notice Gets basic fundraiser information
-     * @param fundraiserId The ID of the fundraiser
-     * @return creator Creator address
-     * @return token Token address
-     * @return raised Amount raised
-     * @return goal Goal amount
-     * @return endDate End timestamp
-     * @return status Current status
+     * @notice Gets basic fundraiser information (backward compatible, uint8 statuses)
      */
     function getFundraiserBasicInfo(uint256 fundraiserId) 
         external 
@@ -436,9 +391,8 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             uint8 status
         ) 
     {
-    IPoliDaoStructs.PackedFundraiserData memory data = storageContract.fundraisers(fundraiserId);
+        IPoliDaoStructs.PackedFundraiserData memory data = storageContract.fundraisers(fundraiserId);
         require(data.id != 0, "PoliDaoCore: Fundraiser not found");
-        
         return (
             storageContract.fundraiserCreators(fundraiserId),
             storageContract.fundraiserTokens(fundraiserId),
@@ -448,7 +402,34 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             data.status
         );
     }
-    
+
+   /**
+    * @notice Typed version: returns enums for nicer FE mapping
+    */
+   function getFundraiserBasicInfoTyped(uint256 fundraiserId)
+       external
+       view
+       returns (
+           address creator,
+           address token,
+           uint256 raised,
+           uint256 goal,
+           uint256 endDate,
+           IPoliDaoStructs.FundraiserStatus status
+       )
+   {
+       IPoliDaoStructs.PackedFundraiserData memory data = storageContract.fundraisers(fundraiserId);
+       require(data.id != 0, "PoliDaoCore: Fundraiser not found");
+       return (
+           storageContract.fundraiserCreators(fundraiserId),
+           storageContract.fundraiserTokens(fundraiserId),
+           data.raisedAmount,
+           data.goalAmount,
+           data.endDate,
+           IPoliDaoStructs.FundraiserStatus(data.status)
+       );
+   }
+
     /**
      * @notice Gets the total number of fundraisers created
      */
@@ -457,7 +438,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Gets detailed fundraiser metadata
+     * @notice Gets detailed fundraiser metadata (backward compatible)
      */
     function getFundraiserDetails(uint256 fundraiserId)
         external
@@ -479,13 +460,52 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         )
     {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
-        require(f.id != 0, "PoliDaoCore: Fundraiser not found"); // DODANE
+        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
         title = storageContract.fundraiserTitles(fundraiserId);
         description = storageContract.fundraiserDescriptions(fundraiserId);
         location = storageContract.fundraiserLocations(fundraiserId);
         endDate = f.endDate;
         fundraiserType = f.fundraiserType;
         status = f.status;
+        token = storageContract.fundraiserTokens(fundraiserId);
+        goalAmount = f.goalAmount;
+        raisedAmount = f.raisedAmount;
+        creator = storageContract.fundraiserCreators(fundraiserId);
+        extensionCount = f.extensionCount;
+        isSuspended = f.isSuspended;
+        suspensionReason = "";
+    }
+
+ /**
+    * @notice Typed version: returns enums for nicer FE mapping
+    */
+    function getFundraiserDetailsTyped(uint256 fundraiserId)
+        external
+        view
+        returns (
+            string memory title,
+            string memory description,
+            string memory location,
+            uint256 endDate,
+            IPoliDaoStructs.FundraiserType fundraiserType,
+            IPoliDaoStructs.FundraiserStatus status,
+            address token,
+            uint256 goalAmount,
+            uint256 raisedAmount,
+            address creator,
+            uint256 extensionCount,
+            bool isSuspended,
+            string memory suspensionReason
+        )
+    {
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
+        title = storageContract.fundraiserTitles(fundraiserId);
+        description = storageContract.fundraiserDescriptions(fundraiserId);
+        location = storageContract.fundraiserLocations(fundraiserId);
+        endDate = f.endDate;
+        fundraiserType = IPoliDaoStructs.FundraiserType(f.fundraiserType);
+        status = IPoliDaoStructs.FundraiserStatus(f.status);
         token = storageContract.fundraiserTokens(fundraiserId);
         goalAmount = f.goalAmount;
         raisedAmount = f.raisedAmount;
@@ -623,38 +643,12 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @param fundraiserId The fundraiser ID
      */
     function withdrawFunds(uint256 fundraiserId) external whenNotPaused nonReentrant {
-        // Pobierz dane zbiórki
-        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
-        require(f.id != 0, "PoliDaoCore: Invalid fundraiser");
-        require(!f.fundsWithdrawn, "PoliDaoCore: Already withdrawn");
-
-        // Wymuś zakończenie (dla elastycznych można dopuścić wcześniejsze wypłaty jeśli tak ma być)
-        require(
-            f.endDate == 0 || block.timestamp > f.endDate || f.isFlexible,
-            "PoliDaoCore: Fundraiser not ended"
+        (address creator, address token, uint256 amount) = WithdrawLogic.withdraw(
+            storageContract,
+            fundraiserId,
+            msg.sender,
+            owner()
         );
-
-        // Autoryzacja: twórca lub owner/router/autoryzowany kontrakt
-        address creator = storageContract.fundraiserCreators(fundraiserId);
-        require(
-            msg.sender == creator || msg.sender == owner() || msg.sender == routerContract || _isAuthorized(msg.sender),
-            "PoliDaoCore: Not authorized"
-        );
-
-        // Kwota i token do wypłaty
-        address token = storageContract.fundraiserTokens(fundraiserId);
-        uint256 amount = uint256(f.raisedAmount);
-        require(amount > 0, "PoliDaoCore: Nothing to withdraw");
-        require(token != address(0), "PoliDaoCore: Token not set");
-
-        // Realny transfer ze Storage do twórcy
-        storageContract.releaseFunds(token, creator, amount);
-
-        // Oznacz jako wypłacone (źródło prawdy w Storage)
-        f.fundsWithdrawn = true;
-        storageContract.updateFundraiser(fundraiserId, f);
-
-        // Event (test nasłuchuje eventu z Core)
         emit FundsWithdrawn(fundraiserId, creator, token, amount);
     }
 
@@ -668,18 +662,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyAuthorizedOrOwner
     {
-        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
-        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
-        address refundsMod = _resolveModule("REFUNDS");
-        f.status = uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD);
-        storageContract.updateFundraiser(fundraiserId, f);
-        if (refundsMod != address(0)) {
-            try IPoliDaoRefunds(refundsMod).initiateClosure(
-                fundraiserId,
-                storageContract.fundraiserCreators(fundraiserId),
-                f.endDate
-            ) {} catch {}
-        }
+        RefundLogic.startRefundPeriodStrict(
+            storageContract,
+            fundraiserId,
+            _resolveModule("REFUNDS")
+        );
     }
     
     // ========== ADMIN FUNCTIONS ==========
@@ -761,11 +748,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @return hasCode Whether the address has code
      */
     function _hasCode(address addr) internal view returns (bool hasCode) {
-        uint256 codeSize;
-        assembly {
-            codeSize := extcodesize(addr)
-        }
-        return codeSize > 0;
+        return addr.code.length > 0;
     }
     
     /**
@@ -785,7 +768,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         if (module == address(0)) return;
 
         bytes4 selector;
-        if (data.length >= 4) { assembly { selector := mload(add(data, 32)) } }
+        if (data.length >= 4) {
+            assembly ("memory-safe") {
+                selector := mload(add(data, 32))
+            }
+        }
 
         try this._invokeModule(module, data) {
             emit ModuleNotificationSucceeded(keccak256(bytes(moduleKey)), module, selector);
@@ -928,58 +915,26 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         try storageContract.setModule(key, newAddr) {} catch {}
     }
 
+    // ---- upgrade helpers ----
     function _isAuthorized(address a) internal view returns (bool) {
         return storageContract.isContractAuthorized(a);
     }
 
-    function upgradeGovernanceModule(address newAddr) external onlyOwnerCompat nonReentrant {
+    function upgradeModule(string calldata label, address newAddr) external onlyOwnerCompat nonReentrant {
         _assertMutable();
+        if (bytes(label).length == 0) revert InvalidInput();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
-        address oldEffective = _resolveModule("GOVERNANCE");
-        _upgradeModule("GOVERNANCE", oldEffective, newAddr);
-        governanceModule = newAddr;
-    }
-    function upgradeMediaModule(address newAddr) external onlyOwnerCompat nonReentrant {
-        _assertMutable();
-        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
-        address oldEffective = _resolveModule("MEDIA");
-        _upgradeModule("MEDIA", oldEffective, newAddr);
-        mediaModule = newAddr;
-    }
-    function upgradeUpdatesModule(address newAddr) external onlyOwnerCompat nonReentrant {
-        _assertMutable();
-        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
-        address oldEffective = _resolveModule("UPDATES");
-        _upgradeModule("UPDATES", oldEffective, newAddr);
-        updatesModule = newAddr;
-    }
-    function upgradeRefundsModule(address newAddr) external onlyOwnerCompat nonReentrant {
-        _assertMutable();
-        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
-        address oldEffective = _resolveModule("REFUNDS");
-        _upgradeModule("REFUNDS", oldEffective, newAddr);
-        refundsModule = newAddr;
-    }
-    function upgradeSecurityModule(address newAddr) external onlyOwnerCompat nonReentrant {
-        _assertMutable();
-        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
-        address oldEffective = _resolveModule("SECURITY");
-        _upgradeModule("SECURITY", oldEffective, newAddr);
-        securityModule = newAddr;
-    }
-    function upgradeWeb3Module(address newAddr) external onlyOwnerCompat nonReentrant {
-        _assertMutable();
-        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
-        address oldEffective = _resolveModule("WEB3");
-        _upgradeModule("WEB3", oldEffective, newAddr);
-        web3Module = newAddr;
-    }
-    function upgradeAnalyticsModule(address newAddr) external onlyOwnerCompat nonReentrant {
-        _assertMutable();
-        if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
-        address oldEffective = _resolveModule("ANALYTICS");
-        _upgradeModule("ANALYTICS", oldEffective, newAddr);
-        analyticsModule = newAddr;
+        address oldEffective = _resolveModule(label);
+        _upgradeModule(label, oldEffective, newAddr);
+        // Sync optional state variable for faster resolve
+        bytes32 h = _hash(label);
+        if (h == _hash("GOVERNANCE")) governanceModule = newAddr;
+        else if (h == _hash("MEDIA")) mediaModule = newAddr;
+        else if (h == _hash("UPDATES")) updatesModule = newAddr;
+        else if (h == _hash("REFUNDS")) refundsModule = newAddr;
+        else if (h == _hash("SECURITY")) securityModule = newAddr;
+        else if (h == _hash("WEB3")) web3Module = newAddr;
+        else if (h == _hash("ANALYTICS")) analyticsModule = newAddr;
     }
 
     function lockModuleUpgrades() external onlyOwnerCompat {
@@ -996,16 +951,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
-        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
-        address creator = storageContract.fundraiserCreators(fundraiserId);
-        require(
-            requester == creator || requester == owner() || _isAuthorized(requester),
-            "PoliDaoCore: Not authorized"
+        require(extensionsContract != address(0), "PoliDaoCore: Extensions contract not set");
+        // delegate do Extensions: signature: extendFundraiser(uint256,address,uint256)
+        extensionsContract.functionCall(
+            abi.encodeWithSignature("extendFundraiser(uint256,address,uint256)", fundraiserId, requester, additionalDays)
         );
-        require(!f.isSuspended, "PoliDaoCore: Suspended");
-        f.endDate = f.endDate + uint64(additionalDays * 1 days);
-        storageContract.updateFundraiser(fundraiserId, f);
     }
 
     function updateLocationFor(uint256 fundraiserId, address requester, string calldata newLocation)
@@ -1014,14 +964,11 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
-        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
-        address creator = storageContract.fundraiserCreators(fundraiserId);
-        require(
-            requester == creator || requester == owner() || _isAuthorized(requester),
-            "PoliDaoCore: Not authorized"
+        require(extensionsContract != address(0), "PoliDaoCore: Extensions contract not set");
+        // delegate do Extensions: updateLocation(uint256,address,string)
+        extensionsContract.functionCall(
+            abi.encodeWithSignature("updateLocation(uint256,address,string)", fundraiserId, requester, newLocation)
         );
-        storageContract.updateFundraiserLocation(fundraiserId, newLocation);
     }
 
     function withdrawFundsFor(uint256 fundraiserId, address requester)
@@ -1030,31 +977,9 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
-        require(f.id != 0, "PoliDaoCore: Invalid fundraiser");
-        require(!f.fundsWithdrawn, "PoliDaoCore: Already withdrawn");
-
-        require(
-            f.endDate == 0 || block.timestamp > f.endDate || f.isFlexible,
-            "PoliDaoCore: Fundraiser not ended"
-        );
-
-        address creator = storageContract.fundraiserCreators(fundraiserId);
-        require(
-            requester == creator || requester == owner() || _isAuthorized(requester),
-            "PoliDaoCore: Not authorized"
-        );
-
-        address token = storageContract.fundraiserTokens(fundraiserId);
-        uint256 amount = uint256(f.raisedAmount);
-        require(amount > 0, "PoliDaoCore: Nothing to withdraw");
-        require(token != address(0), "PoliDaoCore: Token not set");
-
-        storageContract.releaseFunds(token, creator, amount);
-
-        f.fundsWithdrawn = true;
-        storageContract.updateFundraiser(fundraiserId, f);
-
+        // Jeżeli masz dodatkowe role (autoryzowane kontrakty), możesz sprawdzić tu i podać requester=owner też
+        (address creator, address token, uint256 amount) =
+            WithdrawLogic.withdraw(storageContract, fundraiserId, requester, owner());
         emit FundsWithdrawn(fundraiserId, creator, token, amount);
     }
 
@@ -1064,25 +989,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        // delegacja do modułu REFUNDS – bez twardej zależności od sygnatury biblioteki
-        _notifyModule("REFUNDS", abi.encodeWithSignature(
-            "claimRefund(uint256,address)", fundraiserId, donor
-        ));
-    }
-
-    function batchDonateFrom(address donor, uint256[] calldata fundraiserIds, uint256[] calldata amounts)
-        external
-        whenNotPaused
-        nonReentrant
-        onlyRouter
-    {
-        require(fundraiserIds.length == amounts.length && fundraiserIds.length > 0, "PoliDaoCore: arrays mismatch");
-        PoliDaoStorage s = PoliDaoStorage(address(storageContract));
-        for (uint256 i = 0; i < fundraiserIds.length; i++) {
-            uint256 amt = amounts[i];
-            if (amt == 0) continue;
-            DonationLogic.donate(s, fundraiserIds[i], donor, amt);
-        }
+        _notifyModule("REFUNDS", abi.encodeWithSignature("claimRefund(uint256,address)", fundraiserId, donor));
     }
 
     function createProposalFor(address /*proposer*/, string calldata /*question*/, uint256 /*duration*/)
@@ -1092,7 +999,8 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         onlyRouter
         returns (uint256)
     {
-        // opcjonalnie: _notifyModule("GOVERNANCE", ...)
+        // Oczekiwane: realna implementacja w module GOVERNANCE
+        _notifyModule("GOVERNANCE", abi.encodeWithSignature("createProposal(string,uint256)", "", uint256(0)));
         return 0;
     }
 
@@ -1133,17 +1041,17 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
-        require(f.id != 0, "PoliDaoCore: Fundraiser not found");
-        require(
-            requester == owner() || _isAuthorized(requester),
-            "PoliDaoCore: Not authorized"
+        require(extensionsContract != address(0), "PoliDaoCore: Extensions contract not set");
+        // delegate do Extensions: suspendFundraiser(uint256,address,string)
+        extensionsContract.functionCall(
+            abi.encodeWithSignature("suspendFundraiser(uint256,address,string)", fundraiserId, requester, reason)
         );
-        if (!f.isSuspended) {
-            f.isSuspended = true;
-            f.suspensionTime = uint32(block.timestamp);
-            storageContract.updateFundraiser(fundraiserId, f);
-        }
-        emit FundraiserSuspended(fundraiserId, requester, reason, block.timestamp);
+    }
+
+    /**
+     * @notice Address to use as spender for ERC20 approvals before donate/batchDonate
+     */
+    function spenderAddress() external view returns (address) {
+        return address(this);
     }
 }
