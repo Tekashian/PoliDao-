@@ -20,16 +20,13 @@ describe("Mocks harness - MockToken and ReentrancyAttackMock", function () {
     });
 
     it("Reentrancy mock deployed and basic call signature exists", async function () {
-        if (reentrancyMock && reentrancyMock.getAddress) {
-            expect(await reentrancyMock.getAddress()).to.not.be.undefined;
-            
-            // Check if contract has interface
-            if (reentrancyMock.interface) {
-                expect(reentrancyMock.interface).to.not.be.undefined;
-            }
-        } else {
-            // Skip test if reentrancyMock deployment failed
-            this.skip();
-        }
-    });
+        const Mock = await ethers.getContractFactory("ReentrancyAttackMock");
+        const mock = await Mock.deploy();
+        await mock.waitForDeployment();
+        // verify ABI has an attack-like entrypoint
+        const hasFn = mock.interface.getFunction
+          ? !!mock.interface.getFunction("attack(address)")
+          : typeof mock.attack === "function";
+        expect(hasFn).to.equal(true);
+      });
 });

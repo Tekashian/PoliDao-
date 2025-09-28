@@ -235,6 +235,42 @@ function verifyMessage(message, signature) {
     return ethers.verifyMessage(message, signature);
 }
 
+// Ensure loadFixture is globally available in suites that forgot to import it
+(() => {
+  try {
+    const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+    if (typeof global.loadFixture === "undefined") {
+      global.loadFixture = loadFixture;
+    }
+  } catch (e) {
+    // ignore
+  }
+})();
+
+// Ethers v6 small shims that some tests might expect
+(() => {
+  try {
+    const { ethers } = require("hardhat");
+    if (!ethers.utils) {
+      ethers.utils = {};
+    }
+    if (!ethers.utils.parseUnits) {
+      ethers.utils.parseUnits = ethers.parseUnits;
+    }
+    if (!ethers.utils.parseEther) {
+      ethers.utils.parseEther = ethers.parseEther;
+    }
+    if (!ethers.utils.keccak256) {
+      ethers.utils.keccak256 = ethers.keccak256;
+    }
+    if (!ethers.utils.toUtf8Bytes) {
+      ethers.utils.toUtf8Bytes = ethers.toUtf8Bytes;
+    }
+  } catch (e) {
+    // ignore
+  }
+})();
+
 module.exports = {
     deployContract,
     getContractAddress,

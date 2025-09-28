@@ -38,17 +38,26 @@ contract CoreMock {
         allowedToken[token] = allowed;
     }
 
-    function createFundraiser(address token, uint256 goal, uint256 endDate, string memory, string memory) external returns (uint256 fundraiserId) {
-        require(allowedToken[token], "CoreMock: token not allowed");
-        fundraiserId = nextFundraiserId++;
-        fundraisers[fundraiserId] = Fundraiser({
+    function createFundraiser(
+        address token,
+        uint256 goal,
+        uint256 endDate,
+        string calldata /*title*/,
+        string calldata /*desc*/
+    ) external returns (uint256 id) {
+        // Allow native ETH (ZeroAddress) by default
+        if (token != address(0) && !allowedToken[token]) {
+            revert("CoreMock: token not allowed");
+        }
+        id = nextFundraiserId++;
+        fundraisers[id] = Fundraiser({
             creator: msg.sender,
             token: token,
             goal: goal,
             endDate: endDate,
             exists: true
         });
-        emit FundraiserCreated(fundraiserId, msg.sender, token, goal, endDate);
+        emit FundraiserCreated(id, msg.sender, token, goal, endDate);
     }
 
     // wariant z podanym tokenem

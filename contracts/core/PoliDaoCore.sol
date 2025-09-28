@@ -83,13 +83,18 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     event ExtensionsContractUpdated(address indexed oldExtensions, address indexed newExtensions);
     event RouterContractUpdated(address indexed oldRouter, address indexed newRouter);
 
-// DODANE: brakujące eventy używane w kodzie
+    // DODANE: brakujące eventy używane w kodzie
     event FundraiserSuspended(uint256 indexed fundraiserId, address indexed by, string reason, uint256 timestamp);
     event ModuleNotificationSucceeded(bytes32 indexed moduleKey, address module, bytes4 selector);
     event ModuleNotificationFailed(bytes32 indexed moduleKey, address module, bytes4 selector, bytes reason);
     event ModuleDisabled(string label, address oldAddr);
     event ModuleUpgraded(string label, address oldAddr, address newAddr);
     event ModulesLocked();
+
+    // New events for module management
+    event ModuleUpgraded(bytes32 indexed key, address indexed newAddress);
+    event ModuleDisabled(bytes32 indexed key);
+    event ModuleUpgradesLocked();
 
     // ========== MODIFIERS ==========
     /// @notice Ensures only router can call certain functions
@@ -650,6 +655,17 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         emit FundsWithdrawn(fundraiserId, creator, token, amount);
     }
 
+    // New overload used by tests: token param is ignored by logic (source of truth is storage)
+    function withdrawFunds(uint256 fundraiserId, address /*token*/ ) external whenNotPaused nonReentrant {
+        (address creator, address resolvedToken, uint256 amount) = WithdrawLogic.withdraw(
+            storageContract,
+            fundraiserId,
+            msg.sender,
+            owner()
+        );
+        emit FundsWithdrawn(fundraiserId, creator, resolvedToken, amount);
+    }
+
     /**
      * @notice Trigger refund period for a fundraiser (minimal implementation)
      * @param fundraiserId The fundraiser ID
@@ -935,9 +951,19 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         else if (h == _hash("ANALYTICS")) analyticsModule = newAddr;
     }
 
-    function lockModuleUpgrades() external onlyOwnerCompat {
+    // DEPRECATED: usunięto duplikującą sygnaturę upgradeModule(string,address)
+    // Poprzednio było:
+    // function upgradeModule(string calldata keyString, address newAddress) external onlyOwner {
+    //   ...body...
+    // }
+    function upgradeModule2(string calldata /*keyString*/, address /*newAddress*/) external pure {
+        revert("Deprecated: use upgradeModule(label,address)");
+    }
+
+    // New: lock further module upgrades (owner-only)
+    function lockModuleUpgrades() external onlyOwner {
         _modulesMutable = false;
-        emit ModulesLocked();
+        emit ModuleUpgradesLocked();
     }
 
     function areModuleUpgradesOpen() external view returns (bool) {

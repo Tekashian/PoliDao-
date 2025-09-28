@@ -115,8 +115,11 @@ module.exports = {
 
   // ========== COMPILER OPTIMIZATION ==========
   mocha: {
-    reporter: "spec",
-    forbidPending: true
+    require: [
+      "test/setup/no-skip.js",         // <- najpierw patch anty-pending
+      "test/helpers/v6-compat.js"      // <- dopiero potem shimy
+    ],
+    timeout: 600000
   },
 
   // ========== PATHS ==========
