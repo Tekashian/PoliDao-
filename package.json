@@ -6,7 +6,8 @@
     "test": "test"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "hardhat test",
+    "test:ci": "cross-env FORBID_PENDING=1 hardhat test",
     "build:abi": "hardhat compile && node scripts/build-abi.js"
   },
   "keywords": [],
@@ -18,6 +19,7 @@
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/hardhat-upgrades": "^3.9.1",
     "chai": "^4.5.0",
+    "cross-env": "^7.0.3",
     "dotenv": "^16.5.0",
     "ethers": "^6.15.0",
     "hardhat": "^2.24.3",

@@ -7,7 +7,6 @@ import "./../interfaces/IPoliDaoStructs.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "../interfaces/IPoliDaoRefunds.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 
 import "../libraries/FundraiserLogic.sol";
@@ -17,7 +16,7 @@ import "../libraries/DonationLogic.sol";
 import "../libraries/WithdrawLogic.sol";
 import "../libraries/RefundLogic.sol";
 
- /**
+/**
  * @title PoliDaoCore
  * @notice Lightweight core contract - coordinates between storage, extensions, and modules
  * @dev Thin controller that delegates complex logic to specialized contracts
@@ -89,11 +88,8 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     event ModuleNotificationFailed(bytes32 indexed moduleKey, address module, bytes4 selector, bytes reason);
     event ModuleDisabled(string label, address oldAddr);
     event ModuleUpgraded(string label, address oldAddr, address newAddr);
-    event ModulesLocked();
 
     // New events for module management
-    event ModuleUpgraded(bytes32 indexed key, address indexed newAddress);
-    event ModuleDisabled(bytes32 indexed key);
     event ModuleUpgradesLocked();
 
     // ========== MODIFIERS ==========
@@ -122,12 +118,6 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             storageContract.isContractAuthorized(msg.sender),
             "PoliDaoCore: Not authorized"
         );
-        _;
-    }
-
-    // ========== ACCESS COMPAT (dla testów oczekujących starego komunikatu) ==========
-    modifier onlyOwnerCompat() {
-        require(msg.sender == owner(), "Ownable: caller is not the owner");
         _;
     }
 
@@ -178,7 +168,6 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     }
 
     // ========== CORE BUSINESS LOGIC ==========
-
     /**
      * @notice Creates a new fundraiser
      * @param data Struct containing all fundraiser creation parameters
@@ -655,17 +644,6 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         emit FundsWithdrawn(fundraiserId, creator, token, amount);
     }
 
-    // New overload used by tests: token param is ignored by logic (source of truth is storage)
-    function withdrawFunds(uint256 fundraiserId, address /*token*/ ) external whenNotPaused nonReentrant {
-        (address creator, address resolvedToken, uint256 amount) = WithdrawLogic.withdraw(
-            storageContract,
-            fundraiserId,
-            msg.sender,
-            owner()
-        );
-        emit FundsWithdrawn(fundraiserId, creator, resolvedToken, amount);
-    }
-
     /**
      * @notice Trigger refund period for a fundraiser (minimal implementation)
      * @param fundraiserId The fundraiser ID
@@ -696,9 +674,8 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         address _security,
         address _web3,
         address _analytics
-    ) external onlyOwnerCompat {
+    ) external onlyOwner {
         require(governanceModule == address(0) && mediaModule == address(0), "Already initialized");
-
         // zero-address validation (added)
         require(
             _governance != address(0) &&
@@ -934,7 +911,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         return storageContract.isContractAuthorized(a);
     }
 
-    function upgradeModule(string calldata label, address newAddr) external onlyOwnerCompat nonReentrant {
+    function upgradeModule(string calldata label, address newAddr) external onlyOwner nonReentrant {
         _assertMutable();
         if (bytes(label).length == 0) revert InvalidInput();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
@@ -951,15 +928,6 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         else if (h == _hash("ANALYTICS")) analyticsModule = newAddr;
     }
 
-    // DEPRECATED: usunięto duplikującą sygnaturę upgradeModule(string,address)
-    // Poprzednio było:
-    // function upgradeModule(string calldata keyString, address newAddress) external onlyOwner {
-    //   ...body...
-    // }
-    function upgradeModule2(string calldata /*keyString*/, address /*newAddress*/) external pure {
-        revert("Deprecated: use upgradeModule(label,address)");
-    }
-
     // New: lock further module upgrades (owner-only)
     function lockModuleUpgrades() external onlyOwner {
         _modulesMutable = false;
@@ -969,6 +937,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     function areModuleUpgradesOpen() external view returns (bool) {
         return _modulesMutable;
     }
+
     function extendFundraiserFor(uint256 fundraiserId, address requester, uint256 additionalDays)
         external
         whenNotPaused
