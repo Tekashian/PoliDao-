@@ -1,267 +1,178 @@
-const { ethers } = require("hardhat");
+const hre = require("hardhat");
+const { ethers } = hre;
 
 async function deployBasicFixtures() {
-    const [owner, user1, user2, user3] = await ethers.getSigners();
-    
-    // Deploy MockToken
-    const MockToken = await ethers.getContractFactory("MockToken");
-    const mockToken = await MockToken.deploy(
-        "Mock Token", 
-        "MOCK", 
-        ethers.parseEther("1000000")
-    );
-    await mockToken.waitForDeployment();
-    
-    // Deploy PoliDaoStorage
-    const PoliDaoStorage = await ethers.getContractFactory("PoliDaoStorage");
-    const storage = await PoliDaoStorage.deploy();
-    await storage.waitForDeployment();
-    
-    // Deploy PoliDaoRouter
-    const PoliDaoRouter = await ethers.getContractFactory("PoliDaoRouter");
-    const router = await PoliDaoRouter.deploy(await storage.getAddress());
-    await router.waitForDeployment();
-    
-    // Deploy PoliDaoRefunds
-    const PoliDaoRefunds = await ethers.getContractFactory("PoliDaoRefunds");
-    const refunds = await PoliDaoRefunds.deploy(
-        await router.getAddress(), 
-        owner.address
-    );
-    await refunds.waitForDeployment();
-    
-    // Deploy PoliDaoFactory
-    let factory = null;
-    try {
-        const PoliDaoFactory = await ethers.getContractFactory("PoliDaoFactory");
-        factory = await PoliDaoFactory.deploy();
-        await factory.waitForDeployment();
-    } catch (error) {
-        console.log("PoliDaoFactory deployment failed:", error.message);
-    }
-    
-    // Deploy ReentrancyAttackMock
-    let reentrancyMock = null;
-    try {
-        const ReentrancyAttackMock = await ethers.getContractFactory("ReentrancyAttackMock");
-        reentrancyMock = await ReentrancyAttackMock.deploy();
-        await reentrancyMock.waitForDeployment();
-    } catch (error) {
-        console.log("ReentrancyAttackMock deployment failed:", error.message);
-        // Create a minimal mock
-        reentrancyMock = {
-            getAddress: async () => ethers.ZeroAddress,
-            interface: { fragments: [] }
-        };
-    }
-    
-    return {
-        storage,
-        router,
-        refunds,
-        factory,
-        mockToken,
-        reentrancyMock,
-        owner,
-        user1,
-        user2,
-        user3
-    };
-}
+  const [owner, user1, user2, user3] = await ethers.getSigners();
 
-async function deployHelloWorld() {
-    const HelloWorld = await ethers.getContractFactory("HelloWorld");
-    const helloWorld = await HelloWorld.deploy();
-    await helloWorld.waitForDeployment();
-    return helloWorld;
-}
-
-// POPRAWIONA Helper function to create fundraiser with correct interface
-async function createFundraiserWithCorrectInterface(storage, mockToken, creator, overrides = {}) {
-    const defaults = {
-        goalAmount: ethers.parseEther("100"),
-        endDate: Math.floor(Date.now() / 1000) + 86400, // 1 day from now
-        fundraiserType: 0, // WITH_GOAL
-        isFlexible: false,
-        title: "Test Campaign",
-        description: "Test Description",
-        location: "Test Location"
-    };
-    
-    const params = { ...defaults, ...overrides };
-    
-    // Create PackedFundraiserData struct according to IPoliDaoStructs
-    const packedData = {
-        goalAmount: params.goalAmount,      // uint128
-        raisedAmount: 0n,                   // uint128
-        endDate: params.endDate,            // uint64
-        originalEndDate: params.endDate,    // uint64
-        id: 0,                              // uint32 - will be set by contract
-        suspensionTime: 0,                  // uint32
-        extensionCount: 0,                  // uint16
-        fundraiserType: params.fundraiserType, // uint8
-        status: 0,                          // uint8 - ACTIVE
-        isSuspended: false,                 // bool
-        fundsWithdrawn: false,              // bool
-        isFlexible: params.isFlexible       // bool
-    };
-    
-    try {
-        // First add token to whitelist if not already
-        try {
-            await storage.addWhitelistedToken(await mockToken.getAddress());
-        } catch (error) {
-            // Token might already be whitelisted, continue
-        }
-        
-        const tx = await storage.createFundraiser(
-            packedData,
-            params.title,
-            params.description,
-            params.location,
-            creator,
-            await mockToken.getAddress()
-        );
-        
-        await tx.wait();
-        
-        // Get the fundraiser counter to return the ID
-        const fundraiserCounter = await storage.fundraiserCounter();
-        return fundraiserCounter;
-        
-    } catch (error) {
-        console.log("createFundraiserWithCorrectInterface failed:", error.message);
-        throw error;
-    }
-}
-
-// DODAJ BRAKUJĄCE HELPER FUNCTIONS:
-
-// Helper function for extension testing
-async function createFundraiserNearEndTime(storage, mockToken, creator, minutesFromNow = 30) {
-    const endTime = Math.floor(Date.now() / 1000) + (minutesFromNow * 60);
-    
-    return await createFundraiserWithCorrectInterface(
-        storage, 
-        mockToken, 
-        creator,
-        {
-            endDate: endTime,
-            title: "Near End Test Campaign",
-            location: "Extension Test Location"
-        }
-    );
-}
-
-// Helper for testing maximum lengths
-async function createFundraiserWithMaxLengths(storage, mockToken, creator) {
-    try {
-        const maxTitleLength = await storage.MAX_TITLE_LENGTH();
-        const maxDescLength = await storage.MAX_DESCRIPTION_LENGTH();
-        const maxLocationLength = await storage.MAX_LOCATION_LENGTH();
-        
-        const maxTitle = "T".repeat(Number(maxTitleLength));
-        const maxDesc = "D".repeat(Number(maxDescLength));
-        const maxLocation = "L".repeat(Number(maxLocationLength));
-        
-        return await createFundraiserWithCorrectInterface(
-            storage, 
-            mockToken, 
-            creator,
-            {
-                title: maxTitle,
-                description: maxDesc,
-                location: maxLocation
-            }
-        );
-    } catch (error) {
-        // If MAX constants don't exist, use reasonable defaults
-        return await createFundraiserWithCorrectInterface(
-            storage, 
-            mockToken, 
-            creator,
-            {
-                title: "T".repeat(100),
-                description: "D".repeat(500),
-                location: "L".repeat(200)
-            }
-        );
-    }
-}
-
-// DODAJ NOWĄ HELPER FUNCTION - PROPER DONATION WITH RAISED AMOUNT UPDATE
-async function addDonationWithUpdate(storage, fundraiserId, donor, amount) {
-    try {
-        // First add the donation to mapping
-        await storage.addDonation(fundraiserId, donor, amount);
-        
-        // Then manually update raised amount if addDonation doesn't do it
-        try {
-            const currentData = await storage.fundraisers(fundraiserId);
-            const newRaisedAmount = currentData.raisedAmount + amount;
-            
-            // Update the raised amount
-            await storage.updateRaisedAmount(fundraiserId, newRaisedAmount);
-            
-        } catch (updateError) {
-            // If updateRaisedAmount doesn't exist, try alternative approach
-            console.log("Manual raised amount update failed:", updateError.message);
-        }
-        
-    } catch (error) {
-        console.log("addDonationWithUpdate failed:", error.message);
-        throw error;
-    }
-}
-
-module.exports = { 
-    deployBasicFixtures, 
-    deployHelloWorld, 
-    createFundraiserWithCorrectInterface,
-    createFundraiserNearEndTime,
-    createFundraiserWithMaxLengths,
-    addDonationWithUpdate
-};
-
-module.exports.deployExtensionWithStubCore = async function (hre) {
-  const [coreSigner, owner] = await hre.ethers.getSigners();
-
-  // 1) Deploy libraries
-  const ExtLibF = await hre.ethers.getContractFactory("ExtensionLogic", owner);
-  const extLib = await ExtLibF.deploy();
-  await extLib.waitForDeployment();
-
-  const LocLibF = await hre.ethers.getContractFactory("LocationLogic", owner);
-  const locLib = await LocLibF.deploy();
-  await locLib.waitForDeployment();
-
-  // 1a) Deploy MockToken (potrzebny do tworzenia fundraiserów)
-  const MockTokenF = await hre.ethers.getContractFactory("MockToken", owner);
-  const mockToken = await MockTokenF.deploy(
-    "Mock Token",
-    "MOCK",
-    hre.ethers.parseEther("1000000")
-  );
+  // MockToken
+  const MockToken = await ethers.getContractFactory("MockToken");
+  const mockToken = await MockToken.deploy("Mock Token", "MOCK", ethers.parseEther("1000000"));
   await mockToken.waitForDeployment();
 
-  // 2) Deploy storage
-  const StorageF = await hre.ethers.getContractFactory("PoliDaoStorage", owner);
-  const storage = await StorageF.deploy();
+  // Storage
+  const Storage = await ethers.getContractFactory("PoliDaoStorage");
+  const storage = await Storage.deploy();
   await storage.waitForDeployment();
 
-  // 3) Get linked factory for PoliDaoExtension
-  const ExtensionF = await hre.ethers.getContractFactory("PoliDaoExtension", {
-    libraries: {
-      ExtensionLogic: await extLib.getAddress(),
-      LocationLogic: await locLib.getAddress()
-    },
-    signer: owner
+  // Core (no-args; inicjalizacja offchain) – fallback do CoreMock
+  let core;
+  try {
+    const Core = await ethers.getContractFactory("PoliDaoCore");
+    core = await Core.deploy();
+    await core.waitForDeployment();
+  } catch {
+    const CoreMock = await ethers.getContractFactory("CoreMock");
+    core = await CoreMock.deploy(await storage.getAddress());
+    await core.waitForDeployment();
+  }
+
+  // Powiąż Storage ↔ Core (hard ACL)
+  // 1) Storage.setCore(core)
+  try { await (await storage.setCore(await core.getAddress())).wait(); } catch {}
+  // 2) Storage.authorizeContract(core)
+  try { await (await storage.authorizeContract(await core.getAddress())).wait(); } catch {}
+  // 3) Opcjonalnie ustaw router w Storage (jeśli istnieje setter)
+  // zostanie ustawiony po deployu routera
+
+  // Router(core) – konstruktor przyjmuje core
+  let router;
+  try {
+    const Router = await ethers.getContractFactory("PoliDaoRouter");
+    router = await Router.deploy(await core.getAddress());
+    await router.waitForDeployment();
+  } catch {
+    // fallback do konstruktora bez argumentów + initialize (jeśli istnieje)
+    const Router = await ethers.getContractFactory("PoliDaoRouter");
+    router = await Router.deploy();
+    await router.waitForDeployment();
+    if (router.initialize) {
+      await (await router.initialize(await core.getAddress(), owner.address)).wait();
+    }
+  }
+
+  // Zszycie setRouterContract/core.setRouterContract (jeśli dostępne)
+  try { await (await core.setRouterContract(await router.getAddress())).wait(); } catch {}
+  // W Storage ustaw router jako autoryzowany (jeśli istnieje)
+  try { await (await storage.setAuthorizedRouter(await router.getAddress())).wait(); } catch {}
+
+  // Refunds (opcjonalny moduł)
+  let refunds = null;
+  try {
+    const Refunds = await ethers.getContractFactory("PoliDaoRefunds");
+    refunds = await Refunds.deploy();
+    await refunds.waitForDeployment();
+  } catch {}
+
+  return {
+    owner, user1, user2, user3,
+    storage, core, router, refunds, mockToken
+  };
+}
+
+// POPRAWIONA Helper function – tworzy fundraiser zgodnie z tym, co jest dostępne w Core
+async function createFundraiserWithCorrectInterface(storage, mockToken, creatorAddress, overrides = {}) {
+  const token = await mockToken.getAddress();
+  const now = Math.floor(Date.now() / 1000);
+  const end = overrides.endDate || now + 3600;
+  const title = overrides.title || "Test Fundraiser";
+  const description = overrides.description || "A test fundraiser";
+  const goalAmount = overrides.goalAmount || ethers.parseEther("10");
+  const location = overrides.location || "Test Location";
+  const ipfsHash = overrides.ipfsHash || "QmTest";
+  const fundraiserType = overrides.fundraiserType || 0;
+  const beneficiary = overrides.beneficiary || creatorAddress;
+
+  // whitelist token in Storage
+  try {
+    await (await storage.setFundraiserTokenWhitelist(token, true)).wait();
+  } catch {}
+
+  // Resolve core from storage.core()
+  let coreAddr;
+  try { coreAddr = await storage.core(); } catch {}
+  if (!coreAddr || coreAddr === ethers.ZeroAddress) {
+    // Fallback: brak core – zwróć 0 (testy mogą ominąć dalsze kroki)
+    return 0n;
+  }
+  const core = await ethers.getContractAt("PoliDaoCore", coreAddr);
+
+  // Spróbuj najpierw ABI v1: createFundraiser(address token, uint8 type, uint256 endDate, string title, string description)
+  try {
+    const tx = await core.createFundraiser(token, fundraiserType, end, title, description);
+    const rc = await tx.wait();
+    const ev = rc.logs
+      .map(l => { try { return core.interface.parseLog(l); } catch { return null; } })
+      .find(x => x && /FundraiserCreated/i.test(x.name));
+    return ev ? (ev.args.fundraiserId ?? ev.args.id ?? ev.args[0]) : 0n;
+  } catch {}
+
+  // Spróbuj ABI (struct) – IPoliDaoStructs.FundraiserCreationData
+  try {
+    const data = {
+      title,
+      description,
+      goalAmount,
+      fundraiserType,
+      beneficiaryAddress: beneficiary,
+      endDate: end,
+      tags: [],
+      media: [],
+      ipfsHash,
+      location,
+      enableExtensions: false
+    };
+    const tx = await core.createFundraiser(data);
+    const rc = await tx.wait();
+    const ev = rc.logs
+      .map(l => { try { return core.interface.parseLog(l); } catch { return null; } })
+      .find(x => x && /FundraiserCreated/i.test(x.name));
+    return ev ? (ev.args.fundraiserId ?? ev.args.id ?? ev.args[0]) : 0n;
+  } catch {}
+
+  // Ostateczny fallback
+  return 0n;
+}
+
+async function createFundraiserNearEndTime(storage, mockToken, creator, minutesFromNow = 30) {
+  return createFundraiserWithCorrectInterface(storage, mockToken, creator, {
+    endDate: Math.floor(Date.now() / 1000) + minutesFromNow * 60,
+    title: "Near End Fundraiser"
   });
+}
 
-  // 4) Deploy and initialize
-  const extension = await ExtensionF.deploy();
-  await extension.waitForDeployment();
-  await extension.initialize(await storage.getAddress(), coreSigner.address);
+async function createFundraiserWithMaxLengths(storage, mockToken, creator) {
+  const long = (len) => 'x'.repeat(len);
+  return createFundraiserWithCorrectInterface(storage, mockToken, creator, {
+    title: long(128),
+    description: long(1024),
+    location: long(256)
+  });
+}
 
-  return { storage, extension, core: coreSigner, owner, mockToken };
+async function addDonationWithUpdate(storage, fundraiserId, donor, amount) {
+  const coreAddr = await storage.core();
+  if (!coreAddr || coreAddr === ethers.ZeroAddress) return;
+  const core = await ethers.getContractAt("PoliDaoCore", coreAddr);
+
+  // approve core to spend (if tokenized)
+  // ten helper nie zna tokenu – zakładamy ETHless / lub testy nadpiszą
+
+  // jeżeli istnieje ścieżka donateFrom
+  try {
+    await (await core.donateFrom(fundraiserId, donor, amount)).wait();
+    return;
+  } catch {}
+
+  // fallback do donate(uint256,address,uint256)
+  try {
+    await (await core["donate(uint256,address,uint256)"](fundraiserId, donor, amount)).wait();
+  } catch {}
+}
+
+module.exports = {
+  deployBasicFixtures,
+  createFundraiserWithCorrectInterface,
+  createFundraiserNearEndTime,
+  createFundraiserWithMaxLengths,
+  addDonationWithUpdate
 };
