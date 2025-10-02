@@ -308,6 +308,7 @@ async function attachOrDeploy(name, factoryName, args = [], options = {}, prev =
     Storage: "storage",
     Core: "core",
     Router: "router",
+    Extension: "extension",
     Media: "media",
     Updates: "updates",
     Refunds: "refunds",
@@ -387,6 +388,8 @@ async function main() {
   // Core(storage, owner)
   const core = await attachOrDeploy("Core", "PoliDaoCore", [storage.addr, owner], {}, previous);
   const router = await attachOrDeploy("Router", "PoliDaoRouter", [core.addr], {}, previous);
+  // Extension (bez argumentów w konstruktorze, ma initialize)
+  const extension = await attachOrDeploy("Extension", "PoliDaoExtension", [], {}, previous);
   const media = await attachOrDeploy("Media", "PoliDaoMedia", [core.addr], {}, previous);
   const updates = await attachOrDeploy("Updates", "PoliDaoUpdates", [core.addr, media.addr], {}, previous);
   // Refunds(core, owner)
@@ -397,7 +400,7 @@ async function main() {
   const web3 = await attachOrDeploy("Web3", "PoliDaoWeb3", [], {}, previous);
 
   // NEW: summarize whether anything was newly deployed
-  const all = [storage, core, router, media, updates, refunds, governance, analytics, security, web3];
+  const all = [storage, core, router, extension, media, updates, refunds, governance, analytics, security, web3];
   const freshCount = all.filter((x) => x?.fresh).length;
   if (freshCount === 0) {
     console.log("No new deployments performed (reused previous addresses).");
@@ -422,6 +425,14 @@ async function main() {
   await maybeCall(storage.c, "setRouter", [router.addr]);
   await maybeCall(router.c, "setCore", [core.addr]);
   await maybeCall(router.c, "setStorage", [storage.addr]);
+  
+  // Wire Extension
+  await maybeCall(extension.c, "initialize", [storage.addr, core.addr]);       // onlyOwner, idempotent (zwróci błąd jeśli już zainicjalizowane)
+  await maybeCall(storage.c, "authorizeContract", [extension.addr]);          // nadaj uprawnienia modułowi
+  await maybeCall(core.c, "setExtensionsContract", [extension.addr]);         // podłącz Extension w Core
+  // (opcjonalnie) alternatywne nazwy jeżeli Core ma inny setter
+  await maybeCall(core.c, "setExtensionContract", [extension.addr]);
+  await maybeCall(core.c, "setExtension", [extension.addr]);
 
   const modules = [media, updates, refunds, governance, analytics, security, web3].filter(Boolean);
   for (const m of modules) {
@@ -445,6 +456,7 @@ async function main() {
     console.log(`${base}/address/${storage.addr}`);
     console.log(`${base}/address/${core.addr}`);
     console.log(`${base}/address/${router.addr}`);
+    console.log(`${base}/address/${extension.addr}`);
     console.log(`${base}/address/${media.addr}`);
     console.log(`${base}/address/${updates.addr}`);
     console.log(`${base}/address/${refunds.addr}`);
@@ -471,6 +483,7 @@ async function main() {
   if (shouldVerify(storage)) await verify(storage.addr, storage.args, storage.libraries, "PoliDaoStorage");
   if (shouldVerify(core)) await verify(core.addr, core.args, core.libraries, "PoliDaoCore");
   if (shouldVerify(router)) await verify(router.addr, router.args, router.libraries, "PoliDaoRouter");
+  if (shouldVerify(extension)) await verify(extension.addr, extension.args, extension.libraries, "PoliDaoExtension");
   if (shouldVerify(media)) await verify(media.addr, media.args, media.libraries, "PoliDaoMedia");
   if (shouldVerify(updates)) await verify(updates.addr, updates.args, updates.libraries, "PoliDaoUpdates");
   if (shouldVerify(refunds)) await verify(refunds.addr, refunds.args, refunds.libraries, "PoliDaoRefunds");
@@ -488,6 +501,7 @@ async function main() {
     storage: storage.addr,
     core: core.addr,
     router: router.addr,
+    extension: extension.addr,
     media: media.addr,
     updates: updates.addr,
     refunds: refunds.addr,
@@ -502,6 +516,7 @@ async function main() {
       ...(storage.txHash ? { storage: storage.txHash } : {}),
       ...(core.txHash ? { core: core.txHash } : {}),
       ...(router.txHash ? { router: router.txHash } : {}),
+      ...(extension.txHash ? { extension: extension.txHash } : {}),
       ...(media.txHash ? { media: media.txHash } : {}),
       ...(updates.txHash ? { updates: updates.txHash } : {}),
       ...(refunds.txHash ? { refunds: refunds.txHash } : {}),
@@ -520,16 +535,20 @@ async function main() {
   // NEW: export Router ABI and minimal addresses for FE (Router-only ABI per unified-storage design)
   try {
     const routerArtifact = await hre.artifacts.readArtifact("PoliDaoRouter");
+    const extensionArtifact = await hre.artifacts.readArtifact("PoliDaoExtension");
     const feDir = path.join(__dirname, "..", "deployments", "fe");
     const abiFile = path.join(feDir, `router.abi.json`);
+    const extAbiFile = path.join(feDir, `extension.abi.json`);
     const addrsFile = path.join(feDir, `addresses.${hre.network.name}.json`);
     writeJsonSync(abiFile, routerArtifact.abi);
+    writeJsonSync(extAbiFile, extensionArtifact.abi);
     writeJsonSync(addrsFile, {
       network: hre.network.name,
       entrypoint: router.addr,
       router: router.addr,
       core: core.addr,
       storage: storage.addr,
+      extension: extension.addr,
     });
     console.log(`Exported FE artifacts: ${path.relative(path.join(__dirname, ".."), abiFile)} , ${path.relative(path.join(__dirname, ".."), addrsFile)}`);
   } catch (e) {
