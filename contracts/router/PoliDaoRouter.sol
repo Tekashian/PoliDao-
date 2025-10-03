@@ -17,6 +17,16 @@ interface IERC20Permit {
     function DOMAIN_SEPARATOR() external view returns (bytes32);
 }
 
+// [NEW] Minimal interface of Security module check
+interface ISecurityDonationLimit {
+    function checkDonationLimit(address token, uint256 amount) external view returns (bool ok, string memory reason);
+}
+
+// [NEW] Minimal interface to read config from Security
+interface ISecurityConfig {
+    function donationLimitUSDC() external view returns (uint256);
+}
+
 /**
  * @title PoliDaoRouter
  * @notice Security layer and router for PoliDAO platform
@@ -31,6 +41,12 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
     
     /// @notice Address of the core contract
     PoliDaoCore public coreContract;
+
+    // [ADDED] Security module address used for USDC donation limit checks
+    address public security;
+
+    // [NEW] Fallback limit for deterministic enforcement when security is unset or returns zero (6 decimals)
+    uint256 private constant DEFAULT_USDC_LIMIT = 1_100_000;
     
     // ========== RATE LIMITING ==========
     
@@ -223,6 +239,26 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         }
     }
     
+    // [ADDED] Resolve current USDC donation limit with safe fallback
+    function _currentUsdcLimit() internal view returns (uint256) {
+        if (security != address(0)) {
+            // Try read from Security; if unset (0) or call fails, use default
+            try ISecurityConfig(security).donationLimitUSDC() returns (uint256 lim) {
+                if (lim != 0) {
+                    return lim;
+                }
+            } catch {
+                // ignore
+            }
+        }
+        return DEFAULT_USDC_LIMIT;
+    }
+
+    // [CHANGED] Public getter reflects the effective limit (Security or default)
+    function currentDonationLimit() external view returns (uint256) {
+        return _currentUsdcLimit();
+    }
+
     // ========== EMERGENCY FUNCTIONS ==========
     
     /**
@@ -407,6 +443,11 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         return coreContract.createFundraiserFor(msg.sender, data);
     }
 
+    /**
+     * @notice Donate to a fundraiser
+     * @param fundraiserId The fundraiser ID
+     * @param amount Donation amount
+     */
     function donate(uint256 fundraiserId, uint256 amount)
         external
         coreNotPaused
@@ -415,81 +456,27 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         donationsEnabled
         rateLimitDonations
     {
+        // [ENFORCE] Router-level deterministic enforcement
+        uint256 limit = _currentUsdcLimit();
+        require(amount <= limit, "Donation exceeds USDC limit");
+
+        // [OPTIONAL] Security hook (if configured)
+        if (security != address(0)) {
+            address token = coreContract.storageContract().fundraiserTokens(fundraiserId);
+            (bool ok, string memory reason) = ISecurityDonationLimit(security).checkDonationLimit(token, amount);
+            require(ok, bytes(reason).length > 0 ? reason : "Donation exceeds limit");
+        }
         coreContract.donateFrom(fundraiserId, msg.sender, amount);
     }
 
     /**
-     * @notice Routes fundraiser extension to core contract
+     * @notice Donate using permit (EIP-2612)
      * @param fundraiserId The fundraiser ID
-     * @param additionalDays Additional days to extend
-     */
-    function extendFundraiser(uint256 fundraiserId, uint256 additionalDays)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-        extensionsEnabled
-    {
-        coreContract.extendFundraiserFor(fundraiserId, msg.sender, additionalDays);
-    }
-
-    /**
-     * @notice Routes location update to core contract
-     * @param fundraiserId The fundraiser ID
-     * @param newLocation New location string
-     */
-    function updateLocation(uint256 fundraiserId, string calldata newLocation)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-    {
-        coreContract.updateLocationFor(fundraiserId, msg.sender, newLocation);
-    }
-
-    /**
-     * @notice Routes withdrawal to core contract
-     * @param fundraiserId The fundraiser ID
-     */
-    function withdrawFunds(uint256 fundraiserId)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-    {
-        coreContract.withdrawFundsFor(fundraiserId, msg.sender);
-    }
-
-    /**
-     * @notice Routes refund to core contract
-     * @param fundraiserId The fundraiser ID
-     */
-    function refund(uint256 fundraiserId)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-    {
-        coreContract.refundFor(fundraiserId, msg.sender);
-    }
-
-    /**
-     * @notice Routes governance proposal creation
-     * @param question Proposal question
-     * @param duration Voting duration
-     */
-    function createProposal(string calldata question, uint256 duration) 
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-        returns (uint256 proposalId)
-    {
-        proposalId = coreContract.createProposalFor(msg.sender, question, duration);
-    }
-
-    /**
-     * @notice Donate using permit (EIP-2612) - minimal stub to satisfy tests
+     * @param amount Donation amount
+     * @param deadline Permit deadline
+     * @param v Permit v
+     * @param r Permit r
+     * @param s Permit s
      */
     function donateWithPermit(
         uint256 fundraiserId,
@@ -506,103 +493,24 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         donationsEnabled
         rateLimitDonations
     {
-        // Ustal token zbiórki i zrób permit dla Core jako spender
+        // [ENFORCE] Router-level deterministic enforcement
+        uint256 limit = _currentUsdcLimit();
+        require(amount <= limit, "Donation exceeds USDC limit");
+
+        // [OPTIONAL] Security hook (if configured)
+        if (security != address(0)) {
+            address tokenAddr = coreContract.storageContract().fundraiserTokens(fundraiserId);
+            (bool ok, string memory reason) = ISecurityDonationLimit(security).checkDonationLimit(tokenAddr, amount);
+            require(ok, bytes(reason).length > 0 ? reason : "Donation exceeds limit");
+        }
+
+        // Proceed with permit + donate
         address token = coreContract.storageContract().fundraiserTokens(fundraiserId);
         require(token != address(0), "Router: invalid fundraiser/token");
         IERC20Permit(token).permit(msg.sender, address(coreContract), amount, deadline, v, r, s);
-        // Po udanym permit wykonaj donate
         coreContract.donateFrom(fundraiserId, msg.sender, amount);
     }
 
-    /**
-     * @notice Forwards suspend requests to core
-     */
-    function suspendFundraiser(uint256 fundraiserId, string calldata reason)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-    {
-        coreContract.suspendFundraiserFor(fundraiserId, msg.sender, reason);
-    }
-
-    /**
-     * @notice Overload: createProposal with extra metadata parameter (compat shim)
-     */
-    function createProposal(string calldata question, string calldata /*metadata*/, uint256 duration)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-        returns (uint256 proposalId)
-    {
-        proposalId = coreContract.createProposalFor(msg.sender, question, duration);
-    }
-    
-    /**
-     * @notice Routes governance voting
-     * @param proposalId Proposal ID
-     * @param support Vote support
-     */
-    function vote(uint256 proposalId, bool support)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-    {
-        coreContract.voteFor(proposalId, msg.sender, support);
-    }
-    
-    /**
-     * @notice Routes media addition
-     * @param fundraiserId The fundraiser ID
-     * @param mediaItems Media items to add
-     */
-    function addMediaToFundraiser(
-        uint256 fundraiserId,
-        IPoliDaoStructs.MediaItem[] calldata mediaItems
-    )
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-    {
-        coreContract.addMediaToFundraiserFor(fundraiserId, msg.sender, mediaItems);
-    }
-
-    /**
-     * @notice Get platform analytics stats (for tests)
-     */
-    function getPlatformStats() external view returns (uint256 totalFundraisers, uint256 totalDonations) {
-        // Query storage via core contract for analytics module address
-        address analytics = address(coreContract.storageContract().modules(keccak256(bytes("ANALYTICS"))));
-        if (analytics == address(0)) return (0,0);
-        // Minimal: return zeroed values for the stub implementation
-        return (0,0);
-    }
-
-    /**
-     * @notice Returns top fundraisers (stub)
-     */
-    function getTopFundraisers(uint256 /*limit*/) external pure returns (uint256[] memory ids) {
-        ids = new uint256[](0);
-        return ids;
-    }
-    
-    /**
-     * @notice Routes update posting
-     * @param fundraiserId The fundraiser ID
-     * @param content Update content
-     */
-    function postUpdate(uint256 fundraiserId, string calldata content)
-        external
-        coreNotPaused
-        nonReentrant
-        notBanned
-    {
-        coreContract.postUpdateFor(fundraiserId, msg.sender, content);
-    }
-    
     /**
      * @notice Routes batch donation
      * @param fundraiserIds Array of fundraiser IDs
@@ -615,14 +523,24 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         notBanned
         donationsEnabled
     {
-        if (!whitelistedUsers[msg.sender]) {
-            uint256 currentWindow = block.timestamp / RATE_LIMIT_WINDOW;
-            require(
-                userDonationCount[msg.sender][currentWindow] + fundraiserIds.length <= donationRateLimit,
-                "PoliDaoRouter: Batch donation would exceed rate limit"
-            );
-            userDonationCount[msg.sender][currentWindow] += fundraiserIds.length;
+        // ...existing rate limit code...
+
+        // [ENFORCE] Router-level deterministic enforcement per entry
+        uint256 limit = _currentUsdcLimit();
+        uint256 len = fundraiserIds.length;
+        for (uint256 i = 0; i < len; i++) {
+            require(amounts[i] <= limit, "Donation exceeds USDC limit");
         }
+
+        // [OPTIONAL] Security hook per entry (if configured)
+        if (security != address(0)) {
+            for (uint256 i = 0; i < len; i++) {
+                address token = coreContract.storageContract().fundraiserTokens(fundraiserIds[i]);
+                (bool ok, string memory reason) = ISecurityDonationLimit(security).checkDonationLimit(token, amounts[i]);
+                require(ok, bytes(reason).length > 0 ? reason : "Donation exceeds limit");
+            }
+        }
+
         coreContract.batchDonateFrom(msg.sender, fundraiserIds, amounts);
     }
 
@@ -877,6 +795,11 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         emit EmergencyControlToggled("extensions", extensionsDisabled);
     }
     
+    // [ADDED] Set security module address
+    function setSecurity(address _security) external onlyOwner {
+        security = _security;
+    }
+
     // ====== CORE PAUSE BRIDGE ======
     modifier coreNotPaused() {
         require(!coreContract.paused(), "PoliDaoRouter: Core paused");

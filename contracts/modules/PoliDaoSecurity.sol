@@ -78,6 +78,13 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard {
     mapping(string => RateLimitConfig) public rateLimitConfigs;
     mapping(address => mapping(string => UserRateLimit)) public userRateLimits;
     
+    // [NEW] USDC-specific settings
+    address public usdc;
+    // Limit expressed in USDC's native decimals (6). Default: 1100 USDC.
+    uint256 public donationLimitUSDC;
+    event USDCUpdated(address indexed previous, address indexed current, address indexed caller);
+    event DonationLimitUpdated(uint256 previousLimit, uint256 newLimit, address indexed caller);
+
     // DODANO: event aktualizacji mainContract
     event MainContractUpdated(address indexed previous, address indexed current, address indexed caller);
 
@@ -148,6 +155,9 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard {
         gasThresholds["donate"] = 200000;
         gasThresholds["createFundraiser"] = 500000;
         gasThresholds["withdrawFunds"] = 300000;
+
+        // [NEW] Default USDC donation limit: 1100 USDC (6 decimals)
+        donationLimitUSDC = 1_100_000;
     }
     
     // ========== EMERGENCY FUNCTIONS ==========
@@ -512,6 +522,43 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard {
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
     
+    // ========== DONATION LIMIT CHECK (USDC) ==========
+
+    /**
+     * @notice Owner: set USDC token address
+     */
+    function setUSDC(address _usdc) external onlyOwner {
+        require(_usdc != address(0), "Security: zero USDC");
+        emit USDCUpdated(usdc, _usdc, msg.sender);
+        usdc = _usdc;
+    }
+
+    /**
+     * @notice Owner: set the per-donation USDC limit (6 decimals)
+     */
+    function setDonationLimitUSDC(uint256 newLimit) external onlyOwner {
+        uint256 prev = donationLimitUSDC;
+        donationLimitUSDC = newLimit;
+        emit DonationLimitUpdated(prev, newLimit, msg.sender);
+    }
+
+    /*
+     * @notice Check if a donation amount is within the configured USDC limit
+     * @dev For deterministic testing, enforce solely by amount vs limit (6 decimals).
+     *      If limit is unset (0), the check passes.
+     * @param token ERC20 token address used for donation (ignored)
+     * @param amount Donation amount in token's native decimals (expect 6 for USDC)
+     */
+    function checkDonationLimit(address /*token*/, uint256 amount) external view returns (bool ok, string memory reason) {
+        if (donationLimitUSDC == 0) {
+            return (true, "");
+        }
+        if (amount > donationLimitUSDC) {
+            return (false, "Donation exceeds USDC limit");
+        }
+        return (true, "");
+    }
+
     // ========== UTILITY FUNCTIONS ==========
 
     function _isCurrentlySuspended(SuspensionInfo memory s) internal view returns (bool) {

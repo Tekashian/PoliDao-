@@ -257,10 +257,8 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
         uint256 newRaised = uint256(fPrev.raisedAmount) + amount;
 
-        // Przenieś transfer + zapis do biblioteki (SafeERC20 użyte w DonationLogic)
         DonationLogic.donate(storageContract, fundraiserId, msg.sender, amount);
 
-        // Emit ustandaryzowanego eventu
         emit DonationMade(fundraiserId, msg.sender, token, amount, newRaised);
     }
     
@@ -276,6 +274,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         onlyRouter
     {
         if (amount == 0) revert InvalidAmount();
+
         IPoliDaoStructs.PackedFundraiserData memory fPrev = storageContract.fundraisers(fundraiserId);
         if (fPrev.id == 0) revert FundraiserNotFound();
         address token = storageContract.fundraiserTokens(fundraiserId);
@@ -294,6 +293,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     {
         require(fundraiserIds.length == amounts.length && fundraiserIds.length > 0, "PoliDaoCore: arrays mismatch");
         IPoliDaoStorage s = storageContract;
+
         for (uint256 i = 0; i < fundraiserIds.length; i++) {
             uint256 amt = amounts[i];
             if (amt == 0) continue;

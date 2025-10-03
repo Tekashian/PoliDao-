@@ -40,6 +40,22 @@ async function deployRouter(optionalCoreAddress = ethers.ZeroAddress) {
   }
 }
 
+// [ADDED] Deploy Security module and wire into router
+async function deploySecurityModule(core, owner) {
+  try {
+    const Security = await ethers.getContractFactory("PoliDaoSecurity");
+    const main = core ? await core.getAddress() : owner.address;
+    const security = await Security.deploy(main);
+    await security.waitForDeployment();
+
+    // Default USDC limit: 1100 USDC (6 decimals)
+    await (await security.connect(owner).setDonationLimitUSDC(1_100_000)).wait();
+    return security;
+  } catch {
+    return null;
+  }
+}
+
 async function deployCoreWithLibraries(storage, router, libs) {
   try {
     const CoreFactory = await getCoreFactory(libs);
@@ -207,6 +223,12 @@ async function deploySystemFixture() {
     console.warn("⚠️ PoliDaoWeb3 deployment skipped");
   }
 
+  // [ADDED] Deploy Security and wire into router (if router supports setSecurity)
+  const security = await deploySecurityModule(core, owner);
+  if (router && security) {
+    await safeCallWrite(router, "setSecurity", [await security.getAddress()]);
+  }
+
   // Deploy i zmapuj kluczowe moduły
   const refunds = await deployModuleAndMap({
     name: "Refunds",
@@ -230,6 +252,8 @@ async function deploySystemFixture() {
     owner, alice, bob, carol,
     storage, core, router, web3, libs,
     refunds, governance,
+    // [ADDED] expose security for tests
+    security,
   };
 }
 
