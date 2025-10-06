@@ -102,6 +102,9 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard {
     event SecurityGuardianRemoved(address indexed guardian, address indexed by);
     event CircuitBreakerTriggered(string functionName, address indexed by, uint256 gasUsed, uint256 threshold, uint256 timestamp);
     event RateLimitExceeded(address indexed user, string functionName, uint256 calls, uint256 maxCalls, uint256 windowStart);
+    event PayoutLimitUpdated(uint256 previousLimit, uint256 newLimit, address indexed caller);
+    event WithdrawTrancheExecuted(uint256 indexed fundraiserId, address indexed actor, uint256 amount, uint256 nextClaimAt, uint256 remaining);
+    event RefundTrancheExecuted(uint256 indexed fundraiserId, address indexed actor, uint256 amount, uint256 nextClaimAt, uint256 remaining);
 
     // ========== MODIFIERS ==========
     
@@ -557,6 +560,160 @@ contract PoliDaoSecurity is Ownable, Pausable, ReentrancyGuard {
             return (false, "Donation exceeds USDC limit");
         }
         return (true, "");
+    }
+
+    // ========== PAYOUT (WITHDRAW/REFUND) LIMITS AND SCHEDULING ==========
+
+    // Default per-tranche payout limit in USDC-6 (1100 USDC). Admin can set to 0 to remove limit.
+    uint256 public payoutLimitUSDC = 1_100_000;
+    uint256 private constant TRANCHE_INTERVAL = 1 hours;
+
+    struct PayoutSchedule {
+        uint256 remaining;
+        uint256 nextClaimAt; // timestamp when next tranche becomes available
+    }
+
+    // Withdraw schedules: fundraiserId -> actor(beneficiary) -> schedule
+    mapping(uint256 => mapping(address => PayoutSchedule)) public withdrawSchedules;
+    // Refund schedules: fundraiserId -> actor(donor) -> schedule
+    mapping(uint256 => mapping(address => PayoutSchedule)) public refundSchedules;
+
+    /**
+     * @notice Owner: set the per-tranche payout limit for withdraw/refund in USDC-6
+     * @dev newLimit == 0 disables the limit (no scheduling)
+     */
+    function setPayoutLimitUSDC(uint256 newLimit) external onlyOwner {
+        uint256 prev = payoutLimitUSDC;
+        payoutLimitUSDC = newLimit;
+        emit PayoutLimitUpdated(prev, newLimit, msg.sender);
+    }
+
+    /**
+     * @notice Enforce payout schedule for withdraw calls and consume the current tranche
+     * @dev Non-stacking: one tranche per hour until full amount is consumed
+     * @param fundraiserId Fundraiser identifier
+     * @param actor The withdrawer (beneficiary)
+     * @param requestedAmount Total amount requested in this call
+     * @return allowedNow Amount allowed to be processed now
+     * @return nextAt Next available claim time (0 if none)
+     * @return remaining Remaining amount after this claim
+     */
+    function checkAndConsumeWithdraw(
+        uint256 fundraiserId,
+        address actor,
+        uint256 requestedAmount
+    )
+        external
+        nonReentrant
+        returns (uint256 allowedNow, uint256 nextAt, uint256 remaining)
+    {
+        require(actor != address(0), "Security: zero actor");
+        uint256 limit = payoutLimitUSDC;
+
+        // No limit -> full amount immediate, clear any schedule
+        if (limit == 0) {
+            PayoutSchedule storage sw = withdrawSchedules[fundraiserId][actor];
+            if (sw.remaining != 0) {
+                delete withdrawSchedules[fundraiserId][actor];
+            }
+            emit WithdrawTrancheExecuted(fundraiserId, actor, requestedAmount, 0, 0);
+            return (requestedAmount, 0, 0);
+        }
+
+        PayoutSchedule storage s = withdrawSchedules[fundraiserId][actor];
+
+        // No prior schedule: decide immediate tranche and possibly create schedule for the rest
+        if (s.remaining == 0) {
+            if (requestedAmount <= limit) {
+                emit WithdrawTrancheExecuted(fundraiserId, actor, requestedAmount, 0, 0);
+                return (requestedAmount, 0, 0);
+            }
+            // Create schedule: pay first tranche now, remainder later
+            uint256 first = limit;
+            s.remaining = requestedAmount - first;
+            s.nextClaimAt = block.timestamp + TRANCHE_INTERVAL;
+            emit WithdrawTrancheExecuted(fundraiserId, actor, first, s.nextClaimAt, s.remaining);
+            return (first, s.nextClaimAt, s.remaining);
+        }
+
+        // Existing schedule: enforce non-stacking cadence
+        require(block.timestamp >= s.nextClaimAt, "Security: payout tranche not available yet");
+
+        uint256 tranche = s.remaining > limit ? limit : s.remaining;
+        s.remaining -= tranche;
+
+        if (s.remaining == 0) {
+            nextAt = 0;
+            delete withdrawSchedules[fundraiserId][actor];
+        } else {
+            s.nextClaimAt = block.timestamp + TRANCHE_INTERVAL;
+            nextAt = s.nextClaimAt;
+        }
+        remaining = s.remaining;
+        emit WithdrawTrancheExecuted(fundraiserId, actor, tranche, nextAt, remaining);
+        return (tranche, nextAt, remaining);
+    }
+
+    /**
+     * @notice Enforce payout schedule for refund calls and consume the current tranche
+     * @dev Same cadence as withdraw: one tranche per hour; non-stacking
+     * @param fundraiserId Fundraiser identifier
+     * @param actor The refunder (donor)
+     * @param requestedAmount Total amount requested in this call
+     * @return allowedNow Amount allowed to be processed now
+     * @return nextAt Next available claim time (0 if none)
+     * @return remaining Remaining amount after this claim
+     */
+    function checkAndConsumeRefund(
+        uint256 fundraiserId,
+        address actor,
+        uint256 requestedAmount
+    )
+        external
+        nonReentrant
+        returns (uint256 allowedNow, uint256 nextAt, uint256 remaining)
+    {
+        require(actor != address(0), "Security: zero actor");
+        uint256 limit = payoutLimitUSDC;
+
+        if (limit == 0) {
+            PayoutSchedule storage sr = refundSchedules[fundraiserId][actor];
+            if (sr.remaining != 0) {
+                delete refundSchedules[fundraiserId][actor];
+            }
+            emit RefundTrancheExecuted(fundraiserId, actor, requestedAmount, 0, 0);
+            return (requestedAmount, 0, 0);
+        }
+
+        PayoutSchedule storage s = refundSchedules[fundraiserId][actor];
+
+        if (s.remaining == 0) {
+            if (requestedAmount <= limit) {
+                emit RefundTrancheExecuted(fundraiserId, actor, requestedAmount, 0, 0);
+                return (requestedAmount, 0, 0);
+            }
+            uint256 first = limit;
+            s.remaining = requestedAmount - first;
+            s.nextClaimAt = block.timestamp + TRANCHE_INTERVAL;
+            emit RefundTrancheExecuted(fundraiserId, actor, first, s.nextClaimAt, s.remaining);
+            return (first, s.nextClaimAt, s.remaining);
+        }
+
+        require(block.timestamp >= s.nextClaimAt, "Security: payout tranche not available yet");
+
+        uint256 tranche = s.remaining > limit ? limit : s.remaining;
+        s.remaining -= tranche;
+
+        if (s.remaining == 0) {
+            nextAt = 0;
+            delete refundSchedules[fundraiserId][actor];
+        } else {
+            s.nextClaimAt = block.timestamp + TRANCHE_INTERVAL;
+            nextAt = s.nextClaimAt;
+        }
+        remaining = s.remaining;
+        emit RefundTrancheExecuted(fundraiserId, actor, tranche, nextAt, remaining);
+        return (tranche, nextAt, remaining);
     }
 
     // ========== UTILITY FUNCTIONS ==========

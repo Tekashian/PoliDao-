@@ -238,4 +238,31 @@ interface IPoliDaoSecurity is IPoliDaoStructs {
      * @return contractAddress Main contract address
      */
     function mainContract() external view returns (address contractAddress);
+
+    // ========== PAYOUT (WITHDRAW/REFUND) LIMITS AND SCHEDULING ==========
+
+    /**
+     * @notice Get/Set per-tranche payout limit in USDC-6 (0 disables limit)
+     */
+    function setPayoutLimitUSDC(uint256 newLimit) external;
+    // Note: public variable in implementation; view fn here for interface parity if needed elsewhere
+    // function payoutLimitUSDC() external view returns (uint256);
+
+    /**
+     * @notice Enforce and consume the current tranche for withdraw
+     */
+    function checkAndConsumeWithdraw(
+        uint256 fundraiserId,
+        address actor,
+        uint256 requestedAmount
+    ) external returns (uint256 allowedNow, uint256 nextAt, uint256 remaining);
+
+    /**
+     * @notice Enforce and consume the current tranche for refund
+     */
+    function checkAndConsumeRefund(
+        uint256 fundraiserId,
+        address actor,
+        uint256 requestedAmount
+    ) external returns (uint256 allowedNow, uint256 nextAt, uint256 remaining);
 }

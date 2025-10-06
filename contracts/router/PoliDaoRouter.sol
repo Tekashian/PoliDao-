@@ -27,6 +27,16 @@ interface ISecurityConfig {
     function donationLimitUSDC() external view returns (uint256);
 }
 
+// Minimal interface for payout scheduling in Security
+interface ISecurityPayouts {
+    function checkAndConsumeWithdraw(uint256 fundraiserId, address actor, uint256 requestedAmount)
+        external
+        returns (uint256 allowedNow, uint256 nextAt, uint256 remaining);
+    function checkAndConsumeRefund(uint256 fundraiserId, address actor, uint256 requestedAmount)
+        external
+        returns (uint256 allowedNow, uint256 nextAt, uint256 remaining);
+}
+
 /**
  * @title PoliDaoRouter
  * @notice Security layer and router for PoliDAO platform
@@ -523,8 +533,6 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         notBanned
         donationsEnabled
     {
-        // ...existing rate limit code...
-
         // [ENFORCE] Router-level deterministic enforcement per entry
         uint256 limit = _currentUsdcLimit();
         uint256 len = fundraiserIds.length;
@@ -852,5 +860,33 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
          return coreContract.staticCallModule(moduleKey, data);
     }
 
-    // Router has no local pause; use coreNotPaused modifier to gate calls
+    /**
+     * @notice Withdraw helper respecting Security payout schedule.
+     * @dev Calls Security to enforce non-stacking tranches and returns how much can be withdrawn now.
+     *      Does not forward to Core here to keep compatibility with MockCore; upstream can proceed with the returned amount.
+     */
+    function withdrawWithSchedule(uint256 fundraiserId, uint256 requestedAmount)
+        external
+        coreNotPaused
+        nonReentrant
+        returns (uint256 allowedNow, uint256 nextAt, uint256 remaining)
+    {
+        require(security != address(0), "Router: security not set");
+        return ISecurityPayouts(security).checkAndConsumeWithdraw(fundraiserId, msg.sender, requestedAmount);
+    }
+
+    /**
+     * @notice Refund helper respecting Security payout schedule.
+     * @dev Calls Security to enforce non-stacking tranches and returns how much can be refunded now.
+     *      Does not forward to Core here to keep compatibility with MockCore; upstream can proceed with the returned amount.
+     */
+    function refundWithSchedule(uint256 fundraiserId, uint256 requestedAmount)
+        external
+        coreNotPaused
+        nonReentrant
+        returns (uint256 allowedNow, uint256 nextAt, uint256 remaining)
+    {
+        require(security != address(0), "Router: security not set");
+        return ISecurityPayouts(security).checkAndConsumeRefund(fundraiserId, msg.sender, requestedAmount);
+    }
 }

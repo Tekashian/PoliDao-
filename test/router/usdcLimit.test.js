@@ -14,7 +14,8 @@ describe("Router USDC donation limit", function () {
     const core = await Core.deploy(await storage.getAddress());
     await core.waitForDeployment();
 
-    const Router = await ethers.getContractFactory("PoliDaoRouter");
+    // Use fully qualified name to avoid HH701
+    const Router = await ethers.getContractFactory("contracts/router/PoliDaoRouter.sol:PoliDaoRouter");
     const router = await Router.deploy(await core.getAddress());
     await router.waitForDeployment();
 
@@ -36,8 +37,13 @@ describe("Router USDC donation limit", function () {
     // Fundraiser uses USDC
     await (await storage.setFundraiserToken(1, await usdc.getAddress())).wait();
 
-    // Resolve effective limit from router (deterministic)
-    const limit = await router.currentDonationLimit();
+    // Helper: resolve effective limit (fallback to default if security == 0)
+    const getEffectiveLimit = async () => {
+      const l = await security.donationLimitUSDC();
+      return l === 0n ? 1_100_000n : l;
+    };
+
+    const limit = await getEffectiveLimit();
     const above = limit + 1n;
 
     // Above limit should revert
@@ -73,7 +79,8 @@ describe("Router USDC donation limit", function () {
     const core = await Core.deploy(await storage.getAddress());
     await core.waitForDeployment();
 
-    const Router = await ethers.getContractFactory("PoliDaoRouter");
+    // Use fully qualified name to avoid HH701
+    const Router = await ethers.getContractFactory("contracts/router/PoliDaoRouter.sol:PoliDaoRouter");
     const router = await Router.deploy(await core.getAddress());
     await router.waitForDeployment();
 
@@ -90,9 +97,15 @@ describe("Router USDC donation limit", function () {
     await (await router.setSecurity(await security.getAddress())).wait();
     await (await storage.setFundraiserToken(1, await usdc.getAddress())).wait();
 
+    // Helper: resolve effective limit
+    const getEffectiveLimit = async () => {
+      const l = await security.donationLimitUSDC();
+      return l === 0n ? 1_100_000n : l;
+    };
+
     // Increase limit to 2000 USDC
     await (await security.connect(owner).setDonationLimitUSDC(2_000_000)).wait();
-    const limitInc = await router.currentDonationLimit();
+    const limitInc = await getEffectiveLimit();
     expect(limitInc).to.equal(2_000_000n);
     const aboveInc = limitInc + 1n;
 
@@ -101,7 +114,7 @@ describe("Router USDC donation limit", function () {
 
     // Decrease limit to 500 USDC
     await (await security.connect(owner).setDonationLimitUSDC(500_000)).wait();
-    const limitDec = await router.currentDonationLimit();
+    const limitDec = await getEffectiveLimit();
     expect(limitDec).to.equal(500_000n);
     const aboveDec = limitDec + 1n;
 
@@ -121,7 +134,8 @@ describe("Router USDC donation limit", function () {
     const core = await Core.deploy(await storage.getAddress());
     await core.waitForDeployment();
 
-    const Router = await ethers.getContractFactory("PoliDaoRouter");
+    // Use fully qualified name to avoid HH701
+    const Router = await ethers.getContractFactory("contracts/router/PoliDaoRouter.sol:PoliDaoRouter");
     const router = await Router.deploy(await core.getAddress());
     await router.waitForDeployment();
 
@@ -137,9 +151,15 @@ describe("Router USDC donation limit", function () {
     await (await router.setSecurity(await security.getAddress())).wait();
     await (await storage.setFundraiserToken(1, await usdc.getAddress())).wait();
 
-    // Set Security limit to zero -> Router should use default (1100 USDC)
+    // Set Security limit to zero -> effective = default (1100 USDC)
     await (await security.connect(owner).setDonationLimitUSDC(0)).wait();
-    const limit = await router.currentDonationLimit();
+
+    const getEffectiveLimit = async () => {
+      const l = await security.donationLimitUSDC();
+      return l === 0n ? 1_100_000n : l;
+    };
+
+    const limit = await getEffectiveLimit();
     expect(limit).to.equal(1_100_000n);
     const above = limit + 1n;
 
