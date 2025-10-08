@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../core/PoliDaoCore.sol";
+// import "../core/PoliDaoCore.sol"; // removed: avoid pulling implementation into compilation unit
 import "../interfaces/IPoliDao.sol";
 import "../interfaces/IPoliDaoStorage.sol";
 import "../interfaces/IPoliDaoStructs.sol";
@@ -37,6 +37,61 @@ interface ISecurityPayouts {
         returns (uint256 allowedNow, uint256 nextAt, uint256 remaining);
 }
 
+// [ADD] Minimal interface for Core to avoid importing implementation
+interface IPoliDaoCore {
+    function paused() external view returns (bool);
+    function getFundraiserCount() external view returns (uint256);
+    function storageContract() external view returns (IPoliDaoStorage);
+
+    function createFundraiserFor(address creator, IPoliDaoStructs.FundraiserCreationData calldata data)
+        external
+        returns (uint256);
+
+    function donateFrom(uint256 fundraiserId, address donor, uint256 amount) external;
+    function batchDonateFrom(address donor, uint256[] calldata fundraiserIds, uint256[] calldata amounts) external;
+
+    function getDonationAmount(uint256 fundraiserId, address donor) external view returns (uint256);
+
+    function getFundraiserDetails(uint256 fundraiserId)
+        external
+        view
+        returns (
+            string memory title,
+            string memory description,
+            string memory location,
+            uint256 endDate,
+            uint8 fundraiserType,
+            uint8 status,
+            address token,
+            uint256 goalAmount,
+            uint256 raisedAmount,
+            address creator,
+            uint256 extensionCount,
+            bool isSuspended,
+            string memory suspensionReason
+        );
+
+    function getFundraiserProgress(uint256 fundraiserId)
+        external
+        view
+        returns (
+            uint256 raised,
+            uint256 goal,
+            uint256 percentage,
+            uint256 donorsCount,
+            uint256 timeLeft,
+            uint256 refundDeadline,
+            bool isSuspended,
+            uint256 suspensionTime
+        );
+
+    function canExtendFundraiser(uint256 fundraiserId) external view returns (bool, uint256, string memory);
+    function canRefund(uint256 fundraiserId, address donor) external view returns (bool, string memory);
+
+    function callModule(bytes32 moduleKey, bytes calldata data) external returns (bytes memory);
+    function staticCallModule(bytes32 moduleKey, bytes calldata data) external view returns (bytes memory);
+}
+
 /**
  * @title PoliDaoRouter
  * @notice Security layer and router for PoliDAO platform
@@ -50,7 +105,8 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
     // ========== CORE CONTRACT ==========
     
     /// @notice Address of the core contract
-    PoliDaoCore public coreContract;
+    // PoliDaoCore public coreContract;
+    IPoliDaoCore public coreContract;
 
     // [ADDED] Security module address used for USDC donation limit checks
     address public security;
@@ -417,7 +473,8 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
      */
     constructor(address _coreContract) Ownable(msg.sender) {
         require(_coreContract != address(0), "PoliDaoRouter: Invalid core contract");
-        coreContract = PoliDaoCore(_coreContract);
+        // coreContract = PoliDaoCore(_coreContract);
+        coreContract = IPoliDaoCore(_coreContract);
         lastSuccessfulTransaction = block.timestamp;
     }
 
@@ -428,7 +485,8 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
         require(!_initialized, "PoliDaoRouter: already initialized");
         require(_coreContract != address(0), "PoliDaoRouter: Invalid core contract");
         _initialized = true;
-        coreContract = PoliDaoCore(_coreContract);
+        // coreContract = PoliDaoCore(_coreContract);
+        coreContract = IPoliDaoCore(_coreContract);
         lastSuccessfulTransaction = block.timestamp;
         transferOwnership(initialOwner);
     }
@@ -839,7 +897,7 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
     {
         require(data.length >= 4, "Router: data too short");
          bytes4 sel;
-        assembly ("memory-safe") {
+        assembly {
             sel := calldataload(data.offset)
         }
          require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");
@@ -853,7 +911,7 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
     {
         require(data.length >= 4, "Router: data too short");
          bytes4 sel;
-        assembly ("memory-safe") {
+        assembly {
             sel := calldataload(data.offset)
         }
          require(_allowedSelectors[moduleKey][sel], "Router: selector not allowed");

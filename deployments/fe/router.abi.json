@@ -219,56 +219,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "fundraiserId",
-        "type": "uint256"
-      },
-      {
-        "components": [
-          {
-            "internalType": "string",
-            "name": "ipfsHash",
-            "type": "string"
-          },
-          {
-            "internalType": "uint8",
-            "name": "mediaType",
-            "type": "uint8"
-          },
-          {
-            "internalType": "string",
-            "name": "filename",
-            "type": "string"
-          },
-          {
-            "internalType": "uint256",
-            "name": "uploadTime",
-            "type": "uint256"
-          },
-          {
-            "internalType": "address",
-            "name": "uploader",
-            "type": "address"
-          },
-          {
-            "internalType": "string",
-            "name": "description",
-            "type": "string"
-          }
-        ],
-        "internalType": "struct IPoliDaoStructs.MediaItem[]",
-        "name": "mediaItems",
-        "type": "tuple[]"
-      }
-    ],
-    "name": "addMediaToFundraiser",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "user",
         "type": "address"
@@ -464,59 +414,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "string",
-        "name": "question",
-        "type": "string"
-      },
-      {
-        "internalType": "string",
-        "name": "",
-        "type": "string"
-      },
-      {
-        "internalType": "uint256",
-        "name": "duration",
-        "type": "uint256"
-      }
-    ],
-    "name": "createProposal",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "proposalId",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "string",
-        "name": "question",
-        "type": "string"
-      },
-      {
-        "internalType": "uint256",
-        "name": "duration",
-        "type": "uint256"
-      }
-    ],
-    "name": "createProposal",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "proposalId",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "creationDisabled",
     "outputs": [
@@ -532,6 +429,19 @@
   {
     "inputs": [],
     "name": "creationRateLimit",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "currentDonationLimit",
     "outputs": [
       {
         "internalType": "uint256",
@@ -634,24 +544,6 @@
   {
     "inputs": [],
     "name": "emergencyStop",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "fundraiserId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "additionalDays",
-        "type": "uint256"
-      }
-    ],
-    "name": "extendFundraiser",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -911,24 +803,6 @@
   },
   {
     "inputs": [],
-    "name": "getPlatformStats",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "totalFundraisers",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "totalDonations",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "getRouterConfig",
     "outputs": [
       {
@@ -963,25 +837,6 @@
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "getTopFundraisers",
-    "outputs": [
-      {
-        "internalType": "uint256[]",
-        "name": "ids",
-        "type": "uint256[]"
-      }
-    ],
-    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -1193,26 +1048,29 @@
         "type": "uint256"
       },
       {
-        "internalType": "string",
-        "name": "content",
-        "type": "string"
-      }
-    ],
-    "name": "postUpdate",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint256",
-        "name": "fundraiserId",
+        "name": "requestedAmount",
         "type": "uint256"
       }
     ],
-    "name": "refund",
-    "outputs": [],
+    "name": "refundWithSchedule",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "allowedNow",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "nextAt",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "remaining",
+        "type": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -1305,6 +1163,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "security",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "bytes32",
@@ -1385,6 +1256,19 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "_security",
+        "type": "address"
+      }
+    ],
+    "name": "setSecurity",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "token",
         "type": "address"
       }
@@ -1398,24 +1282,6 @@
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "fundraiserId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "string",
-        "name": "reason",
-        "type": "string"
-      }
-    ],
-    "name": "suspendFundraiser",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1481,24 +1347,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "fundraiserId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "string",
-        "name": "newLocation",
-        "type": "string"
-      }
-    ],
-    "name": "updateLocation",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "",
         "type": "address"
@@ -1547,24 +1395,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "proposalId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "support",
-        "type": "bool"
-      }
-    ],
-    "name": "vote",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "user",
         "type": "address"
@@ -1600,10 +1430,31 @@
         "internalType": "uint256",
         "name": "fundraiserId",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "requestedAmount",
+        "type": "uint256"
       }
     ],
-    "name": "withdrawFunds",
-    "outputs": [],
+    "name": "withdrawWithSchedule",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "allowedNow",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "nextAt",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "remaining",
+        "type": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   }

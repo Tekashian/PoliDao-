@@ -21,6 +21,8 @@ const VERIFY_LIBS = process.env.VERIFY_LIBS
 const VERIFY_RETRIES = Number(process.env.VERIFY_RETRIES || 3);
 const VERIFY_DELAY_MS = Number(process.env.VERIFY_DELAY_MS || (isPolygon(hre.network.name) ? 60000 : 15000));
 const MAX_PENDING_MS = Number(process.env.MAX_PENDING_MS || 5 * 60_000);
+// NEW: prefer verifying without recompile to avoid bytecode drift
+const VERIFY_NO_COMPILE = process.env.VERIFY_NO_COMPILE ? process.env.VERIFY_NO_COMPILE === "1" : true;
 // NEW: comma-separated, case-insensitive list of names to force redeploy (e.g. "Storage,Core,Router")
 const REDEPLOY_LIST = (process.env.REDEPLOY_LIST || "")
   .split(",")
@@ -174,8 +176,23 @@ async function ensureLibraries(libNames = []) {
   return libs;
 }
 
+// NEW: quick preflight check to compare creation bytecode with tx.input
+async function preflightCreationMatches(contractRef, args = [], txHash, libraries = undefined) {
+  try {
+    if (!txHash) return true;
+    const F = await hre.ethers.getContractFactory(contractRef, libraries ? { libraries } : undefined);
+    const deployTx = await F.getDeployTransaction(...args);
+    const onchainTx = await hre.ethers.provider.getTransaction(txHash);
+    if (!deployTx?.data || !onchainTx?.data) return true;
+    return String(deployTx.data).toLowerCase() === String(onchainTx.data).toLowerCase();
+  } catch {
+    // if we cannot preflight, don't block verification
+    return true;
+  }
+}
+
 // Hardened verify that can fall back to fully-qualified name on ambiguity
-async function verify(address, args = [], libraries = undefined, contractName = undefined) {
+async function verify(address, args = [], libraries = undefined, contractName = undefined, txHash = undefined) {
   if (isLocal(hre.network.name) || SKIP_VERIFY) {
     console.log(`Skip verify on '${hre.network.name}' for ${address}`);
     return;
@@ -188,19 +205,37 @@ async function verify(address, args = [], libraries = undefined, contractName = 
 
   const baseDelay = VERIFY_DELAY_MS;
 
-  // CHANGED: precompute FQN when contractName provided and always pass it to verifier
+  // CHANGED: precompute FQN when contractName provided; accept FQN directly
   let fqn;
   if (contractName) {
-    try {
-      const art = await hre.artifacts.readArtifact(contractName);
-      if (art?.sourceName) fqn = `${art.sourceName}:${art.contractName}`;
-    } catch {}
+    if (contractName.includes(":")) {
+      fqn = contractName;
+    } else {
+      try {
+        const art = await hre.artifacts.readArtifact(contractName);
+        if (art?.sourceName) fqn = `${art.sourceName}:${art.contractName}`;
+      } catch {}
+    }
+  }
+
+  // NEW: preflight creation bytecode check (diagnostic)
+  const refForPreflight = fqn || contractName;
+  if (refForPreflight && txHash) {
+    const ok = await preflightCreationMatches(refForPreflight, args, txHash, libraries);
+    if (!ok) {
+      console.warn(`Preflight: creation bytecode mismatch for ${address}. Verification aborted to avoid misleading 'bytecode did not match'.`);
+      console.warn(`Hints:`);
+      console.warn(` - Użyj dokładnie tego samego builda, z którego był deploy (solc/optimizer/evmVersion/sources).`);
+      console.warn(` - Albo wykonaj świeży deploy tego kontraktu (np. REDEPLOY_LIST=Router lub FORCE_REDEPLOY=1).`);
+      console.warn(` - Jeśli weryfikujesz stary deploy, wróć do odpowiedniego commita i skompiluj przed verify.`);
+      return;
+    }
   }
 
   for (let attempt = 1; attempt <= VERIFY_RETRIES; attempt++) {
     try {
       await waitMs(baseDelay * attempt);
-      const params = { address, constructorArguments: args, libraries };
+      const params = { address, constructorArguments: args, libraries, noCompile: VERIFY_NO_COMPILE };
       // always include FQN when available (particularly important for libraries)
       if (fqn) params.contract = fqn;
       await hre.run("verify:verify", params);
@@ -297,8 +332,8 @@ async function deploy(name, factoryName, args = [], options = {}) {
   const addr = await c.getAddress();
   console.log(`${name}: ${addr} (ctor args: ${JSON.stringify(usedArgs)})`);
   console.log(`  ↳ gasUsed=${gasUsedStr}, gasPrice≈${gasPriceGwei} gwei, cost≈${costEth} ETH`);
-  // NEW: return tx hash for persistence
-  return { addr, c, args: usedArgs, libraries, fresh: true, txHash: tx?.hash };
+  // NEW: return factoryName as well for diagnostics
+  return { addr, c, args: usedArgs, libraries, fresh: true, txHash: tx?.hash, factoryName };
 }
 
 // NEW: idempotent attach-or-deploy using previous deployments file (unless FORCE_REDEPLOY=1)
@@ -385,14 +420,11 @@ async function main() {
 
   // Kolejność i argumenty:
   const storage = await attachOrDeploy("Storage", "PoliDaoStorage", [], {}, previous);
-  // Core(storage, owner)
   const core = await attachOrDeploy("Core", "PoliDaoCore", [storage.addr, owner], {}, previous);
-  const router = await attachOrDeploy("Router", "PoliDaoRouter", [core.addr], {}, previous);
-  // Extension (bez argumentów w konstruktorze, ma initialize)
+  const router = await attachOrDeploy("Router", "contracts/router/PoliDaoRouter.sol:PoliDaoRouter", [core.addr], {}, previous);
   const extension = await attachOrDeploy("Extension", "PoliDaoExtension", [], {}, previous);
   const media = await attachOrDeploy("Media", "PoliDaoMedia", [core.addr], {}, previous);
   const updates = await attachOrDeploy("Updates", "PoliDaoUpdates", [core.addr, media.addr], {}, previous);
-  // Refunds(core, owner)
   const refunds = await attachOrDeploy("Refunds", "PoliDaoRefunds", [core.addr, owner], {}, previous);
   const governance = await attachOrDeploy("Governance", "PoliDaoGovernance", [core.addr], {}, previous);
   const analytics = await attachOrDeploy("Analytics", "PoliDaoAnalytics", [core.addr], {}, previous);
@@ -421,11 +453,22 @@ async function main() {
     }
   };
 
+  // [UPDATED] set Router on Core and Storage and grant permissions
   await maybeCall(core.c, "setRouter", [router.addr]);
   await maybeCall(storage.c, "setRouter", [router.addr]);
-  await maybeCall(router.c, "setCore", [core.addr]);
-  await maybeCall(router.c, "setStorage", [storage.addr]);
-  
+  // grant Router permissions where supported
+  await maybeCall(core.c, "authorizeContract", [router.addr]);
+  await maybeCall(storage.c, "authorizeContract", [router.addr]);
+  // try to deauthorize previous router if different (best-effort)
+  if (previous?.router && previous.router !== router.addr) {
+    await maybeCall(core.c, "deauthorizeContract", [previous.router]);
+    await maybeCall(storage.c, "deauthorizeContract", [previous.router]);
+  }
+
+  // [ADDED] wire Security to Core and Router (best-effort)
+  await maybeCall(security.c, "setCore", [core.addr]);
+  await maybeCall(router.c, "setSecurity", [security.addr]);
+
   // Wire Extension
   await maybeCall(extension.c, "initialize", [storage.addr, core.addr]);       // onlyOwner, idempotent (zwróci błąd jeśli już zainicjalizowane)
   await maybeCall(storage.c, "authorizeContract", [extension.addr]);          // nadaj uprawnienia modułowi
@@ -446,8 +489,9 @@ async function main() {
       console.log(`check ${label}: ${v}`);
     } catch {}
   };
-  await tryRead("router.core()", async () => (router.c.core ? router.c.core() : "n/a"));
-  await tryRead("router.storage()", async () => (router.c.storage ? router.c.storage() : "n/a"));
+  // [UPDATED] readbacks to actual Router getters
+  await tryRead("router.coreContract()", async () => (router.c.coreContract ? router.c.coreContract() : "n/a"));
+  await tryRead("router.security()", async () => (router.c.security ? router.c.security() : "n/a"));
 
   // Link do eksploratora
   const base = explorerBase(hre.network.name);
@@ -480,17 +524,18 @@ async function main() {
       await verify(addr, [], undefined, lib);
     }
   }
-  if (shouldVerify(storage)) await verify(storage.addr, storage.args, storage.libraries, "PoliDaoStorage");
-  if (shouldVerify(core)) await verify(core.addr, core.args, core.libraries, "PoliDaoCore");
-  if (shouldVerify(router)) await verify(router.addr, router.args, router.libraries, "PoliDaoRouter");
-  if (shouldVerify(extension)) await verify(extension.addr, extension.args, extension.libraries, "PoliDaoExtension");
-  if (shouldVerify(media)) await verify(media.addr, media.args, media.libraries, "PoliDaoMedia");
-  if (shouldVerify(updates)) await verify(updates.addr, updates.args, updates.libraries, "PoliDaoUpdates");
-  if (shouldVerify(refunds)) await verify(refunds.addr, refunds.args, refunds.libraries, "PoliDaoRefunds");
-  if (shouldVerify(governance)) await verify(governance.addr, governance.args, governance.libraries, "PoliDaoGovernance");
-  if (shouldVerify(analytics)) await verify(analytics.addr, analytics.args, analytics.libraries, "PoliDaoAnalytics");
-  if (shouldVerify(security)) await verify(security.addr, security.args, security.libraries, "PoliDaoSecurity");
-  if (shouldVerify(web3)) await verify(web3.addr, web3.args, web3.libraries, "PoliDaoWeb3");
+  if (shouldVerify(storage)) await verify(storage.addr, storage.args, storage.libraries, "PoliDaoStorage", storage.txHash);
+  if (shouldVerify(core)) await verify(core.addr, core.args, core.libraries, "PoliDaoCore", core.txHash);
+  // CHANGED: verify Router using FQN as well + pass txHash for preflight
+  if (shouldVerify(router)) await verify(router.addr, router.args, router.libraries, "contracts/router/PoliDaoRouter.sol:PoliDaoRouter", router.txHash);
+  if (shouldVerify(extension)) await verify(extension.addr, extension.args, extension.libraries, "PoliDaoExtension", extension.txHash);
+  if (shouldVerify(media)) await verify(media.addr, media.args, media.libraries, "PoliDaoMedia", media.txHash);
+  if (shouldVerify(updates)) await verify(updates.addr, updates.args, updates.libraries, "PoliDaoUpdates", updates.txHash);
+  if (shouldVerify(refunds)) await verify(refunds.addr, refunds.args, refunds.libraries, "PoliDaoRefunds", refunds.txHash);
+  if (shouldVerify(governance)) await verify(governance.addr, governance.args, governance.libraries, "PoliDaoGovernance", governance.txHash);
+  if (shouldVerify(analytics)) await verify(analytics.addr, analytics.args, analytics.libraries, "PoliDaoAnalytics", analytics.txHash);
+  if (shouldVerify(security)) await verify(security.addr, security.args, security.libraries, "PoliDaoSecurity", security.txHash);
+  if (shouldVerify(web3)) await verify(web3.addr, web3.args, web3.libraries, "PoliDaoWeb3", web3.txHash);
 
   // Zapis do deployments/<network>.json
   const out = {
@@ -525,40 +570,43 @@ async function main() {
       ...(security.txHash ? { security: security.txHash } : {}),
       ...(web3.txHash ? { web3: web3.txHash } : {}),
     },
+    // NEW: build fingerprints for freshly deployed contracts
+    build: {},
   };
-  const outDir = path.join(__dirname, "..", "deployments");
-  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
-  const outFile = path.join(outDir, `${hre.network.name}.json`);
-  fs.writeFileSync(outFile, JSON.stringify(out, null, 2));
-  console.log(`\nSaved: deployments/${hre.network.name}.json`);
 
-  // NEW: export Router ABI and minimal addresses for FE (Router-only ABI per unified-storage design)
-  try {
-    const routerArtifact = await hre.artifacts.readArtifact("PoliDaoRouter");
-    const extensionArtifact = await hre.artifacts.readArtifact("PoliDaoExtension");
-    const feDir = path.join(__dirname, "..", "deployments", "fe");
-    const abiFile = path.join(feDir, `router.abi.json`);
-    const extAbiFile = path.join(feDir, `extension.abi.json`);
-    const addrsFile = path.join(feDir, `addresses.${hre.network.name}.json`);
-    writeJsonSync(abiFile, routerArtifact.abi);
-    writeJsonSync(extAbiFile, extensionArtifact.abi);
-    writeJsonSync(addrsFile, {
-      network: hre.network.name,
-      entrypoint: router.addr,
-      router: router.addr,
-      core: core.addr,
-      storage: storage.addr,
-      extension: extension.addr,
-    });
-    console.log(`Exported FE artifacts: ${path.relative(path.join(__dirname, ".."), abiFile)} , ${path.relative(path.join(__dirname, ".."), addrsFile)}`);
-  } catch (e) {
-    console.warn("Failed to export FE artifacts:", e?.message || e);
+  // NEW: capture build metadata for diagnostics (only for fresh ones)
+  for (const item of all) {
+    if (!item?.fresh) continue;
+    try {
+      const meta = await getBuildInfoSummary(item.factoryName || "");
+      if (meta) {
+        out.build[item.factoryName] = meta;
+      }
+    } catch (e) {
+      console.warn(`Failed to capture build info for ${item.factoryName}:`, e?.message || e);
+    }
   }
 
-  console.log("=== Deploy end ===");
+  // Zapisz do pliku
+  const outDir = path.join(__dirname, "..", "deployments");
+  const outFile = path.join(outDir, `${hre.network.name}.json`);
+  ensureDirSync(outDir);
+  fs.writeFileSync(outFile, JSON.stringify(out, null, 2));
+  console.log(`\n=== Deploy done | network: ${hre.network.name} ===`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// NEW: diagnostic helper to summarize build info (size, gas, etc.)
+async function getBuildInfoSummary(factoryName) {
+  const art = await hre.artifacts.readArtifact(factoryName);
+  if (!art?.bytecode) return null;
+  const size = Math.ceil((art.bytecode.length - 2) / 2);
+  const gasEst = await hre.ethers.provider.estimateGas({ data: art.bytecode });
+  return { size, gasEst };
+}
+
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
