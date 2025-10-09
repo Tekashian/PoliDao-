@@ -90,6 +90,10 @@ interface IPoliDaoCore {
 
     function callModule(bytes32 moduleKey, bytes calldata data) external returns (bytes memory);
     function staticCallModule(bytes32 moduleKey, bytes calldata data) external view returns (bytes memory);
+
+    function withdrawFundsFor(uint256 fundraiserId, address requester) external;
+    function refundFor(uint256 fundraiserId, address donor) external;
+    function refund(uint256 fundraiserId) external;
 }
 
 /**
@@ -946,5 +950,31 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
     {
         require(security != address(0), "Router: security not set");
         return ISecurityPayouts(security).checkAndConsumeRefund(fundraiserId, msg.sender, requestedAmount);
+    }
+
+    // [ADD] Creator wypłaca środki przez Router → Core.onlyRouter
+    function withdrawFunds(uint256 fundraiserId)
+        external
+        coreNotPaused
+        nonReentrant
+    {
+        coreContract.withdrawFundsFor(fundraiserId, msg.sender);
+    }
+
+    function claimRefund(uint256 fundraiserId)
+        external
+        coreNotPaused
+        nonReentrant
+    {
+        coreContract.refundFor(fundraiserId, msg.sender);
+    }
+
+    function startRefundPeriod(uint256 fundraiserId)
+        external
+        onlyOwner
+        coreNotPaused
+        nonReentrant
+    {
+        coreContract.refund(fundraiserId);
     }
 }

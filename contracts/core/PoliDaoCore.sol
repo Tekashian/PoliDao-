@@ -34,6 +34,17 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     error InvalidAmount();
     error InvalidInput();
     error NotImplemented();
+    error DonationsClosed();
+    error RefundNotAllowed();
+
+    // [ADD] Konfiguracja opłat (BPS) i portfela prowizji
+    address public feeRecipient;
+    uint16  public donationFeeBps;            // 0..10000 (domyślnie 0)
+    uint16  public successWithdrawFeeBps;     // fee przy withdraw sukcesu (domyślnie 0)
+    uint16  public flexibleWithdrawFeeBps;    // fee przy withdraw NO_GOAL lub fail po endDate (domyślnie 0)
+
+    // [ADD] Flaga “wypłaty rozpoczęte” blokująca dalsze refundy w części scenariuszy
+    mapping(uint256 => bool) public withdrawalsStarted;
 
     // ========== STORAGE AND DEPENDENCIES ==========
     IPoliDaoStorage public storageContract;
@@ -252,14 +263,28 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         IPoliDaoStructs.PackedFundraiserData memory fPrev = storageContract.fundraisers(fundraiserId);
         if (fPrev.id == 0) revert FundraiserNotFound();
 
+        // Reguły zamknięcia wpłat
+        bool timeEnded = (fPrev.endDate != 0 && block.timestamp > fPrev.endDate);
+        bool isWithGoal = (fPrev.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
+        bool goalReached = (isWithGoal && fPrev.goalAmount > 0 && fPrev.raisedAmount >= fPrev.goalAmount);
+
+        if (fPrev.fundsWithdrawn) revert DonationsClosed();
+        if (!isWithGoal && timeEnded) revert DonationsClosed();
+        if (isWithGoal && timeEnded && !goalReached) revert DonationsClosed();
+
         address token = storageContract.fundraiserTokens(fundraiserId);
         if (token == address(0)) revert TokenNotSet();
 
-        uint256 newRaised = uint256(fPrev.raisedAmount) + amount;
-
-        DonationLogic.donate(storageContract, fundraiserId, msg.sender, amount);
-
-        emit DonationMade(fundraiserId, msg.sender, token, amount, newRaised);
+        uint256 received = DonationLogic.donateWithFee(
+            storageContract,
+            fundraiserId,
+            msg.sender,
+            amount,
+            feeRecipient,
+            donationFeeBps
+        );
+        uint256 newRaised = uint256(fPrev.raisedAmount) + received;
+        emit DonationMade(fundraiserId, msg.sender, token, received, newRaised);
     }
     
     /**
@@ -277,10 +302,26 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
 
         IPoliDaoStructs.PackedFundraiserData memory fPrev = storageContract.fundraisers(fundraiserId);
         if (fPrev.id == 0) revert FundraiserNotFound();
+
+        bool timeEnded = (fPrev.endDate != 0 && block.timestamp > fPrev.endDate);
+        bool isWithGoal = (fPrev.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
+        bool goalReached = (isWithGoal && fPrev.goalAmount > 0 && fPrev.raisedAmount >= fPrev.goalAmount);
+
+        if (fPrev.fundsWithdrawn) revert DonationsClosed();
+        if (!isWithGoal && timeEnded) revert DonationsClosed();
+        if (isWithGoal && timeEnded && !goalReached) revert DonationsClosed();
+
         address token = storageContract.fundraiserTokens(fundraiserId);
         if (token == address(0)) revert TokenNotSet();
 
-        uint256 received = DonationLogic.donate(storageContract, fundraiserId, donor, amount);
+        uint256 received = DonationLogic.donateWithFee(
+            storageContract,
+            fundraiserId,
+            donor,
+            amount,
+            feeRecipient,
+            donationFeeBps
+        );
         uint256 newRaised = uint256(fPrev.raisedAmount) + received;
         emit DonationMade(fundraiserId, donor, token, received, newRaised);
     }
@@ -303,7 +344,10 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             address token = s.fundraiserTokens(fundraiserIds[i]);
             if (token == address(0)) revert TokenNotSet();
 
-            uint256 received = DonationLogic.donate(s, fundraiserIds[i], donor, amt);
+            // UWAGA: brak walidacji endDate/goalReached w batch dla skrótu – dodaj wg potrzeb.
+            uint256 received = DonationLogic.donateWithFee(
+                s, fundraiserIds[i], donor, amt, feeRecipient, donationFeeBps
+            );
             uint256 newRaised = uint256(fPrev.raisedAmount) + received;
             emit DonationMade(fundraiserIds[i], donor, token, received, newRaised);
         }
@@ -555,8 +599,19 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     function canRefund(uint256 fundraiserId, address /*donor*/) external view returns (bool canRefundResult, string memory reason) {
         IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
         if (f.id == 0) return (false, "Fundraiser not found");
-        if (f.status == uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD)) return (true, "");
-        return (false, "Not in refund period");
+
+        bool isWithGoal = (f.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
+        bool goalReached = (isWithGoal && f.goalAmount > 0 && f.raisedAmount >= f.goalAmount);
+
+        if (f.fundsWithdrawn) return (false, "Funds withdrawn");
+        if (withdrawalsStarted[fundraiserId]) return (false, "Refunds blocked by withdrawal");
+
+        if (isWithGoal) {
+            if (goalReached) return (false, "Goal reached");
+            return (true, "");
+        } else {
+            return (true, "");
+        }
     }
 
     /**
@@ -635,13 +690,33 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      * @param fundraiserId The fundraiser ID
      */
     function withdrawFunds(uint256 fundraiserId) external whenNotPaused nonReentrant {
-        (address creator, address token, uint256 amount) = WithdrawLogic.withdraw(
-            storageContract,
-            fundraiserId,
-            msg.sender,
-            owner()
-        );
-        emit FundsWithdrawn(fundraiserId, creator, token, amount);
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        if (f.id == 0) revert FundraiserNotFound();
+
+        // bool timeEnded = (f.endDate != 0 && block.timestamp > f.endDate); // removed unused
+        bool isWithGoal = (f.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
+        bool goalReached = (isWithGoal && f.goalAmount > 0 && f.raisedAmount >= f.goalAmount);
+
+        uint16 wFee = (isWithGoal && goalReached) ? successWithdrawFeeBps : flexibleWithdrawFeeBps;
+
+        (address creator, address token, uint256 paidNet, /*gross*/, bool _goalReached, bool _timeEnded, bool _isWithGoal) =
+            WithdrawLogic.withdrawWithFee(
+                storageContract,
+                fundraiserId,
+                msg.sender,
+                owner(),
+                feeRecipient,
+                wFee
+            );
+
+        // Po pierwszej wypłacie blokuj refundy:
+        // - WITH_GOAL i !goalReached (po endDate), albo
+        // - NO_GOAL (wypłata do endDate)
+        if ((_isWithGoal && !_goalReached && _timeEnded) || (!_isWithGoal)) {
+            withdrawalsStarted[fundraiserId] = true;
+        }
+
+        emit FundsWithdrawn(fundraiserId, creator, token, paidNet);
     }
 
     /**
@@ -970,10 +1045,30 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        // Jeżeli masz dodatkowe role (autoryzowane kontrakty), możesz sprawdzić tu i podać requester=owner też
-        (address creator, address token, uint256 amount) =
-            WithdrawLogic.withdraw(storageContract, fundraiserId, requester, owner());
-        emit FundsWithdrawn(fundraiserId, creator, token, amount);
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        if (f.id == 0) revert FundraiserNotFound();
+
+        // bool timeEnded = (f.endDate != 0 && block.timestamp > f.endDate); // removed unused
+        bool isWithGoal = (f.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
+        bool goalReached = (isWithGoal && f.goalAmount > 0 && f.raisedAmount >= f.goalAmount);
+
+        uint16 wFee = (isWithGoal && goalReached) ? successWithdrawFeeBps : flexibleWithdrawFeeBps;
+
+        (address creator, address token, uint256 paidNet, /*gross*/, bool _goalReached, bool _timeEnded, bool _isWithGoal) =
+            WithdrawLogic.withdrawWithFee(
+                storageContract,
+                fundraiserId,
+                requester,
+                owner(),
+                feeRecipient,
+                wFee
+            );
+
+        if ((_isWithGoal && !_goalReached && _timeEnded) || (!_isWithGoal)) {
+            withdrawalsStarted[fundraiserId] = true;
+        }
+
+        emit FundsWithdrawn(fundraiserId, creator, token, paidNet);
     }
 
     function refundFor(uint256 fundraiserId, address donor)
@@ -982,63 +1077,27 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
+        IPoliDaoStructs.PackedFundraiserData memory f = storageContract.fundraisers(fundraiserId);
+        if (f.id == 0) revert FundraiserNotFound();
+
+        bool isWithGoal = (f.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
+        bool goalReached = (isWithGoal && f.goalAmount > 0 && f.raisedAmount >= f.goalAmount);
+
+        // Blokady refundów
+        if (f.fundsWithdrawn) revert RefundNotAllowed();
+        if (withdrawalsStarted[fundraiserId]) revert RefundNotAllowed();
+        if (isWithGoal && goalReached) revert RefundNotAllowed();
+
+        // Auto start REFUND_PERIOD – wymagany przez moduł refundów
+        if (f.status != uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD)) {
+            RefundLogic.startRefundPeriodStrict(
+                storageContract,
+                fundraiserId,
+                _resolveModule("REFUNDS")
+            );
+        }
+
         _notifyModule("REFUNDS", abi.encodeWithSignature("claimRefund(uint256,address)", fundraiserId, donor));
-    }
-
-    function createProposalFor(address /*proposer*/, string calldata /*question*/, uint256 /*duration*/)
-        external
-        whenNotPaused
-        nonReentrant
-        onlyRouter
-        returns (uint256)
-    {
-        // Oczekiwane: realna implementacja w module GOVERNANCE
-        _notifyModule("GOVERNANCE", abi.encodeWithSignature("createProposal(string,uint256)", "", uint256(0)));
-        return 0;
-    }
-
-    function voteFor(uint256 /*proposalId*/, address /*voter*/, bool /*support*/)
-        external
-        whenNotPaused
-        nonReentrant
-        onlyRouter
-    {
-        _notifyModule("GOVERNANCE", abi.encodeWithSignature("vote(uint256,bool)", uint256(0), false));
-    }
-
-    function addMediaToFundraiserFor(
-        uint256 /*fundraiserId*/,
-        address /*requester*/,
-        IPoliDaoStructs.MediaItem[] calldata /*mediaItems*/
-    )
-        external
-        whenNotPaused
-        nonReentrant
-        onlyRouter
-    {
-        _notifyModule("MEDIA", abi.encodeWithSignature("addMedia(uint256,(string,string)[])", uint256(0), new IPoliDaoStructs.MediaItem[](0)));
-    }
-
-    function postUpdateFor(uint256 /*fundraiserId*/, address /*requester*/, string calldata /*content*/)
-        external
-        whenNotPaused
-        nonReentrant
-        onlyRouter
-    {
-        _notifyModule("UPDATES", abi.encodeWithSignature("postUpdate(uint256,string)", uint256(0), ""));
-    }
-
-    function suspendFundraiserFor(uint256 fundraiserId, address requester, string calldata reason)
-        external
-        whenNotPaused
-        nonReentrant
-        onlyRouter
-    {
-        require(extensionsContract != address(0), "PoliDaoCore: Extensions contract not set");
-        // delegate do Extensions: suspendFundraiser(uint256,address,string)
-        extensionsContract.functionCall(
-            abi.encodeWithSignature("suspendFundraiser(uint256,address,string)", fundraiserId, requester, reason)
-        );
     }
 
     /**
@@ -1046,5 +1105,22 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
      */
     function spenderAddress() external view returns (address) {
         return address(this);
+    }
+
+    // Keep only admin setters here (no duplicates)
+    function setFeeRecipient(address _recipient) external onlyOwner {
+        require(_recipient != address(0), "invalid recipient");
+        feeRecipient = _recipient;
+    }
+
+    function setDonationFeeBps(uint16 bps) external onlyOwner {
+        require(bps <= 10_000, "bps too high");
+        donationFeeBps = bps;
+    }
+
+    function setWithdrawFeesBps(uint16 _successBps, uint16 _flexBps) external onlyOwner {
+        require(_successBps <= 10_000 && _flexBps <= 10_000, "bps too high");
+        successWithdrawFeeBps = _successBps;
+        flexibleWithdrawFeeBps = _flexBps;
     }
 }

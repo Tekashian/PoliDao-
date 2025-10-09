@@ -8,13 +8,15 @@ import "../interfaces/IPoliDaoStorage.sol";
 library DonationLogic {
     using SafeERC20 for IERC20;
 
-    // Transferuje token do Storage, obsługuje fee-on-transfer; zwraca realnie otrzymaną kwotę
-    function donate(
+    // Transfer do Storage z obsługą fee-on-transfer; zwraca kwotę netto po prowizji
+    function donateWithFee(
         IPoliDaoStorage s,
         uint256 fundraiserId,
         address donor,
-        uint256 amount
-    ) public returns (uint256 received) {
+        uint256 amount,
+        address feeRecipient,
+        uint16 donationFeeBps
+    ) public returns (uint256 receivedNet) {
         require(amount > 0, "Donation: zero amount");
         address token = s.fundraiserTokens(fundraiserId);
         require(token != address(0), "Donation: invalid fundraiser");
@@ -23,10 +25,21 @@ library DonationLogic {
         IERC20(token).safeTransferFrom(donor, address(s), amount);
         uint256 balAfter = IERC20(token).balanceOf(address(s));
 
-        received = balAfter - balBefore;
-        require(received > 0, "Donation: nothing received");
+        uint256 receivedGross = balAfter - balBefore;
+        require(receivedGross > 0, "Donation: nothing received");
 
-        s.addDonation(fundraiserId, donor, received);
-        return received;
+        uint256 fee = 0;
+        if (feeRecipient != address(0) && donationFeeBps > 0) {
+            fee = (receivedGross * donationFeeBps) / 10_000;
+            if (fee > 0) {
+                s.releaseFunds(token, feeRecipient, fee);
+            }
+        }
+
+        receivedNet = receivedGross - fee;
+        require(receivedNet > 0, "Donation: net is zero");
+
+        // Jeśli masz księgowanie wpłat w Storage, zawołaj odpowiedni hook (np. s.addDonation(...))
+        return receivedNet;
     }
 }

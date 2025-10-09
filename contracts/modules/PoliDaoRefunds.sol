@@ -8,6 +8,22 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IPoliDaoRefunds.sol";
 import "../interfaces/IPoliDaoStorage.sol";
 
+// [FIX] Security interface – zgodna z użyciem (fundraiserId, actor, requestedAmount)
+interface ISecurityRefunds {
+    function checkAndConsumeRefund(
+        uint256 fundraiserId,
+        address actor,
+        uint256 requestedAmount
+    ) external returns (uint256 allowedNow, uint256 nextAt, uint256 remaining);
+}
+
+// [ADD] Minimalny widok na Core (storage + kwota darczyńcy)
+interface ICoreView {
+    function storageContract() external view returns (IPoliDaoStorage);
+    function getDonationAmount(uint256 fundraiserId, address donor) external view returns (uint256);
+    function feeRecipient() external view returns (address);
+}
+
 /**
  * @title PoliDaoRefunds
  * @notice Refunds management module (minimal, PoC)
@@ -51,6 +67,12 @@ contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
     mapping(uint256 => uint256) public totalWithdrawnByCreator;
     mapping(uint256 => bool) public isRefundsPaused;
 
+    // Konfiguracja i stan okna refundów per użytkownik
+    uint32 public refundWindowSeconds = 7 days;
+    uint16 public refundRepeatFeeBps = 100; // 1% domyślnie
+    mapping(uint256 => mapping(address => uint32)) public lastRefundAt;      // fundraiserId => donor => ts
+    mapping(uint256 => mapping(address => uint8))  public refundsInWindow;   // fundraiserId => donor => count
+
     constructor(address _mainContract, address _commissionWallet) Ownable(msg.sender) {
         require(_mainContract != address(0), "Invalid main contract");
         require(_commissionWallet != address(0), "Invalid commission wallet");
@@ -91,6 +113,12 @@ contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
     function unpauseRefundsForFundraiser(uint256 fundraiserId) external onlyOwner {
         isRefundsPaused[fundraiserId] = false;
         emit RefundsUnpausedForFundraiser(fundraiserId);
+    }
+
+    function setRefundFeeConfig(uint16 bps, uint32 windowSecs) external onlyOwner {
+        require(bps <= 10_000, "bps too high");
+        refundRepeatFeeBps = bps;
+        refundWindowSeconds = windowSecs;
     }
 
     function pause() external onlyOwner { _pause(); }
@@ -201,6 +229,45 @@ contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
         emit FlexibleWithdrawal(fundraiserId, creator, withdrawAmount, totalWithdrawnByCreator[fundraiserId]);
     }
 
+    function claimRefund(uint256 fundraiserId, address donor) external nonReentrant onlyCore {
+        IPoliDaoStorage s = ICoreView(core).storageContract();
+        address token = s.fundraiserTokens(fundraiserId);
+
+        uint256 amount = _calculateRefundAmount(fundraiserId, donor);
+        require(amount > 0, "Nothing to refund");
+
+        uint256 allowedNow = amount;
+        address security = s.modules(keccak256("SECURITY"));
+        if (security != address(0)) {
+            (allowedNow, /*nextAt*/, /*remaining*/) =
+                ISecurityRefunds(security).checkAndConsumeRefund(fundraiserId, donor, amount);
+        }
+        require(allowedNow > 0, "Nothing to refund now");
+
+        uint256 fee = 0;
+        uint32 nowTs = uint32(block.timestamp);
+        uint32 lastTs = lastRefundAt[fundraiserId][donor];
+        uint8 count = refundsInWindow[fundraiserId][donor];
+
+        if (lastTs == 0 || nowTs > lastTs + refundWindowSeconds) {
+            lastRefundAt[fundraiserId][donor] = nowTs;
+            refundsInWindow[fundraiserId][donor] = 1;
+        } else {
+            count += 1;
+            refundsInWindow[fundraiserId][donor] = count;
+            lastRefundAt[fundraiserId][donor] = nowTs;
+            if (count >= 2 && refundRepeatFeeBps > 0) {
+                fee = (allowedNow * refundRepeatFeeBps) / 10_000;
+            }
+        }
+
+        if (fee > 0) s.releaseFunds(token, commissionWallet, fee);
+        uint256 net = allowedNow - fee;
+        s.releaseFunds(token, donor, net);
+
+        // TODO: emit event (np. RefundClaimed)
+    }
+
     // ========== VIEWS ==========
     function canRefund(
         uint256 fundraiserId,
@@ -230,5 +297,12 @@ contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
 
     function getFlexibleInfo(uint256 fundraiserId) external view returns (bool, uint256) {
         return (isFlexibleFundraiser[fundraiserId], totalWithdrawnByCreator[fundraiserId]);
+    }
+
+    // [ADD] lokalny helper – wylicza kwotę refundu z Core/Storage
+    function _calculateRefundAmount(uint256 fundraiserId, address donor) internal view returns (uint256) {
+        // zakładamy, że Core implementuje getDonationAmount(...)
+        uint256 amt = ICoreView(core).getDonationAmount(fundraiserId, donor);
+        return amt;
     }
 }

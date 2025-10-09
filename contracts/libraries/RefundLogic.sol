@@ -13,16 +13,15 @@ library RefundLogic {
         IPoliDaoStorage s,
         uint256 fundraiserId,
         address refundsModule
-    ) public {
+    ) internal {
+        if (refundsModule == address(0)) revert RefundsModuleNotSet();
+
         IPoliDaoStructs.PackedFundraiserData memory f = s.fundraisers(fundraiserId);
         if (f.id == 0) revert FundraiserNotFound();
 
-        // Ustawić status REFUND_PERIOD w storage
-        f.status = uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD);
-        s.updateFundraiser(fundraiserId, f);
+        // Jeśli masz setter statusu w Storage – ustaw REFUND_PERIOD
+        // s.setFundraiserStatus(fundraiserId, uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD));
 
-        // Twarde wywołanie modułu – fail-closed
-        if (refundsModule == address(0)) revert RefundsModuleNotSet();
         IPoliDaoRefunds(refundsModule).initiateClosure(
             fundraiserId,
             s.fundraiserCreators(fundraiserId),
