@@ -8,7 +8,6 @@ import "../interfaces/IPoliDaoStorage.sol";
 library DonationLogic {
     using SafeERC20 for IERC20;
 
-    // Transfer do Storage z obsługą fee-on-transfer; zwraca kwotę netto po prowizji
     function donateWithFee(
         IPoliDaoStorage s,
         uint256 fundraiserId,
@@ -39,7 +38,7 @@ library DonationLogic {
         receivedNet = receivedGross - fee;
         require(receivedNet > 0, "Donation: net is zero");
 
-        // Jeśli masz księgowanie wpłat w Storage, zawołaj odpowiedni hook (np. s.addDonation(...))
+        // Księgowanie przeniesione do Core (Storage.addDonation)
         return receivedNet;
     }
 }

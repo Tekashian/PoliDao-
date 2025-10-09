@@ -263,7 +263,6 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         IPoliDaoStructs.PackedFundraiserData memory fPrev = storageContract.fundraisers(fundraiserId);
         if (fPrev.id == 0) revert FundraiserNotFound();
 
-        // Reguły zamknięcia wpłat
         bool timeEnded = (fPrev.endDate != 0 && block.timestamp > fPrev.endDate);
         bool isWithGoal = (fPrev.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
         bool goalReached = (isWithGoal && fPrev.goalAmount > 0 && fPrev.raisedAmount >= fPrev.goalAmount);
@@ -283,6 +282,10 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             feeRecipient,
             donationFeeBps
         );
+
+        // [NOWE] Księgowanie wpłaty w Storage
+        storageContract.addDonation(fundraiserId, msg.sender, received);
+
         uint256 newRaised = uint256(fPrev.raisedAmount) + received;
         emit DonationMade(fundraiserId, msg.sender, token, received, newRaised);
     }
@@ -322,6 +325,10 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             feeRecipient,
             donationFeeBps
         );
+
+        // [NOWE] Księgowanie wpłaty w Storage
+        storageContract.addDonation(fundraiserId, donor, received);
+
         uint256 newRaised = uint256(fPrev.raisedAmount) + received;
         emit DonationMade(fundraiserId, donor, token, received, newRaised);
     }
@@ -344,10 +351,13 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
             address token = s.fundraiserTokens(fundraiserIds[i]);
             if (token == address(0)) revert TokenNotSet();
 
-            // UWAGA: brak walidacji endDate/goalReached w batch dla skrótu – dodaj wg potrzeb.
             uint256 received = DonationLogic.donateWithFee(
                 s, fundraiserIds[i], donor, amt, feeRecipient, donationFeeBps
             );
+
+            // [NOWE] Księgowanie wpłaty w Storage
+            s.addDonation(fundraiserIds[i], donor, received);
+
             uint256 newRaised = uint256(fPrev.raisedAmount) + received;
             emit DonationMade(fundraiserIds[i], donor, token, received, newRaised);
         }
