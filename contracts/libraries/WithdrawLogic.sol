@@ -20,7 +20,7 @@ library WithdrawLogic {
         address ownerAddr,
         address feeRecipient,
         uint16 withdrawFeeBps
-    ) public returns (
+    ) internal returns (
         address creator,
         address token,
         uint256 paidNet,
