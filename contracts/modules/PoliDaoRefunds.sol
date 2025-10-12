@@ -7,6 +7,9 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IPoliDaoRefunds.sol";
 import "../interfaces/IPoliDaoStorage.sol";
+import "../interfaces/IPoliDaoAccounting.sol";
+import "../interfaces/IPoliDaoSecurity.sol";
+import "../libraries/RefundLogic.sol";
 
 // [FIX] Security interface – zgodna z użyciem (fundraiserId, actor, requestedAmount)
 interface ISecurityRefunds {
@@ -20,8 +23,6 @@ interface ISecurityRefunds {
 // [ADD] Minimalny widok na Core (storage + kwota darczyńcy)
 interface ICoreView {
     function storageContract() external view returns (IPoliDaoStorage);
-    function getDonationAmount(uint256 fundraiserId, address donor) external view returns (uint256);
-    function feeRecipient() external view returns (address);
 }
 
 /**
@@ -299,10 +300,30 @@ contract PoliDaoRefunds is Ownable, Pausable, ReentrancyGuard, IPoliDaoRefunds {
         return (isFlexibleFundraiser[fundraiserId], totalWithdrawnByCreator[fundraiserId]);
     }
 
-    // [ADD] lokalny helper – wylicza kwotę refundu z Core/Storage
+    // [FIX] wylicz kwotę refundu z Storage
     function _calculateRefundAmount(uint256 fundraiserId, address donor) internal view returns (uint256) {
-        // zakładamy, że Core implementuje getDonationAmount(...)
-        uint256 amt = ICoreView(core).getDonationAmount(fundraiserId, donor);
-        return amt;
+        IPoliDaoStorage s = ICoreView(core).storageContract();
+        return s.donations(fundraiserId, donor);
     }
+
+    function refundDonor(uint256 fundraiserId, address token, address donor, uint256 amount)
+    external
+    onlyCore
+    nonReentrant
+{
+    require(amount > 0, "Nothing to refund");
+
+    IPoliDaoStorage s = ICoreView(core).storageContract();
+
+    // [FIX] użyj ISecurityRefunds z poprawnym podpisem
+    address sec = s.modules(keccak256("SECURITY"));
+    if (sec != address(0)) {
+        (uint256 allowedNow,,) = ISecurityRefunds(sec).checkAndConsumeRefund(fundraiserId, donor, amount);
+        require(allowedNow >= amount && allowedNow > 0, "Security: payout tranche not available yet");
+    }
+
+    s.releaseFunds(token, donor, amount);
+    RefundLogic.recordRefund(s, fundraiserId, amount);
+    emit RefundProcessed(fundraiserId, donor, amount, 0);
+}
 }

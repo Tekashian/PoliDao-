@@ -15,7 +15,7 @@ library DonationLogic {
         uint256 amount,
         address feeRecipient,
         uint16 donationFeeBps
-    ) internal returns (uint256 receivedNet) {
+    ) public returns (uint256 receivedNet) {
         require(amount > 0, "Donation: zero amount");
         address token = s.fundraiserTokens(fundraiserId);
         require(token != address(0), "Donation: invalid fundraiser");

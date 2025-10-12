@@ -77,22 +77,35 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
     storage = await Storage.connect(owner).deploy();
     await storage.waitForDeployment();
 
-    const Core = await ethers.getContractFactory("PoliDaoCore");
+    // [ADD] deploy i link bibliotek
+    const DonationLogic = await ethers.getContractFactory("DonationLogic");
+    const donationLib = await DonationLogic.connect(owner).deploy();
+    await donationLib.waitForDeployment();
+
+    const WithdrawLogic = await ethers.getContractFactory("WithdrawLogic");
+    const withdrawLib = await WithdrawLogic.connect(owner).deploy();
+    await withdrawLib.waitForDeployment();
+
+    // [CHANGE] podlinkuj biblioteki przy tworzeniu factory Core
     const storageAddr = await storage.getAddress();
     const routerAddr = await routerEOA.getAddress();
+
+    const Core = await ethers.getContractFactory("PoliDaoCore", {
+      libraries: {
+        DonationLogic: await donationLib.getAddress(),
+        WithdrawLogic: await withdrawLib.getAddress(),
+      },
+    });
 
     core = await Core.connect(owner).deploy(storageAddr, routerAddr);
     await core.waitForDeployment();
 
     // Autoryzacja Core w Storage + whitelist tokenu
     await (await storage.connect(owner).setCore(await core.getAddress())).wait();
-
-    // Opcjonalnie: ustaw router w Storage, jeśli interfejs istnieje
     try {
       storage.interface.getFunction("setRouter(address)");
       await (await storage.connect(owner).setRouter(routerAddr)).wait();
     } catch {}
-
     try {
       storage.interface.getFunction("authorizeContract(address)");
       await (await storage.connect(owner).authorizeContract(await core.getAddress())).wait();
@@ -100,16 +113,13 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
 
     await (await storage.connect(owner).addWhitelistedToken(await usdc.getAddress())).wait();
 
-    // [NEW] Ustaw moduł REFUNDS, inaczej refundFor zrevertuje (RefundsModuleNotSet)
     const RefundsMock = await ethers.getContractFactory("RefundsMock");
     const refunds = await RefundsMock.connect(owner).deploy();
     await refunds.waitForDeployment();
     await (await core.connect(owner).upgradeModule("REFUNDS", await refunds.getAddress())).wait();
 
-    // Fee recipient
     await (await core.connect(owner).setFeeRecipient(await feeWallet.getAddress())).wait();
 
-    // Fundusze dla donorów
     await (await usdc.connect(owner).transfer(await donor1.getAddress(), toUnits(100_000))).wait();
     await (await usdc.connect(owner).transfer(await donor2.getAddress(), toUnits(100_000))).wait();
   }

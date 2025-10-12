@@ -10,7 +10,6 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 
 import "../libraries/FundraiserLogic.sol";
-import "../storage/PoliDaoStorage.sol";
 // DODANE
 import "../libraries/DonationLogic.sol";
 import "../libraries/WithdrawLogic.sol";
