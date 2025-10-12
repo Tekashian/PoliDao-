@@ -21,6 +21,19 @@ contract PoliDaoAccounting is Ownable, IPoliDaoAccounting {
         _;
     }
 
+    modifier onlyAuthorized() {
+        // Core zawsze dozwolony — wykonaj ciało funkcji
+        if (msg.sender == core) {
+            _;
+            return;
+        }
+        // Dopuszczamy moduł REFUNDS zarejestrowany w Storage
+        address refunds = address(0);
+        try storageContract.modules(keccak256("REFUNDS")) returns (address m) { refunds = m; } catch {}
+        require(msg.sender == refunds, "Accounting: only Core/Refunds");
+        _;
+    }
+
     constructor(address storageAddr, address initialOwner) Ownable(initialOwner) {
         require(storageAddr != address(0), "Accounting: storage=0");
         storageContract = IPoliDaoStorage(storageAddr);
@@ -36,13 +49,13 @@ contract PoliDaoAccounting is Ownable, IPoliDaoAccounting {
         storageContract = IPoliDaoStorage(storageAddr);
     }
 
-    function recordWithdrawal(uint256 fundraiserId, uint256 grossAmount) external override onlyCore {
+    function recordWithdrawal(uint256 fundraiserId, uint256 grossAmount) external override onlyAuthorized {
         if (grossAmount == 0) return;
         _withdrawn[fundraiserId] += grossAmount;
         emit WithdrawalRecorded(fundraiserId, grossAmount);
     }
 
-    function recordRefund(uint256 fundraiserId, uint256 amount) external override onlyCore {
+    function recordRefund(uint256 fundraiserId, uint256 amount) external override onlyAuthorized {
         if (amount == 0) return;
         _refunded[fundraiserId] += amount;
         emit RefundRecorded(fundraiserId, amount);
