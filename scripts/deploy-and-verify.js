@@ -38,7 +38,9 @@ function ensureDirSync(dir) {
 }
 function writeJsonSync(fp, obj) {
   ensureDirSync(path.dirname(fp));
-  fs.writeFileSync(fp, JSON.stringify(obj, null, 2));
+  // BigInt-safe JSON stringify
+  const replacer = (_k, v) => (typeof v === "bigint" ? v.toString() : v);
+  fs.writeFileSync(fp, JSON.stringify(obj, replacer, 2));
 }
 
 // NEW: build sane fee overrides (EIP-1559) based on latest base fee + env floors
@@ -351,6 +353,7 @@ async function attachOrDeploy(name, factoryName, args = [], options = {}, prev =
     Analytics: "analytics",
     Security: "security",
     Web3: "web3",
+    Accounting: "accounting",
   };
   const field = keyMap[name] || name.toLowerCase();
   const prevAddr = prev?.[field];
@@ -430,9 +433,11 @@ async function main() {
   const analytics = await attachOrDeploy("Analytics", "PoliDaoAnalytics", [core.addr], {}, previous);
   const security = await attachOrDeploy("Security", "PoliDaoSecurity", [core.addr], {}, previous);
   const web3 = await attachOrDeploy("Web3", "PoliDaoWeb3", [], {}, previous);
+  // NEW: Accounting module (constructor: storage, owner)
+  const accounting = await attachOrDeploy("Accounting", "PoliDaoAccounting", [storage.addr, owner], {}, previous);
 
   // NEW: summarize whether anything was newly deployed
-  const all = [storage, core, router, extension, media, updates, refunds, governance, analytics, security, web3];
+  const all = [storage, core, router, extension, media, updates, refunds, governance, analytics, security, web3, accounting];
   const freshCount = all.filter((x) => x?.fresh).length;
   if (freshCount === 0) {
     console.log("No new deployments performed (reused previous addresses).");
@@ -469,6 +474,18 @@ async function main() {
   await maybeCall(security.c, "setCore", [core.addr]);
   await maybeCall(router.c, "setSecurity", [security.addr]);
 
+  // [NEW] if only Storage is fresh and Core is reused, try to point each other (best-effort)
+  const storageWasFresh = !!storage?.fresh;
+  const coreWasFresh = !!core?.fresh;
+  if (storageWasFresh && !coreWasFresh) {
+    // Core -> Storage (try multiple setter names)
+    await maybeCall(core.c, "setStorage", [storage.addr]);
+    await maybeCall(core.c, "setStorageContract", [storage.addr]);
+    await maybeCall(core.c, "setStorageAddress", [storage.addr]);
+    // Storage -> Core (if Storage wymaga referencji)
+    await maybeCall(storage.c, "setCore", [core.addr]);
+  }
+
   // Wire Extension
   await maybeCall(extension.c, "initialize", [storage.addr, core.addr]);       // onlyOwner, idempotent (zwróci błąd jeśli już zainicjalizowane)
   await maybeCall(storage.c, "authorizeContract", [extension.addr]);          // nadaj uprawnienia modułowi
@@ -482,16 +499,40 @@ async function main() {
     await maybeCall(m.c, "setRouter", [router.addr]);
   }
 
+  // NEW: wire Accounting (best-effort) + register as module
+  await maybeCall(accounting.c, "setCore", [core.addr]);
+  await maybeCall(accounting.c, "setStorage", [storage.addr]);
+  // Prefer upgrade path to also authorize and sync mapping
+  await maybeCall(core.c, "upgradeModule", ["ACCOUNTING", accounting.addr]);
+  // Fallback direct storage mapping (id("ACCOUNTING") == keccak256("ACCOUNTING"))
+  await maybeCall(storage.c, "setModule", [hre.ethers.id("ACCOUNTING"), accounting.addr]);
+
   // NEW: optional readback checks if getters exist (best-effort)
   const tryRead = async (label, fn) => {
     try {
       const v = await fn();
       console.log(`check ${label}: ${v}`);
+      return v;
     } catch {}
+    return undefined;
   };
   // [UPDATED] readbacks to actual Router getters
   await tryRead("router.coreContract()", async () => (router.c.coreContract ? router.c.coreContract() : "n/a"));
   await tryRead("router.security()", async () => (router.c.security ? router.c.security() : "n/a"));
+  // [NEW] readback Core -> Storage (several common getter names)
+  const coreStoragePtr = await tryRead("core.storage()", async () => {
+    if (core.c.storage) return core.c.storage();
+    if (core.c.storageContract) return core.c.storageContract();
+    if (core.c.getStorage) return core.c.getStorage();
+    return "n/a";
+  });
+  if (storageWasFresh && !coreWasFresh && coreStoragePtr && coreStoragePtr !== "n/a") {
+    const same = String(coreStoragePtr).toLowerCase() === String(storage.addr).toLowerCase();
+    if (!same) {
+      console.warn("Warning: Core still points to a different Storage. If Core has no setter, redeploy Core as well.");
+      console.warn('Hint: REDEPLOY_LIST=Core,Router npx hardhat run scripts/deploy-and-verify.js --network sepolia');
+    }
+  }
 
   // Link do eksploratora
   const base = explorerBase(hre.network.name);
@@ -508,6 +549,8 @@ async function main() {
     console.log(`${base}/address/${analytics.addr}`);
     console.log(`${base}/address/${security.addr}`);
     console.log(`${base}/address/${web3.addr}`);
+    // NEW: Accounting
+    console.log(`${base}/address/${accounting.addr}`);
   }
 
   // Weryfikacja
@@ -536,6 +579,8 @@ async function main() {
   if (shouldVerify(analytics)) await verify(analytics.addr, analytics.args, analytics.libraries, "PoliDaoAnalytics", analytics.txHash);
   if (shouldVerify(security)) await verify(security.addr, security.args, security.libraries, "PoliDaoSecurity", security.txHash);
   if (shouldVerify(web3)) await verify(web3.addr, web3.args, web3.libraries, "PoliDaoWeb3", web3.txHash);
+  // NEW: Accounting verify
+  if (shouldVerify(accounting)) await verify(accounting.addr, accounting.args, accounting.libraries, "PoliDaoAccounting", accounting.txHash);
 
   // Zapis do deployments/<network>.json
   const out = {
@@ -554,6 +599,8 @@ async function main() {
     analytics: analytics.addr,
     security: security.addr,
     web3: web3.addr,
+    // NEW: persist Accounting
+    accounting: accounting.addr,
     // NEW: persist libraries used (if any)
     libraries: deployedLibs,
     // NEW: persist tx hashes for fresh deployments (if available)
@@ -569,6 +616,8 @@ async function main() {
       ...(analytics.txHash ? { analytics: analytics.txHash } : {}),
       ...(security.txHash ? { security: security.txHash } : {}),
       ...(web3.txHash ? { web3: web3.txHash } : {}),
+      // NEW: Accounting tx hash
+      ...(accounting.txHash ? { accounting: accounting.txHash } : {}),
     },
     // NEW: build fingerprints for freshly deployed contracts
     build: {},
@@ -591,17 +640,38 @@ async function main() {
   const outDir = path.join(__dirname, "..", "deployments");
   const outFile = path.join(outDir, `${hre.network.name}.json`);
   ensureDirSync(outDir);
-  fs.writeFileSync(outFile, JSON.stringify(out, null, 2));
+  // CHANGED: use BigInt-safe writer
+  writeJsonSync(outFile, out);
   console.log(`\n=== Deploy done | network: ${hre.network.name} ===`);
 }
 
 // NEW: diagnostic helper to summarize build info (size, gas, etc.)
+// CHANGED: avoid estimateGas and any BigInt-returning fields to prevent JSON issues and reverts on unlinked bytecode
 async function getBuildInfoSummary(factoryName) {
-  const art = await hre.artifacts.readArtifact(factoryName);
-  if (!art?.bytecode) return null;
-  const size = Math.ceil((art.bytecode.length - 2) / 2);
-  const gasEst = await hre.ethers.provider.estimateGas({ data: art.bytecode });
-  return { size, gasEst };
+  try {
+    const art = await hre.artifacts.readArtifact(factoryName);
+    // Prefer deployedBytecode when present; fallback to bytecode
+    const hex = typeof art.deployedBytecode === "string" && art.deployedBytecode.length > 2
+      ? art.deployedBytecode
+      : (typeof art.bytecode === "string" ? art.bytecode : "");
+
+    const isHex = /^0x[0-9a-fA-F]*$/.test(hex);
+    const size = isHex ? Math.ceil((hex.length - 2) / 2) : undefined;
+
+    // Detect unresolved library placeholders via linkReferences
+    const hasLinks =
+      art.linkReferences && Object.keys(art.linkReferences).length > 0;
+
+    // Try to include solc version for diagnostics (no exceptions if unavailable)
+    const solc =
+      hre.config?.solidity?.compilers?.[0]?.version ||
+      hre.config?.solidity?.version ||
+      undefined;
+
+    return { size, hasLinks, solc };
+  } catch {
+    return null;
+  }
 }
 
 main()

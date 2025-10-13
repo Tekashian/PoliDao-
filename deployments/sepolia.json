@@ -2,27 +2,97 @@
   "network": "sepolia",
   "deployer": "0x7Cd0a790C7892E146fF32f9707EC628dfd5ca587",
   "owner": "0x7Cd0a790C7892E146fF32f9707EC628dfd5ca587",
-  "entrypoint": "0x22Fd3e4c1fCBb2cABCBCc8253926446E8E4484a4",
-  "storage": "0x2207Be06409BB71bc8BA5624B013D4847DC27fB5",
-  "core": "0x7869BdF04c5bD165241887469B8b319C6aed3FA7",
-  "router": "0x22Fd3e4c1fCBb2cABCBCc8253926446E8E4484a4",
-  "extension": "0x2771723481BAe9FF5a037d45866cB4750926b308",
-  "media": "0xeE30D634DdA2d1d6363404e7BCFbA4E5A464C4ec",
-  "updates": "0x9C6A7DEa33D35B0CCF360d94a11fe810Ec6F4B76",
-  "refunds": "0xaAB607A8CeC6027483f4b0d2da20dF188f438F78",
-  "governance": "0xd287Ac54ec7f6eb76b3e306D605Fa4f8470E8539",
-  "analytics": "0xcDb8E75755f13E04A947889Af7c216A53e53349F",
-  "security": "0xA2db6D6a1352bb6eCF574a0C8d49576902db0712",
-  "web3": "0x25EF9978692908e9e9823Df6A2729BFdCB2557A3",
+  "entrypoint": "0x80917Fa1677f37dfC45Fb311125A76Bcb76DD50f",
+  "storage": "0x91F1Cd0F67799C20adCe58085a02Ff5AfDe159EF",
+  "core": "0x3CE890152E28dE8ad336660c723CE177952749eF",
+  "router": "0x80917Fa1677f37dfC45Fb311125A76Bcb76DD50f",
+  "extension": "0xCaDaf55E5Ff6031213c1bbed4d83924b78852159",
+  "media": "0x20eCF7B1d5Eb1D7fCde857aB6fC6b183694Ec866",
+  "updates": "0xc57CDB76EE918DedeF7a071212ad2B3C8E1952B2",
+  "refunds": "0xc80CaC8159A866fA584bE998446a21EBe22174bD",
+  "governance": "0xB1ee16faE2269f1eebc9d48e722781d4D0370C4A",
+  "analytics": "0xAD11AfA105B785E1aaE50ee419e8678a16f63105",
+  "security": "0x99B8E1cb29C0568457Fcd8a3Ca8e58f87E59047E",
+  "web3": "0x99BfACb1962618A50686d0796865880b82969C3B",
+  "accounting": "0xB818b368091Ea05739A3050E393d8F31e0b60193",
   "libraries": {
-    "DonationLogic": "0xD5d53CFdADD5f6EBBB41E968B08bFF577DefEd37",
-    "RefundLogic": "0x18ba15F8a56e357b68aA2784cB6c9045EB514eD6",
-    "WithdrawLogic": "0x94D6721a2C9E634BCAC063Dc790871961bb9285D",
-    "ExtensionLogic": "0x08b231C31412d652c5081d6d6d20c5EacF451cA4",
-    "LocationLogic": "0x31Aa2F5889624b0A139546C885EA7B0bccdFF6d5"
+    "DonationLogic": "0x548C4ECA31dC5ebf5E64Fdddda499C6D3057fB27",
+    "WithdrawLogic": "0xa1E9Ec030B532579E0E601e8aab794cDC4CacEEa",
+    "ExtensionLogic": "0x606C839CE60b152f90243d8F67bB05b4CE0791F1",
+    "LocationLogic": "0x92F49c77fa3dA00d785D1E84682d58a98468fC40"
   },
   "txs": {
-    "router": "0x01bd65e15fde607f06ff688791deb830d111842fd026a9d1e736fb1b96451bb5"
+    "storage": "0xaf95296240c97c4790bcab1667806965380faf19d6f218eaeda4016c1b050fee",
+    "core": "0xcc2469bdc4601832b405431365f7cec6efd7c5ef8f750e2fa8f526b7916c3246",
+    "router": "0xc5c96df7ce37e58dacb7d8799769b786eed2b0b8e5e70895ad2fd024c70e166b",
+    "extension": "0x8fb7eba5d31df5cb49675440a4d8d454b1bad9ed5a680239850f9652afa28c79",
+    "media": "0xf26ea49cc6912a76f64ae0e387fae156e06c27a93563bd46db8b7e10eed3bd8f",
+    "updates": "0x901855888ab7107dc94abccc00bf8e81705611acb255b9613c235afa64d36ee5",
+    "refunds": "0x8b3f5a1871d788b87b04b2c103cd4b5e2f13ae532d5f305a95c361aac590c586",
+    "governance": "0x46e5ad66af5f9a9c0adc4671cb90566f24736f332a902bb2d466a87221dc1cd8",
+    "analytics": "0xe58f3103d4c815285273f0037412ee6d23da4bd4b3aa4d4af080f8979511f062",
+    "security": "0xe6bae3e5c7bf0e24edc56f43972793ed818b2548f18f42307df2bf4409a03eed",
+    "web3": "0x2b5bcd814028dca69800629a815ba6b3903d9992ac4ea577d4b438212c2baadd",
+    "accounting": "0x99d442fc5f1653c99f86a382848527e641f2f1740c52e138422d7229a821eac2"
   },
-  "build": {}
+  "build": {
+    "PoliDaoStorage": {
+      "size": 13827,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoCore": {
+      "hasLinks": true,
+      "solc": "0.8.20"
+    },
+    "contracts/router/PoliDaoRouter.sol:PoliDaoRouter": {
+      "size": 15918,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoExtension": {
+      "hasLinks": true,
+      "solc": "0.8.20"
+    },
+    "PoliDaoMedia": {
+      "size": 8054,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoUpdates": {
+      "size": 8014,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoRefunds": {
+      "size": 9658,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoGovernance": {
+      "size": 10607,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoAnalytics": {
+      "size": 10527,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoSecurity": {
+      "size": 15482,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoWeb3": {
+      "size": 8937,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    },
+    "PoliDaoAccounting": {
+      "size": 2309,
+      "hasLinks": false,
+      "solc": "0.8.20"
+    }
+  }
 }
