@@ -22,7 +22,7 @@ library WithdrawLogic {
         address feeRecipient,
         uint16 withdrawFeeBps
     )
-        public
+        internal
         returns (
             address creator,
             address token,
@@ -86,6 +86,46 @@ library WithdrawLogic {
             f.fundsWithdrawn = true;
             s.updateFundraiser(fundraiserId, f);
         }
+    }
+
+    // NEW: wrapper selecting proper fee tier and delegating to withdrawWithFee
+    function executeWithdraw(
+        IPoliDaoStorage s,
+        uint256 fundraiserId,
+        address requester,
+        address ownerAddr,
+        address feeRecipient,
+        uint16 successWithdrawFeeBps,
+        uint16 flexibleWithdrawFeeBps
+    )
+        internal
+        returns (
+            address creator,
+            address token,
+            uint256 paidNet,
+            bool goalReached,
+            bool timeEnded,
+            bool isWithGoal
+        )
+    {
+        IPoliDaoStructs.PackedFundraiserData memory f = s.fundraisers(fundraiserId);
+        if (f.id == 0) revert FundraiserNotFound();
+
+        timeEnded = (f.endDate != 0 && block.timestamp > f.endDate);
+        isWithGoal = (f.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL));
+        goalReached = (isWithGoal && f.goalAmount > 0 && f.raisedAmount >= f.goalAmount);
+
+        uint16 wFee = (isWithGoal && goalReached) ? successWithdrawFeeBps : flexibleWithdrawFeeBps;
+
+        (creator, token, paidNet, /*gross*/, /*goalReachedAgain*/, /*timeEndedAgain*/, /*isWithGoalAgain*/) =
+            withdrawWithFee(
+                s,
+                fundraiserId,
+                requester,
+                ownerAddr,
+                feeRecipient,
+                wFee
+            );
     }
 }
 

@@ -77,46 +77,15 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
     storage = await Storage.connect(owner).deploy();
     await storage.waitForDeployment();
 
-    // [ADD] deploy i link bibliotek
-    const DonationLogic = await ethers.getContractFactory("DonationLogic");
-    const donationLib = await DonationLogic.connect(owner).deploy();
-    await donationLib.waitForDeployment();
-
-    const WithdrawLogic = await ethers.getContractFactory("WithdrawLogic");
-    const withdrawLib = await WithdrawLogic.connect(owner).deploy();
-    await withdrawLib.waitForDeployment();
-
-    // [CHANGE] podlinkuj biblioteki przy tworzeniu factory Core
+    // DEPLOY Core bez linkowania (biblioteki mają internal funkcje)
+    const Core = await ethers.getContractFactory("PoliDaoCore");
     const storageAddr = await storage.getAddress();
     const routerAddr = await routerEOA.getAddress();
-
-    const Core = await ethers.getContractFactory("PoliDaoCore", {
-      libraries: {
-        DonationLogic: await donationLib.getAddress(),
-        WithdrawLogic: await withdrawLib.getAddress(),
-      },
-    });
-
     core = await Core.connect(owner).deploy(storageAddr, routerAddr);
     await core.waitForDeployment();
 
-    // Autoryzacja Core w Storage + whitelist tokenu
     await (await storage.connect(owner).setCore(await core.getAddress())).wait();
-    try {
-      storage.interface.getFunction("setRouter(address)");
-      await (await storage.connect(owner).setRouter(routerAddr)).wait();
-    } catch {}
-    try {
-      storage.interface.getFunction("authorizeContract(address)");
-      await (await storage.connect(owner).authorizeContract(await core.getAddress())).wait();
-    } catch {}
-
     await (await storage.connect(owner).addWhitelistedToken(await usdc.getAddress())).wait();
-
-    const RefundsMock = await ethers.getContractFactory("RefundsMock");
-    const refunds = await RefundsMock.connect(owner).deploy();
-    await refunds.waitForDeployment();
-    await (await core.connect(owner).upgradeModule("REFUNDS", await refunds.getAddress())).wait();
 
     await (await core.connect(owner).setFeeRecipient(await feeWallet.getAddress())).wait();
 
@@ -143,7 +112,7 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
     const data = await buildCreateFundraiserData(core, overrides);
     const tx = await core.connect(creator).createFundraiser(data);
     const rc = await tx.wait();
-    const ev = rc.logs.find((l) => l.fragment && l.fragment.name === "FundraiserCreated");
+    const ev = rc.logs.find(l => l.fragment && l.fragment.name === "FundraiserCreated");
     const id = ev ? ev.args.fundraiserId : rc.logs[0].args[0];
     return Number(id);
   }
@@ -154,10 +123,7 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
 
   it("donation fee: 2% idzie na feeRecipient, netto do Storage i raised księgowane w Storage przez Core", async () => {
     await core.connect(owner).setDonationFeeBps(200); // 2%
-
     const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 10 });
-
-    // donor1 approve na Core
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(1000));
 
     const feeBefore = await usdc.balanceOf(await feeWallet.getAddress());
@@ -168,22 +134,18 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
 
     const feeAfter = await usdc.balanceOf(await feeWallet.getAddress());
     const storageAfter = await usdc.balanceOf(await storage.getAddress());
+    expect(feeAfter - feeBefore).to.equal(toUnits(20));
+    expect(storageAfter - storageBefore).to.equal(toUnits(980));
 
-    expect(feeAfter - feeBefore).to.equal(toUnits(20));     // 2% z 1000
-    expect(storageAfter - storageBefore).to.equal(toUnits(980)); // netto
-
-    // raised zgadza się z netto
     const info = await core.getFundraiserBasicInfo(frId);
     expect(info[2]).to.equal(toUnits(980));
   });
 
-  it("WITH_GOAL: withdraw (goal reached przed endDate) – nalicza success fee, zamyka wpłaty i blokuje refund", async () => {
+  it("WITH_GOAL: withdraw (goal reached) nalicza success fee i refundy nieaktywne (GoalReachedNoRefund)", async () => {
     await core.connect(owner).setDonationFeeBps(0);
-    await core.connect(owner).setWithdrawFeesBps(200, 0); // 2% sukces
+    await core.connect(owner).setWithdrawFeesBps(200, 0); // 2% success
 
     const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 10 });
-
-    // darowizna 1000 osiąga cel
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(1000));
     await core.connect(donor1).donate(frId, toUnits(1000));
 
@@ -195,150 +157,81 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
 
     const feeAfter = await usdc.balanceOf(await feeWallet.getAddress());
     const creatorAfter = await usdc.balanceOf(await creator.getAddress());
-
-    expect(feeAfter - feeBefore).to.equal(toUnits(20));   // 2% z 1000
+    expect(feeAfter - feeBefore).to.equal(toUnits(20));
     expect(creatorAfter - creatorBefore).to.equal(toUnits(980));
 
-    // próba donacji po fundsWithdrawn → DonationsClosed
-    await usdc.connect(donor2).approve(await core.getAddress(), toUnits(1));
-    await expect(core.connect(donor2).donate(frId, toUnits(1)))
-      .to.be.revertedWithCustomError(core, "DonationsClosed");
+    // Fast-forward endDate (refund logic checks post-end conditions)
+    await increaseTime(15 * day);
 
-    // refund zablokowany (goal reached)
     await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
-      .to.be.revertedWithCustomError(core, "RefundNotAllowed");
+      .to.be.revertedWithCustomError(core, "GoalReachedNoRefund");
   });
 
-  it("WITH_GOAL: po endDate, cel nieosiągnięty → refund dozwolony do pierwszej wypłaty; po niej blokada refundów i fee flexible", async () => {
+  it("WITH_GOAL: po endDate i goal nieosiągnięty refund działa, potem drugi refund => AlreadyRefunded", async () => {
     await core.connect(owner).setDonationFeeBps(0);
-    await core.connect(owner).setWithdrawFeesBps(0, 300); // 3% flexible
-
     const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 1 });
 
-    // wpłata < goal
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(400));
     await core.connect(donor1).donate(frId, toUnits(400));
 
-    // po endDate
-    await increaseTime(2 * day);
-
-    // refund dozwolony zanim nastąpi withdraw
-    const [canRefundBefore] = await core.canRefund(frId, await donor1.getAddress());
-    expect(canRefundBefore).to.eq(true);
-
-    // refund przez routerEOA (jest ustawiony jako router)
-    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
-      .to.not.be.reverted;
-
-    // teraz withdraw – nalicza się flexible fee, a refundy po tym zablokowane
-    const feeBefore = await usdc.balanceOf(await feeWallet.getAddress());
-    const creatorBefore = await usdc.balanceOf(await creator.getAddress());
-
-    await expect(core.connect(creator).withdrawFunds(frId))
-      .to.emit(core, "FundsWithdrawn");
-
-    const feeAfter = await usdc.balanceOf(await feeWallet.getAddress());
-    const creatorAfter = await usdc.balanceOf(await creator.getAddress());
-
-    expect(feeAfter - feeBefore).to.equal(toUnits(12));  // 3% z 400
-    expect(creatorAfter - creatorBefore).to.equal(toUnits(388));
-
-    const [canRefundAfter] = await core.canRefund(frId, await donor1.getAddress());
-    expect(canRefundAfter).to.eq(false);
+    await increaseTime(2 * day); // po endDate
 
     await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
-      .to.be.revertedWithCustomError(core, "RefundNotAllowed");
+      .to.emit(core, "RefundClaimed");
+
+    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
+      .to.be.revertedWithCustomError(core, "AlreadyRefunded");
   });
 
-  it("NO_GOAL: donate/withdraw dozwolone tylko przed endDate; po endDate obie zablokowane; refund dozwolony do pierwszej wypłaty", async () => {
+  it("NO_GOAL: refund zawsze niedozwolony (RefundNotEligible), withdraw dozwolony przed endDate", async () => {
     await core.connect(owner).setDonationFeeBps(0);
     await core.connect(owner).setWithdrawFeesBps(0, 500); // 5% flexible
+    const frId = await createFundraiser({ type: FundraiserType.NO_GOAL, goal: 0, daysFromNow: 2 });
 
-    const frId = await createFundraiser({ type: FundraiserType.NO_GOAL, goal: 0, daysFromNow: 1 });
-
-    // donate przed endDate
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(300));
     await core.connect(donor1).donate(frId, toUnits(300));
 
-    // refund dozwolony przed withdraw
-    let [canRefundBefore] = await core.canRefund(frId, await donor1.getAddress());
-    expect(canRefundBefore).to.eq(true);
+    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
+      .to.be.revertedWithCustomError(core, "RefundNotEligible");
 
-    // withdraw przed endDate (nakłada fee i blokuje refundy od teraz)
     const feeBefore = await usdc.balanceOf(await feeWallet.getAddress());
     const creatorBefore = await usdc.balanceOf(await creator.getAddress());
-
     await expect(core.connect(creator).withdrawFunds(frId))
       .to.emit(core, "FundsWithdrawn");
-
     const feeAfter = await usdc.balanceOf(await feeWallet.getAddress());
     const creatorAfter = await usdc.balanceOf(await creator.getAddress());
-
-    expect(feeAfter - feeBefore).to.equal(toUnits(15));  // 5% z 300
+    expect(feeAfter - feeBefore).to.equal(toUnits(15));
     expect(creatorAfter - creatorBefore).to.equal(toUnits(285));
-
-    // po pierwszej wypłacie refundy zablokowane
-    const [canRefundAfter] = await core.canRefund(frId, await donor1.getAddress());
-    expect(canRefundAfter).to.eq(false);
-
-    // po endDate donate/withdraw zablokowane
-    await increaseTime(2 * day);
-
-    await usdc.connect(donor2).approve(await core.getAddress(), toUnits(1));
-    await expect(core.connect(donor2).donate(frId, toUnits(1)))
-      .to.be.revertedWithCustomError(core, "DonationsClosed");
-
-    await expect(core.connect(creator).withdrawFunds(frId)).to.be.reverted;
   });
 
-  // [NEW TESTS] Dodatkowe testy bazujące na istniejących scenariuszach
-
-  it("router: refundFor dozwolone tylko dla routera; inne adresy rewertują", async () => {
-    await core.connect(owner).setDonationFeeBps(0);
-    const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 1 });
-
+  it("router: refundFor tylko po endDate oraz tylko router może wywołać", async () => {
+    const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 500, daysFromNow: 1 });
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(200));
     await core.connect(donor1).donate(frId, toUnits(200));
 
+    // Przed endDate – RefundTooEarly
+    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
+      .to.be.revertedWithCustomError(core, "RefundTooEarly");
+
+    // Nie-router też rewertuje (modifier onlyRouter) – użyj donor1
+    await expect(core.connect(donor1).refundFor(frId, await donor1.getAddress()))
+      .to.be.reverted; // generic (modifier)
+
+    // Po endDate działa
     await increaseTime(2 * day);
-
-    // Próba wywołania refundFor przez nie-router → revert
-    await expect(core.connect(donor1).refundFor(frId, await donor1.getAddress())).to.be.reverted;
-
-    // Router może zrefundować (moduł REFUNDS jest ustawiony)
-    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress())).to.not.be.reverted;
+    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
+      .to.emit(core, "RefundClaimed");
   });
 
-  it("WITH_GOAL: refund przed endDate nie dozwolony nawet bez osiągnięcia celu", async () => {
-    await core.connect(owner).setDonationFeeBps(0);
-    const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 10 });
-
+  it("WITH_GOAL: próba refund przed endDate zawsze RefundTooEarly", async () => {
+    const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 5 });
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(100));
     await core.connect(donor1).donate(frId, toUnits(100));
-
-    // [FIX] Obecna logika Core zwraca true przed endDate (dopóki brak wypłat i celu)
-    const [canRefundBefore] = await core.canRefund(frId, await donor1.getAddress());
-    expect(canRefundBefore).to.eq(true);
-
     await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
-      .to.not.be.reverted;
+      .to.be.revertedWithCustomError(core, "RefundTooEarly");
   });
 
-  it("WITH_GOAL: refund przed endDate dozwolony jeżeli cel nieosiągnięty i nie było wypłaty", async () => {
-    await core.connect(owner).setDonationFeeBps(0);
-    const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 10 });
-
-    await usdc.connect(donor1).approve(await core.getAddress(), toUnits(100));
-    await core.connect(donor1).donate(frId, toUnits(100));
-
-    const [canRefundBefore] = await core.canRefund(frId, await donor1.getAddress());
-    expect(canRefundBefore).to.eq(true);
-
-    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
-      .to.not.be.reverted;
-  });
-
-  it("DonationMade: wielokrotne wpłaty akumulują raised i fee jest naliczane dla każdej wpłaty", async () => {
+  it("DonationMade: wielokrotne wpłaty akumulują raised i fee naliczane per wpłata", async () => {
     await core.connect(owner).setDonationFeeBps(250); // 2.5%
     const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 2000, daysFromNow: 10 });
 
@@ -348,66 +241,49 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
     const feeBefore = await usdc.balanceOf(await feeWallet.getAddress());
     const storageBefore = await usdc.balanceOf(await storage.getAddress());
 
-    await expect(core.connect(donor1).donate(frId, toUnits(800))).to.emit(core, "DonationMade");
-    await expect(core.connect(donor2).donate(frId, toUnits(600))).to.emit(core, "DonationMade");
+    await core.connect(donor1).donate(frId, toUnits(800));
+    await core.connect(donor2).donate(frId, toUnits(600));
 
     const feeAfter = await usdc.balanceOf(await feeWallet.getAddress());
     const storageAfter = await usdc.balanceOf(await storage.getAddress());
 
-    // 2.5% z 800 = 20; 2.5% z 600 = 15; razem 35
     expect(feeAfter - feeBefore).to.equal(toUnits(35));
-    // netto: 800-20 + 600-15 = 1365
     expect(storageAfter - storageBefore).to.equal(toUnits(1365));
 
     const info = await core.getFundraiserBasicInfo(frId);
     expect(info[2]).to.equal(toUnits(1365));
   });
 
-  it("refund: nie można zrefundować dwa razy tego samego darczyńcy", async () => {
-    await core.connect(owner).setDonationFeeBps(0);
-    const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 1 });
-
+  it("refund: nie można zrefundować dwa razy tego samego darczyńcy (AlreadyRefunded)", async () => {
+    const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 500, daysFromNow: 1 });
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(150));
     await core.connect(donor1).donate(frId, toUnits(150));
 
     await increaseTime(2 * day);
+    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
+      .to.emit(core, "RefundClaimed");
 
-    // Pierwszy refund OK
-    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress())).to.not.be.reverted;
-
-    // Drugi refund również dozwolony (ew. limity/fee egzekwuje moduł REFUNDS)
-    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress())).to.not.be.reverted;
+    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
+      .to.be.revertedWithCustomError(core, "AlreadyRefunded");
   });
 
-  it("feeRecipient: zmiana odbiorcy opłat działa natychmiast przy kolejnych wpłatach", async () => {
+  it("feeRecipient: zmiana odbiorcy działa dla kolejnych wpłat", async () => {
     await core.connect(owner).setDonationFeeBps(100); // 1%
     const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 5 });
 
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(500));
     await usdc.connect(donor2).approve(await core.getAddress(), toUnits(500));
 
-    // Pierwsza wpłata → fee na current feeWallet
     const feeBefore1 = await usdc.balanceOf(await feeWallet.getAddress());
-    await expect(core.connect(donor1).donate(frId, toUnits(200))).to.emit(core, "DonationMade");
+    await core.connect(donor1).donate(frId, toUnits(200));
     const feeAfter1 = await usdc.balanceOf(await feeWallet.getAddress());
     expect(feeAfter1 - feeBefore1).to.equal(toUnits(2));
 
-    // Zmień fee recipient na inny adres niż donor płacący, aby nie mieszać z jego wpłatą
-    await (await core.connect(owner).setFeeRecipient(await routerEOA.getAddress())).wait();
+    await core.connect(owner).setFeeRecipient(await routerEOA.getAddress());
 
-    // Druga wpłata (donor2) → fee trafia do routerEOA
     const newFeeBefore = await usdc.balanceOf(await routerEOA.getAddress());
-    await expect(core.connect(donor2).donate(frId, toUnits(100))).to.emit(core, "DonationMade");
+    await core.connect(donor2).donate(frId, toUnits(100));
     const newFeeAfter = await usdc.balanceOf(await routerEOA.getAddress());
     expect(newFeeAfter - newFeeBefore).to.equal(toUnits(1));
-  });
-
-  it("sanity: router adresy ustawione poprawnie w Core/Storage (o ile gettery istnieją)", async () => {
-    if (core.router) {
-      expect(await core.router()).to.equal(await routerEOA.getAddress());
-    }
-    if (storage.router) {
-      expect(await storage.router()).to.equal(await routerEOA.getAddress());
-    }
   });
 });

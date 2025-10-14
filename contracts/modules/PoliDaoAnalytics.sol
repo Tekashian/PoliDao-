@@ -793,4 +793,56 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         }
         // Event QueryCountersReset jest już w IPoliDaoStructs
     }
+
+    /**
+     * @notice Returns fundraiser financials to support FE after refunds/withdraws
+     * @dev Uses Core.getContractStatus() to resolve Storage, then reads counters from Storage
+     */
+    function getFundraiserFinancials(uint256 fundraiserId)
+        external
+        view
+        returns (
+            address token,
+            uint256 raised,
+            uint256 totalWithdrawn,
+            uint256 totalRefunded,
+            uint256 available
+        )
+    {
+        // Resolve Storage from Core
+        (bool ok, bytes memory res) = mainContract.staticcall(abi.encodeWithSignature("getContractStatus()"));
+        require(ok, "Core.getContractStatus failed");
+        (address storageAddr,,,) = abi.decode(res, (address, address, address, bool));
+
+        // Read basic info from Core to get raised and token
+        ( , address tkn, uint256 raisedAmount, , , ) = abi.decode(
+            _static(mainContract, abi.encodeWithSignature("getFundraiserBasicInfo(uint256)", fundraiserId)),
+            (address, address, uint256, uint256, uint256, uint8)
+        );
+        token = tkn;
+        raised = raisedAmount;
+
+        // Read counters from Storage
+        totalWithdrawn = abi.decode(
+            _static(storageAddr, abi.encodeWithSignature("totalWithdrawn(uint256)", fundraiserId)),
+            (uint256)
+        );
+        totalRefunded = abi.decode(
+            _static(storageAddr, abi.encodeWithSignature("totalRefunded(uint256)", fundraiserId)),
+            (uint256)
+        );
+
+        // Compute available (raised is already net of refunds)
+        if (raised > totalWithdrawn) {
+            available = raised - totalWithdrawn;
+        } else {
+            available = 0;
+        }
+    }
+
+    function _static(address target, bytes memory data) internal view returns (bytes memory result) {
+        (bool success, bytes memory ret) = target.staticcall(data);
+        require(success, "staticcall failed");
+        return ret;
+    }
 }

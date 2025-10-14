@@ -428,16 +428,13 @@ async function main() {
   const extension = await attachOrDeploy("Extension", "PoliDaoExtension", [], {}, previous);
   const media = await attachOrDeploy("Media", "PoliDaoMedia", [core.addr], {}, previous);
   const updates = await attachOrDeploy("Updates", "PoliDaoUpdates", [core.addr, media.addr], {}, previous);
-  const refunds = await attachOrDeploy("Refunds", "PoliDaoRefunds", [core.addr, owner], {}, previous);
   const governance = await attachOrDeploy("Governance", "PoliDaoGovernance", [core.addr], {}, previous);
   const analytics = await attachOrDeploy("Analytics", "PoliDaoAnalytics", [core.addr], {}, previous);
   const security = await attachOrDeploy("Security", "PoliDaoSecurity", [core.addr], {}, previous);
   const web3 = await attachOrDeploy("Web3", "PoliDaoWeb3", [], {}, previous);
-  // NEW: Accounting module (constructor: storage, owner)
-  const accounting = await attachOrDeploy("Accounting", "PoliDaoAccounting", [storage.addr, owner], {}, previous);
 
   // NEW: summarize whether anything was newly deployed
-  const all = [storage, core, router, extension, media, updates, refunds, governance, analytics, security, web3, accounting];
+  const all = [storage, core, router, extension, media, updates, governance, analytics, security, web3];
   const freshCount = all.filter((x) => x?.fresh).length;
   if (freshCount === 0) {
     console.log("No new deployments performed (reused previous addresses).");
@@ -459,8 +456,8 @@ async function main() {
   };
 
   // [UPDATED] set Router on Core and Storage and grant permissions
-  await maybeCall(core.c, "setRouter", [router.addr]);
-  await maybeCall(storage.c, "setRouter", [router.addr]);
+  await maybeCall(core.c, "setRouterContract", [router.addr]);
+  await maybeCall(storage.c, "setAuthorizedRouter", [router.addr]);
   // grant Router permissions where supported
   await maybeCall(core.c, "authorizeContract", [router.addr]);
   await maybeCall(storage.c, "authorizeContract", [router.addr]);
@@ -494,44 +491,9 @@ async function main() {
   await maybeCall(core.c, "setExtensionContract", [extension.addr]);
   await maybeCall(core.c, "setExtension", [extension.addr]);
 
-  const modules = [media, updates, refunds, governance, analytics, security, web3].filter(Boolean);
+  const modules = [media, updates, governance, analytics, security, web3].filter(Boolean);
   for (const m of modules) {
     await maybeCall(m.c, "setRouter", [router.addr]);
-  }
-
-  // NEW: wire Accounting (best-effort) + register as module
-  await maybeCall(accounting.c, "setCore", [core.addr]);
-  await maybeCall(accounting.c, "setStorage", [storage.addr]);
-  // Prefer upgrade path to also authorize and sync mapping
-  await maybeCall(core.c, "upgradeModule", ["ACCOUNTING", accounting.addr]);
-  // Fallback direct storage mapping (id("ACCOUNTING") == keccak256("ACCOUNTING"))
-  await maybeCall(storage.c, "setModule", [hre.ethers.id("ACCOUNTING"), accounting.addr]);
-
-  // NEW: optional readback checks if getters exist (best-effort)
-  const tryRead = async (label, fn) => {
-    try {
-      const v = await fn();
-      console.log(`check ${label}: ${v}`);
-      return v;
-    } catch {}
-    return undefined;
-  };
-  // [UPDATED] readbacks to actual Router getters
-  await tryRead("router.coreContract()", async () => (router.c.coreContract ? router.c.coreContract() : "n/a"));
-  await tryRead("router.security()", async () => (router.c.security ? router.c.security() : "n/a"));
-  // [NEW] readback Core -> Storage (several common getter names)
-  const coreStoragePtr = await tryRead("core.storage()", async () => {
-    if (core.c.storage) return core.c.storage();
-    if (core.c.storageContract) return core.c.storageContract();
-    if (core.c.getStorage) return core.c.getStorage();
-    return "n/a";
-  });
-  if (storageWasFresh && !coreWasFresh && coreStoragePtr && coreStoragePtr !== "n/a") {
-    const same = String(coreStoragePtr).toLowerCase() === String(storage.addr).toLowerCase();
-    if (!same) {
-      console.warn("Warning: Core still points to a different Storage. If Core has no setter, redeploy Core as well.");
-      console.warn('Hint: REDEPLOY_LIST=Core,Router npx hardhat run scripts/deploy-and-verify.js --network sepolia');
-    }
   }
 
   // Link do eksploratora
@@ -544,13 +506,10 @@ async function main() {
     console.log(`${base}/address/${extension.addr}`);
     console.log(`${base}/address/${media.addr}`);
     console.log(`${base}/address/${updates.addr}`);
-    console.log(`${base}/address/${refunds.addr}`);
     console.log(`${base}/address/${governance.addr}`);
     console.log(`${base}/address/${analytics.addr}`);
     console.log(`${base}/address/${security.addr}`);
     console.log(`${base}/address/${web3.addr}`);
-    // NEW: Accounting
-    console.log(`${base}/address/${accounting.addr}`);
   }
 
   // Weryfikacja
@@ -574,13 +533,10 @@ async function main() {
   if (shouldVerify(extension)) await verify(extension.addr, extension.args, extension.libraries, "PoliDaoExtension", extension.txHash);
   if (shouldVerify(media)) await verify(media.addr, media.args, media.libraries, "PoliDaoMedia", media.txHash);
   if (shouldVerify(updates)) await verify(updates.addr, updates.args, updates.libraries, "PoliDaoUpdates", updates.txHash);
-  if (shouldVerify(refunds)) await verify(refunds.addr, refunds.args, refunds.libraries, "PoliDaoRefunds", refunds.txHash);
   if (shouldVerify(governance)) await verify(governance.addr, governance.args, governance.libraries, "PoliDaoGovernance", governance.txHash);
   if (shouldVerify(analytics)) await verify(analytics.addr, analytics.args, analytics.libraries, "PoliDaoAnalytics", analytics.txHash);
   if (shouldVerify(security)) await verify(security.addr, security.args, security.libraries, "PoliDaoSecurity", security.txHash);
   if (shouldVerify(web3)) await verify(web3.addr, web3.args, web3.libraries, "PoliDaoWeb3", web3.txHash);
-  // NEW: Accounting verify
-  if (shouldVerify(accounting)) await verify(accounting.addr, accounting.args, accounting.libraries, "PoliDaoAccounting", accounting.txHash);
 
   // Zapis do deployments/<network>.json
   const out = {
@@ -594,13 +550,10 @@ async function main() {
     extension: extension.addr,
     media: media.addr,
     updates: updates.addr,
-    refunds: refunds.addr,
     governance: governance.addr,
     analytics: analytics.addr,
     security: security.addr,
     web3: web3.addr,
-    // NEW: persist Accounting
-    accounting: accounting.addr,
     // NEW: persist libraries used (if any)
     libraries: deployedLibs,
     // NEW: persist tx hashes for fresh deployments (if available)
@@ -611,13 +564,10 @@ async function main() {
       ...(extension.txHash ? { extension: extension.txHash } : {}),
       ...(media.txHash ? { media: media.txHash } : {}),
       ...(updates.txHash ? { updates: updates.txHash } : {}),
-      ...(refunds.txHash ? { refunds: refunds.txHash } : {}),
       ...(governance.txHash ? { governance: governance.txHash } : {}),
       ...(analytics.txHash ? { analytics: analytics.txHash } : {}),
       ...(security.txHash ? { security: security.txHash } : {}),
       ...(web3.txHash ? { web3: web3.txHash } : {}),
-      // NEW: Accounting tx hash
-      ...(accounting.txHash ? { accounting: accounting.txHash } : {}),
     },
     // NEW: build fingerprints for freshly deployed contracts
     build: {},

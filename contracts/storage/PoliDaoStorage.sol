@@ -19,7 +19,8 @@ contract PoliDaoStorage is Ownable {
     event CoreFrozen(address indexed core, address indexed caller);
 
     modifier onlyCore() {
-        require(msg.sender == core, "Storage: only Core");
+        // Zezwól również na kontrakty autoryzowane (np. harness w testach refund logic)
+        require(msg.sender == core || _authorizedContracts[msg.sender], "Storage: only Core");
         _;
     }
 
@@ -533,7 +534,7 @@ contract PoliDaoStorage is Ownable {
             // Spójność tokenu z oczekiwanym
             require(fundraiserTokens[fid] == expectedToken, "Storage: token mismatch");
 
-            // Skorzystaj z tej samej walidacji co w addDonation (w tym whitelist/time)
+            // Skorzystaj z tej samej walidacji co in addDonation (w tym whitelist/time)
             addDonation(fid, donor, amounts[i]);
 
             unchecked { ++i; }
@@ -543,5 +544,69 @@ contract PoliDaoStorage is Ownable {
     // ===================== Token whitelist (mutacje -> owner) =====================
     function setFundraiserTokenWhitelist(address token, bool allowed) external onlyOwner {
         _isWhitelisted[token] = allowed;
+    }
+
+    // ========== FINANCIAL TOTALS (for analytics) ==========
+    mapping(uint256 => uint256) public totalWithdrawn;
+    mapping(uint256 => uint256) public totalRefunded;
+    mapping(uint256 => uint256) public totalRefundCommission;
+
+    function recordWithdrawal(uint256 fundraiserId, uint256 amount) external onlyCore {
+        require(fundraiserId > 0 && fundraiserId <= fundraiserCounter, "Invalid fundraiser ID");
+        if (amount > 0) {
+            totalWithdrawn[fundraiserId] += amount;
+        }
+    }
+
+    function recordRefundTotals(uint256 fundraiserId, uint256 netAmount, uint256 commission) external onlyCore {
+        require(fundraiserId > 0 && fundraiserId <= fundraiserCounter, "Invalid fundraiser ID");
+        if (netAmount > 0) totalRefunded[fundraiserId] += netAmount;
+        if (commission > 0) totalRefundCommission[fundraiserId] += commission;
+    }
+
+    // ========== DONATION EXECUTION (pull pattern used by Core) ==========
+    /// @notice Pulls tokens from donor using donor->Storage allowance, applies fee, records net donation
+    /// @param fundraiserId Id
+    /// @param donor Donor address
+    /// @param amount Gross amount donor wants to contribute (must have approved Storage)
+    /// @param feeRecipient Recipient of fee (can be zero -> skip)
+    /// @param feeBps Fee in basis points (applied to gross)
+    /// @return netAmount Net recorded / added to raised
+    /// @return token ERC20 token address
+    /// @return newRaised New total raised (after adding net)
+    function handleDonation(
+        uint256 fundraiserId,
+        address donor,
+        uint256 amount,
+        address feeRecipient,
+        uint256 feeBps
+    )
+        external
+        onlyCore
+        returns (uint256 netAmount, address token, uint256 newRaised)
+    {
+        require(amount > 0, "Amount=0");
+        require(fundraiserId > 0 && fundraiserId <= fundraiserCounter, "Bad id");
+        token = fundraiserTokens[fundraiserId];
+        require(token != address(0), "No token");
+        require(isTokenWhitelisted(token), "Token not whitelisted");
+
+        IERC20 erc = IERC20(token);
+        // Pull full gross
+        erc.safeTransferFrom(donor, address(this), amount);
+
+        uint256 fee = 0;
+        if (feeRecipient != address(0) && feeBps > 0) {
+            fee = (amount * feeBps) / 10_000;
+            if (fee > 0) {
+                erc.safeTransfer(feeRecipient, fee);
+            }
+        }
+        netAmount = amount - fee;
+
+        // Record net donation (adds to raisedAmount)
+        addDonation(fundraiserId, donor, netAmount);
+
+        newRaised = _fundraisers[fundraiserId].raisedAmount;
     }
 }
