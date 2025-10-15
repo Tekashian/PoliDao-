@@ -574,15 +574,16 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         emit FundsWithdrawn(fundraiserId, creator, token, paidNet);
     }
 
-    function refund(uint256 fundraiserId)
+    function refund(uint256 /* fundraiserId */)
         external
         whenNotPaused
         nonReentrant
         onlyAuthorizedOrOwner
     {
-        // Enter refund period (idempotent) – no external module
-        RefundLogic.enterRefundPeriod(storageContract, fundraiserId);
-        emit RefundPeriodEntered(fundraiserId, msg.sender);
+        // Refund period removed; keep function but make it a no-op (or revert if you prefer)
+        // For compatibility, do nothing here.
+        // emit RefundPeriodEntered(fundraiserId, msg.sender); // optional: remove to avoid confusion
+        revert RefundNotAllowed();
     }
     
     function refundFor(uint256 fundraiserId, address donor)
@@ -591,9 +592,12 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         nonReentrant
         onlyRouter
     {
-        // Execute single donor refund directly via library (module removed)
+        // Block refunds if withdrawals already started (strict interpretation of "nie zostala wyplacona")
+        require(!withdrawalsStarted[fundraiserId], "PoliDaoCore: withdrawals started");
+
+        // Execute donor refund directly; tranche via Security
         (uint256 netAmount, uint256 commission, address token) =
-            RefundLogic.claimRefund(storageContract, fundraiserId, donor);
+            RefundLogic.claimRefund(storageContract, fundraiserId, donor, withdrawalsStarted[fundraiserId]);
         emit RefundClaimed(fundraiserId, donor, token, netAmount, commission);
     }
 

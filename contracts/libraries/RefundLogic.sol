@@ -13,75 +13,86 @@ library RefundLogic {
     error AlreadyRefunded();
     error GoalReachedNoRefund();
     error RefundTooEarly();
+    error WithdrawalsStarted(); // NEW: refund blocked if withdrawals have started
 
     // Zapisz sumy refundów w Storage (netto + prowizja) – bez modułu Accounting
     function recordRefund(IPoliDaoStorage s, uint256 fundraiserId, uint256 netAmount, uint256 commission) internal {
         try PoliDaoStorage(address(s)).recordRefundTotals(fundraiserId, netAmount, commission) {} catch {}
     }
 
-    // New: enter refund period (idempotent) – status flip only
-    function enterRefundPeriod(IPoliDaoStorage s, uint256 fundraiserId) internal {
+    // DEPRECATED: refund period removed; keep as no-op for backward compatibility
+    function enterRefundPeriod(IPoliDaoStorage s, uint256 fundraiserId) internal view {
         IPoliDaoStructs.PackedFundraiserData memory f = s.fundraisers(fundraiserId);
         if (f.id == 0) revert FundraiserNotFound();
-
         bool isWithGoal = f.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL);
-        bool timeEnded = (f.endDate != 0 && block.timestamp > f.endDate);
-        bool goalReached = (isWithGoal && f.goalAmount > 0 && f.raisedAmount >= f.goalAmount);
-
         if (!isWithGoal) revert RefundNotEligible();
-        if (!timeEnded) revert RefundTooEarly();
-        if (goalReached) revert GoalReachedNoRefund();
-
-        if (f.status != uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD)) {
-            // mutate local copy then persist via full update (interface supports updateFundraiser)
-            f.status = uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD);
-            s.updateFundraiser(fundraiserId, f);
-        }
+        // No changes to status anymore
     }
 
-    // New: claim refund (returns net + commission + token)
+    // New: claim refund without refund period; tranche via Security module
     function claimRefund(
         IPoliDaoStorage s,
         uint256 fundraiserId,
-        address donor
+        address donor,
+        bool withdrawalsStartedFlag
     ) internal returns (uint256 netAmount, uint256 commission, address token) {
         IPoliDaoStructs.PackedFundraiserData memory f = s.fundraisers(fundraiserId);
         if (f.id == 0) revert FundraiserNotFound();
 
-        // Must already be in refund period (caller can ensure via enterRefundPeriod first)
-        if (f.status != uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD)) {
-            // attempt auto-enter if valid
-            enterRefundPeriod(s, fundraiserId);
-            // re-load status (not strictly necessary)
-            f = s.fundraisers(fundraiserId);
-            if (f.status != uint8(IPoliDaoStructs.FundraiserStatus.REFUND_PERIOD)) {
-                revert RefundNotEligible();
-            }
-        }
+        bool isWithGoal = f.fundraiserType == uint8(IPoliDaoStructs.FundraiserType.WITH_GOAL);
+        if (!isWithGoal) revert RefundNotEligible();
+
+        // Goal must not be reached yet
+        bool goalReached = (f.goalAmount > 0 && f.raisedAmount >= f.goalAmount);
+        if (goalReached) revert GoalReachedNoRefund();
+
+        // Must not be paid out (no withdrawals started for fail/flexible path)
+        if (withdrawalsStartedFlag) revert WithdrawalsStarted();
+        if (f.fundsWithdrawn) revert RefundNotEligible();
 
         uint256 donated = s.donations(fundraiserId, donor);
         if (donated == 0) revert AlreadyRefunded();
 
         token = s.fundraiserTokens(fundraiserId);
-        address wallet = PoliDaoStorage(address(s)).commissionWallet(); // CHANGED
-        uint256 rate = PoliDaoStorage(address(s)).refundCommission(); // CHANGED
 
-        commission = rate == 0 ? 0 : (donated * rate) / 10_000;
-        netAmount = donated - commission;
+        // Tranching via Security module (same as withdraw)
+        uint256 allowedNow = donated;
+        address security = s.modules(keccak256("SECURITY"));
+        if (security != address(0)) {
+            (allowedNow, /*nextAt*/, /*remaining*/) =
+                IPoliDaoSecurity(security).checkAndConsumeRefund(fundraiserId, donor, donated);
+            if (allowedNow == 0) revert("Security: payout tranche not available yet");
+        }
 
-        // Zero out donor amount & adjust raised via existing helper
-        s.updateDonationAmount(fundraiserId, donor, 0);
+        // Commission and payout only for the tranche
+        address wallet = PoliDaoStorage(address(s)).commissionWallet();
+        uint256 rate = PoliDaoStorage(address(s)).refundCommission();
+
+        commission = rate == 0 ? 0 : (allowedNow * rate) / 10_000;
+        netAmount = allowedNow - commission;
+
+        // Decrease donor’s recorded donation by the tranche amount
+        s.updateDonationAmount(fundraiserId, donor, donated - allowedNow);
 
         if (commission > 0 && wallet != address(0)) {
             s.releaseFunds(token, wallet, commission);
         }
         s.releaseFunds(token, donor, netAmount);
 
-        // Zapisz sumy refundów w Storage (netto + prowizja)
+        // Accumulate totals for analytics
         recordRefund(s, fundraiserId, netAmount, commission);
     }
 
-    // Backward-compatible (old core call) – now delegates or no-op if module path required
+    // Backward-compat: old callers without withdrawalsStartedFlag
+    function claimRefund(
+        IPoliDaoStorage s,
+        uint256 fundraiserId,
+        address donor
+    ) internal returns (uint256 netAmount, uint256 commission, address token) {
+        return claimRefund(s, fundraiserId, donor, false);
+    }
+
+    // Backward-compatible (old core call) – no-op now
     function startRefundPeriodStrict(
         IPoliDaoStorage s,
         uint256 fundraiserId,

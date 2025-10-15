@@ -72,21 +72,9 @@ module.exports = {
 
   // ========== ETHERSCAN VERIFICATION ==========
   etherscan: {
-    apiKey: {
-      polygon: process.env.POLYGONSCAN_API_KEY || "",
-      polygonAmoy: process.env.POLYGONSCAN_API_KEY || "",
-      sepolia: ETHERSCAN_API_KEY,
-    },
-    customChains: [
-      {
-        network: "polygonAmoy",
-        chainId: 80002,
-        urls: {
-          apiURL: "https://api-amoy.polygonscan.com/api",
-          browserURL: "https://amoy.polygonscan.com"
-        }
-      }
-    ]
+    // jeden klucz API dla wszystkich sieci (v2)
+    apiKey: process.env.ETHERSCAN_API_KEY
+    // brak customChains i brak map per-network
   },
 
   // ========== CONTRACT SIZER PLUGIN ==========

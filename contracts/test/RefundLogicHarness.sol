@@ -5,14 +5,26 @@ import "../interfaces/IPoliDaoStorage.sol";
 import "../libraries/RefundLogic.sol";
 
 contract RefundLogicHarness {
-    function enterRefundPeriod(IPoliDaoStorage s, uint256 fundraiserId) external {
-        RefundLogic.enterRefundPeriod(s, fundraiserId);
-    }
-
     function claimRefund(IPoliDaoStorage s, uint256 fundraiserId, address donor)
         external
         returns (uint256 netAmount, uint256 commission, address token)
     {
         return RefundLogic.claimRefund(s, fundraiserId, donor);
+    }
+
+    function claimRefundWithFlag(
+        IPoliDaoStorage s,
+        uint256 fundraiserId,
+        address donor,
+        bool withdrawalsStartedFlag
+    )
+        external
+        returns (uint256 netAmount, uint256 commission, address token)
+    {
+        return RefundLogic.claimRefund(s, fundraiserId, donor, withdrawalsStartedFlag);
+    }
+
+    function enterRefundPeriod(IPoliDaoStorage s, uint256 fundraiserId) external view {
+        RefundLogic.enterRefundPeriod(s, fundraiserId);
     }
 }

@@ -92,11 +92,16 @@ async function getConstructorInputs(factoryName) {
   return ctor?.inputs ?? [];
 }
 
-async function waitConf(tx) {
-  if (!tx) return;
-  // MORE confs on Polygon to stabilize verification/indexing
-  const confs = isLocal(hre.network.name) ? 1 : isPolygon(hre.network.name) ? 5 : 2;
-  await tx.wait(confs);
+async function waitConf(txOrHash, conf = (hre.network.config.confirmations || 2), timeoutMs = MAX_PENDING_MS) {
+  // ethers v6: pozwól na oba przypadki
+  if (typeof txOrHash === "string") {
+    // czekaj po hashu
+    return await hre.ethers.provider.waitForTransaction(txOrHash, conf, timeoutMs);
+  }
+  if (txOrHash && typeof txOrHash.wait === "function") {
+    return await txOrHash.wait(conf);
+  }
+  throw new Error("waitConf: unsupported tx type");
 }
 
 function explorerBase(network) {
@@ -138,34 +143,38 @@ async function waitForDeploymentSafe(name, contract, txHash) {
 
 // NEW: load previous deployments file if present
 function loadPrevious() {
+  if (process.env.IGNORE_PREVIOUS === "1") return {}; // <<< IGNORE PREVIOUS
   try {
-    const outDir = path.join(__dirname, "..", "deployments");
-    const outFile = path.join(outDir, `${hre.network.name}.json`);
-    if (fs.existsSync(outFile)) {
-      const data = JSON.parse(fs.readFileSync(outFile, "utf8"));
-      if (data?.libraries && typeof data.libraries === "object") {
-        Object.assign(deployedLibs, data.libraries);
-      }
-      return data;
-    }
-  } catch (e) {
-    console.warn("Failed to load previous deployments:", e?.message || e);
+    const fp = path.join(__dirname, "..", "deployments", `${hre.network.name}.json`);
+    const raw = fs.readFileSync(fp, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return {};
   }
-  return null;
 }
 
 // NEW: deploy a single library if not already deployed (reuses previous if available)
 async function deployLibrary(libName) {
-  if (deployedLibs[libName]) return deployedLibs[libName];
-  const LF = await hre.ethers.getContractFactory(libName);
-  const overrides = await feeOverrides();
-  const lib = await LF.deploy(overrides);
-  const tx = lib.deploymentTransaction?.();
-  if (tx?.hash) console.log(`Library ${libName} tx: ${tx.hash}`);
-  await waitForDeploymentSafe(`Library ${libName}`, lib, tx?.hash);
-  const addr = await lib.getAddress();
-  deployedLibs[libName] = addr;
+  const forceLibs = process.env.REDEPLOY_LIBS === "1";
+  if (!forceLibs && deployedLibs[libName]) return deployedLibs[libName];
+
+  const previous = loadPrevious();
+  if (!forceLibs && previous.libraries && previous.libraries[libName]) {
+    deployedLibs[libName] = previous.libraries[libName];
+    return deployedLibs[libName];
+  }
+
+  const Factory = await hre.ethers.getContractFactory(`contracts/libraries/${libName}.sol:${libName}`);
+  const fee = await feeOverrides();
+  const c = await Factory.deploy({ ...fee });
+
+  const txResp = c.deploymentTransaction(); // ethers v6 TransactionResponse
+  console.log(`Library ${libName} tx: ${txResp.hash}`);
+  await waitConf(txResp);                   // <<< przekazujemy TransactionResponse
+  const addr = await c.getAddress();
   console.log(`Library ${libName}: ${addr}`);
+
+  deployedLibs[libName] = addr;
   return addr;
 }
 

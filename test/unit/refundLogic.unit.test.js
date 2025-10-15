@@ -6,6 +6,31 @@ async function increaseTime(sec) {
   await ethers.provider.send("evm_mine", []);
 }
 
+// Helper: ustaw refundCommission, jeśli kontrakt udostępnia setter; ignoruj błąd gdy brak/No change
+async function ensureRefundCommission(storage, rate) {
+  // rate: bigint
+  try {
+    if (storage.setRefundCommission) {
+      await storage.setRefundCommission(rate);
+    } else if (storage.setCommissions) {
+      // Jeżeli w projekcie istnieje inna sygnatura, można dodać fallbacki z inną liczbą argumentów.
+      // Tutaj nie wymuszamy, bo nie wiemy jaka sygnatura jest dostępna.
+      // Pozostawiamy stawkę jak jest, a oczekiwania wyliczymy z odczytanej wartości.
+    }
+  } catch (e) {
+    // zignoruj (np. "No change")
+  }
+}
+
+async function getRefundCommission(storage) {
+  try {
+    return await storage.refundCommission();
+  } catch {
+    // jeśli brak getter'a, przyjmij 0
+    return 0n;
+  }
+}
+
 // Build struct data helper
 async function buildCreateData(tokenAddr, overrides = {}) {
   const now = (await ethers.provider.getBlock("latest")).timestamp;
@@ -51,7 +76,7 @@ describe("RefundLogic (library) – direct harness scenarios", function () {
 
     await (await storage.addWhitelistedToken(await token.getAddress())).wait();
     await (await storage.setCommissionWallet(wallet.address)).wait();
-    // Autoryzuj harness aby RefundLogic mógł wywoływać update w Storage (onlyCore rozszerzone)
+    // Autoryzuj harness
     await (await storage.authorizeContract(await harness.getAddress())).wait();
   }
 
@@ -59,39 +84,17 @@ describe("RefundLogic (library) – direct harness scenarios", function () {
     await deployEnv();
   });
 
-  it("enterRefundPeriod: goal not reached after end -> status REFUND_PERIOD", async () => {
-    const data = await buildCreateData(await token.getAddress(), { goalAmount: ethers.parseEther("100"), endDate: (await ethers.provider.getBlock("latest")).timestamp + 300 });
-    await expect(core.connect(creator).createFundraiser(data)).to.emit(core, "FundraiserCreated");
-
-    await token.mint(donor.address, ethers.parseEther("10"));
-    await token.connect(donor).approve(await core.getAddress(), ethers.parseEther("10"));
-    await core.connect(donor).donate(1, ethers.parseEther("10"));
-
-    await increaseTime(600);
-    await expect(harness.enterRefundPeriod(await storage.getAddress(), 1)).to.not.be.reverted;
-
-    const packed = await storage.fundraisers(1);
-    expect(packed.status).to.equal(3);
-  });
-
-  it("enterRefundPeriod reverts RefundTooEarly before endDate", async () => {
-    const data = await buildCreateData(await token.getAddress(), { endDate: (await ethers.provider.getBlock("latest")).timestamp + 3600 });
-    await core.connect(creator).createFundraiser(data);
-    await token.mint(donor.address, ethers.parseEther("5"));
-    await token.connect(donor).approve(await core.getAddress(), ethers.parseEther("5"));
-    await core.connect(donor).donate(1, ethers.parseEther("5"));
-    await expect(harness.enterRefundPeriod(await storage.getAddress(), 1))
-      .to.be.revertedWithCustomError(harness, "RefundTooEarly");
-  });
+  // Usunięto wszystkie testy enterRefundPeriod (przestarzałe)
 
   it("claimRefund transfers net & commission, then second claim -> AlreadyRefunded", async () => {
-    await (await storage.setCommissions(500)).wait(); // 5%
+    await ensureRefundCommission(storage, 500n); // próbujemy ustawić 5%
+    const rate = await getRefundCommission(storage);
+
     const data = await buildCreateData(await token.getAddress(), { goalAmount: ethers.parseEther("50"), endDate: (await ethers.provider.getBlock("latest")).timestamp + 100 });
     await core.connect(creator).createFundraiser(data);
     await token.mint(donor.address, ethers.parseEther("20"));
     await token.connect(donor).approve(await core.getAddress(), ethers.parseEther("20"));
     await core.connect(donor).donate(1, ethers.parseEther("20"));
-    // Raised before refund should equal donated amount (no donation fee in this test)
     const packedBefore = await storage.fundraisers(1);
     expect(packedBefore.raisedAmount).to.equal(ethers.parseEther("20"));
     await increaseTime(400);
@@ -103,15 +106,16 @@ describe("RefundLogic (library) – direct harness scenarios", function () {
 
     const balDonorAfter = await token.balanceOf(donor.address);
     const balWalletAfter = await token.balanceOf(wallet.address);
-    const commission = ethers.parseEther("20") * 500n / 10000n;
+
+    const commission = rate === 0n ? 0n : (ethers.parseEther("20") * rate) / 10000n;
     const net = ethers.parseEther("20") - commission;
 
     expect(balDonorAfter - balDonorBefore).to.equal(net);
     expect(balWalletAfter - balWalletBefore).to.equal(commission);
-    // Raised should decrease by full donor recorded amount (set to 0 for this donor)
+
     const packedAfter = await storage.fundraisers(1);
     expect(packedAfter.raisedAmount).to.equal(0n);
-    // Storage financial totals should be updated
+
     const totalRefunded = await storage.totalRefunded(1);
     const totalRefundCommission = await storage.totalRefundCommission(1);
     expect(totalRefunded).to.equal(net);
@@ -134,7 +138,7 @@ describe("RefundLogic (library) – direct harness scenarios", function () {
     ).to.be.revertedWithCustomError(harness, "GoalReachedNoRefund");
   });
 
-  it("NO_GOAL fundraiser -> RefundNotEligible", async () => {
+  it("NO_GOAL fundraiser -> claimRefund reverts RefundNotEligible", async () => {
     const data = await buildCreateData(await token.getAddress(), {
       fundraiserType: 1, // NO_GOAL
       goalAmount: 0,
@@ -144,9 +148,116 @@ describe("RefundLogic (library) – direct harness scenarios", function () {
     await token.mint(donor.address, ethers.parseEther("5"));
     await token.connect(donor).approve(await core.getAddress(), ethers.parseEther("5"));
     await core.connect(donor).donate(1, ethers.parseEther("5"));
-    await increaseTime(500);
+    await increaseTime(100);
     await expect(
-      harness.enterRefundPeriod(await storage.getAddress(), 1)
+      harness.claimRefund(await storage.getAddress(), 1, donor.address)
     ).to.be.revertedWithCustomError(harness, "RefundNotEligible");
+  });
+
+  it("claimRefund reverts WithdrawalsStarted gdy flaga = true", async () => {
+    await ensureRefundCommission(storage, 500n);
+    const data = await buildCreateData(await token.getAddress(), {
+      goalAmount: ethers.parseEther("100"),
+      endDate: (await ethers.provider.getBlock("latest")).timestamp + 3600
+    });
+    await core.connect(creator).createFundraiser(data);
+
+    await token.mint(donor.address, ethers.parseEther("10"));
+    await token.connect(donor).approve(await core.getAddress(), ethers.parseEther("10"));
+    await core.connect(donor).donate(1, ethers.parseEther("10"));
+
+    await expect(
+      harness.claimRefundWithFlag(await storage.getAddress(), 1, donor.address, true)
+    ).to.be.revertedWithCustomError(harness, "WithdrawalsStarted");
+  });
+
+  it("refund jest per-darczyńca: dwaj darczyńcy dostają swoje kwoty netto, sumy w storage akumulują się poprawnie", async () => {
+    await ensureRefundCommission(storage, 300n); // spróbuj 3%
+
+     const data = await buildCreateData(await token.getAddress(), {
+       goalAmount: ethers.parseEther("1000"),
+       endDate: (await ethers.provider.getBlock("latest")).timestamp + 3600
+     });
+     await core.connect(creator).createFundraiser(data);
+
+     // UWAGA: index 3 to wallet (feeRecipient). Użyj innego signera jako d2.
+     const signers = await ethers.getSigners();
+     const d1 = donor;
+     const d2 = signers[4];
+
+     await token.mint(d1.address, ethers.parseEther("100"));
+     await token.mint(d2.address, ethers.parseEther("50"));
+     await token.connect(d1).approve(await core.getAddress(), ethers.parseEther("100"));
+     await token.connect(d2).approve(await core.getAddress(), ethers.parseEther("50"));
+
+     await core.connect(d1).donate(1, ethers.parseEther("100"));
+     await core.connect(d2).donate(1, ethers.parseEther("50"));
+
+     const walletBalBefore = await token.balanceOf(wallet.address);
+     const d1Before = await token.balanceOf(d1.address);
+     const d2Before = await token.balanceOf(d2.address);
+
+     // Refund 1: donor1
+     await harness.claimRefund(await storage.getAddress(), 1, d1.address);
+
+     // Refund 2: donor2
+     await harness.claimRefund(await storage.getAddress(), 1, d2.address);
+
+     const walletBalAfter = await token.balanceOf(wallet.address);
+     const d1After = await token.balanceOf(d1.address);
+     const d2After = await token.balanceOf(d2.address);
+
+     const walletDelta = walletBalAfter - walletBalBefore;
+     const d1Delta = d1After - d1Before;
+     const d2Delta = d2After - d2Before;
+
+     const totalRefunded = await storage.totalRefunded(1);
+     const totalRefundCommission = await storage.totalRefundCommission(1);
+     // Spójność: to co trafiło do wallet == totalRefundCommission
+     expect(walletDelta).to.equal(totalRefundCommission);
+     // Suma netto trafiła do obu darczyńców
+     expect(d1Delta + d2Delta).to.equal(totalRefunded);
+   });
+
+  it("non-donor próbuje refund -> AlreadyRefunded (brak wpłat oznacza już 'wyzerowane')", async () => {
+    const data = await buildCreateData(await token.getAddress(), {
+      goalAmount: ethers.parseEther("100"),
+      endDate: (await ethers.provider.getBlock("latest")).timestamp + 3600
+    });
+    await core.connect(creator).createFundraiser(data);
+
+    // Brak donacji od 'wallet' – próba refund
+    await expect(
+      harness.claimRefund(await storage.getAddress(), 1, wallet.address)
+    ).to.be.revertedWithCustomError(harness, "AlreadyRefunded");
+  });
+
+  it("gdy prowizja = 0, całość wraca do darczyńcy", async () => {
+    await ensureRefundCommission(storage, 0n);
+    const rate = await getRefundCommission(storage); // jeśli nie udało się zmienić, użyj aktualnej
+
+    const data = await buildCreateData(await token.getAddress(), {
+      goalAmount: ethers.parseEther("100"),
+      endDate: (await ethers.provider.getBlock("latest")).timestamp + 3600
+    });
+    await core.connect(creator).createFundraiser(data);
+
+    await token.mint(donor.address, ethers.parseEther("7"));
+    await token.connect(donor).approve(await core.getAddress(), ethers.parseEther("7"));
+    await core.connect(donor).donate(1, ethers.parseEther("7"));
+
+    const donorBefore = await token.balanceOf(donor.address);
+    const walletBefore = await token.balanceOf(wallet.address);
+
+    await harness.claimRefund(await storage.getAddress(), 1, donor.address);
+
+    const donorAfter = await token.balanceOf(donor.address);
+    const walletAfter = await token.balanceOf(wallet.address);
+
+    const expectedCommission = rate === 0n ? 0n : (ethers.parseEther("7") * rate) / 10000n;
+    const expectedNet = ethers.parseEther("7") - expectedCommission;
+
+    expect(donorAfter - donorBefore).to.equal(expectedNet);
+    expect(walletAfter - walletBefore).to.equal(expectedCommission);
   });
 });

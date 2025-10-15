@@ -204,31 +204,30 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
     expect(creatorAfter - creatorBefore).to.equal(toUnits(285));
   });
 
-  it("router: refundFor tylko po endDate oraz tylko router może wywołać", async () => {
+  it("router: refundFor może być wywołany przez router także przed endDate (o ile cel nieosiągnięty); tylko router może wywołać", async () => {
     const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 500, daysFromNow: 1 });
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(200));
     await core.connect(donor1).donate(frId, toUnits(200));
 
-    // Przed endDate – RefundTooEarly
-    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
-      .to.be.revertedWithCustomError(core, "RefundTooEarly");
-
-    // Nie-router też rewertuje (modifier onlyRouter) – użyj donor1
+    // Nie-router rewertuje (modifier onlyRouter)
     await expect(core.connect(donor1).refundFor(frId, await donor1.getAddress()))
-      .to.be.reverted; // generic (modifier)
+      .to.be.reverted;
 
-    // Po endDate działa
-    await increaseTime(2 * day);
+    // Router może zrefundować nawet przed endDate (nowa logika)
     await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
       .to.emit(core, "RefundClaimed");
+
+    // Drugi refund tego samego darczyńcy -> AlreadyRefunded
+    await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
+      .to.be.revertedWithCustomError(core, "AlreadyRefunded");
   });
 
-  it("WITH_GOAL: próba refund przed endDate zawsze RefundTooEarly", async () => {
+  it("WITH_GOAL: refund przed endDate jest dozwolony jeśli cel nieosiągnięty", async () => {
     const frId = await createFundraiser({ type: FundraiserType.WITH_GOAL, goal: 1000, daysFromNow: 5 });
     await usdc.connect(donor1).approve(await core.getAddress(), toUnits(100));
     await core.connect(donor1).donate(frId, toUnits(100));
     await expect(core.connect(routerEOA).refundFor(frId, await donor1.getAddress()))
-      .to.be.revertedWithCustomError(core, "RefundTooEarly");
+      .to.emit(core, "RefundClaimed");
   });
 
   it("DonationMade: wielokrotne wpłaty akumulują raised i fee naliczane per wpłata", async () => {
