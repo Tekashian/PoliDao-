@@ -455,6 +455,9 @@ async function main() {
     }
   };
 
+  // [NEW] always bind Storage -> Core (required for onlyCore)
+  await maybeCall(storage.c, "setCore", [core.addr]);
+
   // [UPDATED] set Router on Core and Storage and grant permissions
   await maybeCall(core.c, "setRouterContract", [router.addr]);
   await maybeCall(storage.c, "setAuthorizedRouter", [router.addr]);
@@ -479,14 +482,13 @@ async function main() {
     await maybeCall(core.c, "setStorage", [storage.addr]);
     await maybeCall(core.c, "setStorageContract", [storage.addr]);
     await maybeCall(core.c, "setStorageAddress", [storage.addr]);
-    // Storage -> Core (if Storage wymaga referencji)
-    await maybeCall(storage.c, "setCore", [core.addr]);
+    // Storage -> Core (already wired above)
   }
 
   // Wire Extension
-  await maybeCall(extension.c, "initialize", [storage.addr, core.addr]);       // onlyOwner, idempotent (zwróci błąd jeśli już zainicjalizowane)
-  await maybeCall(storage.c, "authorizeContract", [extension.addr]);          // nadaj uprawnienia modułowi
-  await maybeCall(core.c, "setExtensionsContract", [extension.addr]);         // podłącz Extension w Core
+  await maybeCall(extension.c, "initialize", [storage.addr, core.addr]);       // onlyOwner, idempotent
+  await maybeCall(storage.c, "authorizeContract", [extension.addr]);
+  await maybeCall(core.c, "setExtensionsContract", [extension.addr]);
   // (opcjonalnie) alternatywne nazwy jeżeli Core ma inny setter
   await maybeCall(core.c, "setExtensionContract", [extension.addr]);
   await maybeCall(core.c, "setExtension", [extension.addr]);
@@ -494,6 +496,17 @@ async function main() {
   const modules = [media, updates, governance, analytics, security, web3].filter(Boolean);
   for (const m of modules) {
     await maybeCall(m.c, "setRouter", [router.addr]);
+  }
+
+  // [NEW] Whitelist USDC token (env override or provided address)
+  try {
+    const usdc = process.env.USDC_TOKEN || "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+    if (usdc && hre.ethers.isAddress(usdc)) {
+      await maybeCall(storage.c, "addWhitelistedToken", [usdc]);
+      console.log(`USDC whitelisted: ${usdc}`);
+    }
+  } catch (e) {
+    console.warn("Whitelist USDC failed:", e?.message || e);
   }
 
   // Link do eksploratora
