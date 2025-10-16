@@ -268,123 +268,103 @@ async function verify(address, args = [], libraries = undefined, contractName = 
 }
 
 async function deploy(name, factoryName, args = [], options = {}) {
-  // options.libraries can be provided, otherwise we auto-detect on failure
-  let libraries = options.libraries;
-  let F;
-  try {
-    F = await hre.ethers.getContractFactory(factoryName, libraries ? { libraries } : undefined);
-  } catch (e) {
-    const msg = String(e?.message || e);
-    // NEW: auto-detect missing libraries and link them
-    if (msg.includes("missing links")) {
-      const missing = Array.from(
-        msg.matchAll(/^\*\s+.*?:([A-Za-z0-9_]+)\s*$/gm)
-      ).map((m) => m[1]);
-      if (missing.length > 0) {
-        console.log(`Auto-linking required libraries for ${factoryName}: ${missing.join(", ")}`);
-        const ensured = await ensureLibraries(missing);
-        libraries = { ...(libraries || {}), ...ensured };
-        F = await hre.ethers.getContractFactory(factoryName, { libraries });
-      } else {
-        throw e;
-      }
-    } else {
-      throw e;
-    }
-  }
-
-  // NEW: determine required constructor arg count from ABI and adjust
-  const ctorInputs = await getConstructorInputs(factoryName);
-  const needed = ctorInputs.length;
-  if (args.length < needed) {
-    throw new Error(
-      `${factoryName} constructor requires ${needed} arg(s) but got ${args.length}. ` +
-      `Inputs: [${ctorInputs.map((i) => `${i.type} ${i.name || ""}`.trim()).join(", ")}]`
-    );
-  }
-  let usedArgs = args;
-  if (args.length > needed) {
-    usedArgs = args.slice(0, needed);
-    console.warn(
-      `Warning: ${factoryName} expects ${needed} constructor arg(s); trimming provided args ` +
-      `from ${args.length} to ${needed}: ${JSON.stringify(usedArgs)}`
-    );
-  }
-
-  const overrides = await feeOverrides();
-  const c = await F.deploy(...usedArgs, overrides);
-  const tx = c.deploymentTransaction();
-  if (tx?.hash) {
-    console.log(`${name} tx: ${tx.hash}`);
-    setTimeout(() => {
-      console.warn(`${name}: tx ${tx.hash} still pending after 60s (maxFee/tip applied). Will mine when base fee allows.`);
-    }, 60_000);
-  }
-
-  // NEW: safe wait with timeout
-  await waitForDeploymentSafe(name, c, tx?.hash);
-
-  // compute gas stats
-  let costEth = "n/a", gasUsedStr = "n/a", gasPriceGwei = "n/a";
-  try {
-    if (tx?.hash) {
-      const rc = await hre.ethers.provider.getTransactionReceipt(tx.hash);
-      const gasUsed = rc?.gasUsed;
-      const eff = rc?.effectiveGasPrice ?? rc?.gasPrice;
-      if (gasUsed && eff) {
-        const cost = gasUsed * eff;
-        costEth = hre.ethers.formatEther(cost);
-        gasUsedStr = gasUsed.toString();
-        gasPriceGwei = (Number(eff) / 1e9).toFixed(2);
-      }
-    }
-  } catch {}
-
-  const addr = await c.getAddress();
-  console.log(`${name}: ${addr} (ctor args: ${JSON.stringify(usedArgs)})`);
-  console.log(`  ↳ gasUsed=${gasUsedStr}, gasPrice≈${gasPriceGwei} gwei, cost≈${costEth} ETH`);
-  // NEW: return factoryName as well for diagnostics
-  return { addr, c, args: usedArgs, libraries, fresh: true, txHash: tx?.hash, factoryName };
+  const { libraries } = options;
+  const Factory = await hre.ethers.getContractFactory(factoryName, { libraries });
+  const tx = await Factory.deploy(...args);
+  const contract = await tx.waitForDeployment();
+  const addr = await contract.getAddress();
+  return { name, factoryName, addr, args, libraries, txHash: tx.deploymentTransaction().hash };
 }
 
-// NEW: idempotent attach-or-deploy using previous deployments file (unless FORCE_REDEPLOY=1)
-async function attachOrDeploy(name, factoryName, args = [], options = {}, prev = {}) {
-  // map human name to field in json
-  const keyMap = {
-    Storage: "storage",
-    Core: "core",
-    Router: "router",
-    Extension: "extension",
-    Media: "media",
-    Updates: "updates",
-    Refunds: "refunds",
-    Governance: "governance",
-    Analytics: "analytics",
-    Security: "security",
-    Web3: "web3",
-    Accounting: "accounting",
-  };
-  const field = keyMap[name] || name.toLowerCase();
-  const prevAddr = prev?.[field];
+// [ADD] attachOrDeploy: użyj poprzednich adresów lub wykonaj świeży deploy
+async function attachOrDeploy(name, factoryName, args = [], options = {}, previous = {}) {
+  const key = String(name).toLowerCase();
+  const force = FORCE_REDEPLOY || REDEPLOY_LIST.includes(key);
+  const prevAddr = previous?.[key];
 
-  // NEW: force redeploy if listed in REDEPLOY_LIST
-  const forceThisOne = FORCE_REDEPLOY || REDEPLOY_LIST.includes(name.toLowerCase()) || REDEPLOY_LIST.includes(field);
-
-  if (!forceThisOne && prevAddr) {
-    try {
-      const code = await hre.ethers.provider.getCode(prevAddr);
-      if (code && code !== "0x") {
-        const c = await hre.ethers.getContractAt(factoryName, prevAddr);
-        console.log(`${name}: reusing ${prevAddr} from deployments/${hre.network.name}.json`);
-        return { addr: prevAddr, c, args, libraries: undefined, fresh: false };
-      }
-    } catch (e) {
-      console.warn(`${name}: cannot reuse previous address ${prevAddr}:`, e?.message || e);
-    }
-  } else if (prevAddr && forceThisOne) {
-    console.log(`${name}: forced redeploy requested, ignoring previous address ${prevAddr}`);
+  // Reuse poprzedniego deployu (attach), jeśli nie wymuszono redeploy
+  if (prevAddr && !force) {
+    const c = await hre.ethers.getContractAt(factoryName, prevAddr);
+    const prevArgs = previous?.args?.[key] || args;
+    const prevTx = previous?.txs?.[key];
+    return {
+      name,
+      factoryName,
+      addr: prevAddr,
+      args: prevArgs,
+      libraries: options?.libraries,
+      txHash: prevTx,
+      fresh: false,
+      c,
+    };
   }
-  return await deploy(name, factoryName, args, options);
+
+  // Świeży deploy
+  const deployed = await deploy(name, factoryName, args, options);
+  const c = await hre.ethers.getContractAt(factoryName, deployed.addr);
+  return { ...deployed, fresh: true, c };
+}
+
+// [ADD] getBuildInfoSummary: metadane builda do zapisu w deployments JSON
+async function getBuildInfoSummary(nameOrFqn) {
+  try {
+    let fqn = nameOrFqn;
+    if (!fqn.includes(":")) {
+      const art = await hre.artifacts.readArtifact(nameOrFqn);
+      if (art?.sourceName) fqn = `${art.sourceName}:${art.contractName}`;
+    }
+    const bi = await hre.artifacts.getBuildInfo(fqn);
+    if (!bi) return undefined;
+
+    const settings = bi.input?.settings || {};
+    const optimizer = settings.optimizer || {};
+    return {
+      solcVersion: bi.solcVersion || bi.solcLongVersion,
+      evmVersion: settings.evmVersion,
+      viaIR: settings.viaIR === true,
+      optimizer: {
+        enabled: optimizer.enabled === true,
+        runs: optimizer.runs,
+      },
+      // opcjonalnie: lista plików źródłowych (bez treści)
+      sources: Object.keys(bi.input?.sources || {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+// NEW: ensureLibrariesFor: wykryj z artefaktu, zdeployuj i zwróć mapę FQN->addr
+async function ensureLibrariesFor(factoryName) {
+  const artifact = await hre.artifacts.readArtifact(factoryName);
+  const linkRefs = artifact.linkReferences || {};
+  const fqnToAddr = {};
+
+  // wczytaj poprzednie biblioteki (jeśli zapisane)
+  const previous = loadPrevious();
+  const prevLibs = (previous && previous.libraries) || {};
+
+  for (const [source, libs] of Object.entries(linkRefs)) {
+    for (const libName of Object.keys(libs)) {
+      const fqn = `${source}:${libName}`;
+
+      // spróbuj użyć adresu z pamięci/skrzynki
+      let addr = deployedLibs[libName] || deployedLibs[fqn] || prevLibs[libName] || prevLibs[fqn];
+
+      if (!addr) {
+        // zdeployuj bibliotekę po nazwie (nasza deployLibrary używa FQN do fabryki)
+        addr = await deployLibrary(libName);
+      }
+
+      // zapamiętaj pod kluczem prostym i FQN (na przyszłość)
+      deployedLibs[libName] = addr;
+      deployedLibs[fqn] = addr;
+
+      // mapowanie wymagane przez ethers: FQN -> address
+      fqnToAddr[fqn] = addr;
+    }
+  }
+  return fqnToAddr;
 }
 
 async function main() {
@@ -431,16 +411,37 @@ async function main() {
   }
 
   // Kolejność i argumenty:
+
+  // Core – zapewnij biblioteki jeśli wymagane (np. DonationLogic/WithdrawLogic/FundraiserLogic)
+  const coreLibs = await ensureLibrariesFor("PoliDaoCore");
   const storage = await attachOrDeploy("Storage", "PoliDaoStorage", [], {}, previous);
-  const core = await attachOrDeploy("Core", "PoliDaoCore", [storage.addr, owner], {}, previous);
+  const core = await attachOrDeploy("Core", "PoliDaoCore", [storage.addr, owner], { libraries: coreLibs }, previous);
+
+  // Router
   const router = await attachOrDeploy("Router", "contracts/router/PoliDaoRouter.sol:PoliDaoRouter", [core.addr], {}, previous);
-  const extension = await attachOrDeploy("Extension", "PoliDaoExtension", [], {}, previous);
-  const media = await attachOrDeploy("Media", "PoliDaoMedia", [core.addr], {}, previous);
-  const updates = await attachOrDeploy("Updates", "PoliDaoUpdates", [core.addr, media.addr], {}, previous);
-  const governance = await attachOrDeploy("Governance", "PoliDaoGovernance", [core.addr], {}, previous);
-  const analytics = await attachOrDeploy("Analytics", "PoliDaoAnalytics", [core.addr], {}, previous);
-  const security = await attachOrDeploy("Security", "PoliDaoSecurity", [core.addr], {}, previous);
-  const web3 = await attachOrDeploy("Web3", "PoliDaoWeb3", [], {}, previous);
+
+  // Extension – tu miałeś crash: podlinkuj ExtensionLogic i LocationLogic
+  const extLibs = await ensureLibrariesFor("PoliDaoExtension");
+  const extension = await attachOrDeploy("Extension", "PoliDaoExtension", [], { libraries: extLibs }, previous);
+
+  // Pozostałe moduły (bezpiecznie próbujemy linkować; jeśli nie mają linków, mapka będzie pusta)
+  const mediaLibs = await ensureLibrariesFor("PoliDaoMedia");
+  const media = await attachOrDeploy("Media", "PoliDaoMedia", [core.addr], { libraries: mediaLibs }, previous);
+
+  const updatesLibs = await ensureLibrariesFor("PoliDaoUpdates");
+  const updates = await attachOrDeploy("Updates", "PoliDaoUpdates", [core.addr, media.addr], { libraries: updatesLibs }, previous);
+
+  const governanceLibs = await ensureLibrariesFor("PoliDaoGovernance");
+  const governance = await attachOrDeploy("Governance", "PoliDaoGovernance", [core.addr], { libraries: governanceLibs }, previous);
+
+  const analyticsLibs = await ensureLibrariesFor("PoliDaoAnalytics");
+  const analytics = await attachOrDeploy("Analytics", "PoliDaoAnalytics", [core.addr], { libraries: analyticsLibs }, previous);
+
+  const securityLibs = await ensureLibrariesFor("PoliDaoSecurity");
+  const security = await attachOrDeploy("Security", "PoliDaoSecurity", [core.addr], { libraries: securityLibs }, previous);
+
+  const web3Libs = await ensureLibrariesFor("PoliDaoWeb3");
+  const web3 = await attachOrDeploy("Web3", "PoliDaoWeb3", [], { libraries: web3Libs }, previous);
 
   // NEW: summarize whether anything was newly deployed
   const all = [storage, core, router, extension, media, updates, governance, analytics, security, web3];
@@ -549,8 +550,7 @@ async function main() {
     }
   }
   if (shouldVerify(storage)) await verify(storage.addr, storage.args, storage.libraries, "PoliDaoStorage", storage.txHash);
-  if (shouldVerify(core)) await verify(core.addr, core.args, core.libraries, "PoliDaoCore", core.txHash);
-  // CHANGED: verify Router using FQN as well + pass txHash for preflight
+  if (shouldVerify(core)) await verify(core.addr, core.args, core.libraries, "contracts/core/PoliDaoCore.sol:PoliDaoCore", core.txHash);
   if (shouldVerify(router)) await verify(router.addr, router.args, router.libraries, "contracts/router/PoliDaoRouter.sol:PoliDaoRouter", router.txHash);
   if (shouldVerify(extension)) await verify(extension.addr, extension.args, extension.libraries, "PoliDaoExtension", extension.txHash);
   if (shouldVerify(media)) await verify(media.addr, media.args, media.libraries, "PoliDaoMedia", media.txHash);
@@ -576,7 +576,19 @@ async function main() {
     analytics: analytics.addr,
     security: security.addr,
     web3: web3.addr,
-    // NEW: persist libraries used (if any)
+    // Persist constructor args for reproducible verify
+    args: {
+      storage: storage.args || [],
+      core: core.args || [],
+      router: router.args || [],
+      extension: extension.args || [],
+      media: media.args || [],
+      updates: updates.args || [],
+      governance: governance.args || [],
+      analytics: analytics.args || [],
+      security: security.args || [],
+      web3: web3.args || [],
+    },
     libraries: deployedLibs,
     // NEW: persist tx hashes for fresh deployments (if available)
     txs: {
@@ -591,7 +603,6 @@ async function main() {
       ...(security.txHash ? { security: security.txHash } : {}),
       ...(web3.txHash ? { web3: web3.txHash } : {}),
     },
-    // NEW: build fingerprints for freshly deployed contracts
     build: {},
   };
 
@@ -601,54 +612,24 @@ async function main() {
     try {
       const meta = await getBuildInfoSummary(item.factoryName || "");
       if (meta) {
-        out.build[item.factoryName] = meta;
+        out.build[item.name] = meta;
+        console.log(`Captured build info for ${item.name}`);
       }
     } catch (e) {
-      console.warn(`Failed to capture build info for ${item.factoryName}:`, e?.message || e);
+      console.warn(`Failed to capture build info for ${item.name}: ${e?.message || e}`);
     }
   }
 
   // Zapisz do pliku
-  const outDir = path.join(__dirname, "..", "deployments");
-  const outFile = path.join(outDir, `${hre.network.name}.json`);
-  ensureDirSync(outDir);
-  // CHANGED: use BigInt-safe writer
-  writeJsonSync(outFile, out);
+  const fp = path.join(__dirname, "..", "deployments", `${hre.network.name}.json`);
+  writeJsonSync(fp, out);
   console.log(`\n=== Deploy done | network: ${hre.network.name} ===`);
 }
 
-// NEW: diagnostic helper to summarize build info (size, gas, etc.)
-// CHANGED: avoid estimateGas and any BigInt-returning fields to prevent JSON issues and reverts on unlinked bytecode
-async function getBuildInfoSummary(factoryName) {
-  try {
-    const art = await hre.artifacts.readArtifact(factoryName);
-    // Prefer deployedBytecode when present; fallback to bytecode
-    const hex = typeof art.deployedBytecode === "string" && art.deployedBytecode.length > 2
-      ? art.deployedBytecode
-      : (typeof art.bytecode === "string" ? art.bytecode : "");
-
-    const isHex = /^0x[0-9a-fA-F]*$/.test(hex);
-    const size = isHex ? Math.ceil((hex.length - 2) / 2) : undefined;
-
-    // Detect unresolved library placeholders via linkReferences
-    const hasLinks =
-      art.linkReferences && Object.keys(art.linkReferences).length > 0;
-
-    // Try to include solc version for diagnostics (no exceptions if unavailable)
-    const solc =
-      hre.config?.solidity?.compilers?.[0]?.version ||
-      hre.config?.solidity?.version ||
-      undefined;
-
-    return { size, hasLinks, solc };
-  } catch {
-    return null;
-  }
-}
-
+// Uruchom skrypt
 main()
   .then(() => process.exit(0))
-  .catch((e) => {
-    console.error(e);
+  .catch((error) => {
+    console.error(error);
     process.exit(1);
   });

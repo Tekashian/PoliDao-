@@ -97,7 +97,7 @@ library RefundLogic {
         IPoliDaoStorage s,
         uint256 fundraiserId,
         address /* refundsModule (unused) */
-    ) internal {
+    ) internal view {
         enterRefundPeriod(s, fundraiserId);
     }
 }
