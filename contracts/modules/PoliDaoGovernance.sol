@@ -65,7 +65,6 @@ contract PoliDaoGovernance is Ownable, Pausable {
     // NOTE: ProposalCreated and Voted są deklarowane lokalnie, aby były w zasięgu emit
     event ProposalCreated(uint256 indexed proposalId, string question, uint256 endTime, address indexed proposer);
     event Voted(address indexed voter, uint256 indexed proposalId, bool support);
-    // Dodano: zgodne z użyciem emit VoteCast(_proposalId, msg.sender, _support ? 1 : 2, 1);
     event VoteCast(uint256 indexed proposalId, address indexed voter, uint8 support, uint256 weight);
     event ProposalExecuted(uint256 indexed proposalId, bool passed);
     event ProposerAuthorized(address indexed proposer);
@@ -272,34 +271,48 @@ contract PoliDaoGovernance is Ownable, Pausable {
         return proposalId;
     }
     
-    /**
-     * @notice Vote on a proposal - now with selective pausing
-     * @param _proposalId The proposal ID
-     * @param _support Whether to vote yes (true) or no (false)
-     */
-    function vote(uint256 _proposalId, bool _support) 
-        external 
-        whenNotPaused 
+    // --- WSPÓLNA LOGIKA GŁOSOWANIA (NOWE) ---
+    function _vote(address voter, uint256 _proposalId, bool _support)
+        internal
+        whenNotPaused
         whenVotingNotPaused
-        validProposal(_proposalId) 
-        proposalActive(_proposalId) 
+        validProposal(_proposalId)
+        proposalActive(_proposalId)
     {
+        require(voter != address(0), "Invalid voter");
         Proposal storage p = proposals[_proposalId];
-        
-        require(!p.hasVoted[msg.sender], "Already voted");
-        
-        p.hasVoted[msg.sender] = true;
-        
+        require(!p.hasVoted[voter], "Already voted");
+
+        p.hasVoted[voter] = true;
         if (_support) {
             p.yesVotes++;
         } else {
             p.noVotes++;
         }
-        
-        emit Voted(msg.sender, _proposalId, _support); // z interfejsu
-        emit VoteCast(_proposalId, msg.sender, _support ? 1 : 2, 1);
+        emit Voted(voter, _proposalId, _support);
+        emit VoteCast(_proposalId, voter, _support ? 1 : 2, 1);
     }
-    
+
+    /**
+     * @notice Głosowanie bezpośrednie (EOA) – zachowane
+     */
+    function vote(uint256 _proposalId, bool _support) 
+        external 
+    {
+        _vote(msg.sender, _proposalId, _support);
+    }
+
+    /**
+     * @notice Głosowanie przez Router/Core w imieniu użytkownika
+     * @dev Wywoływane wyłącznie przez Core. voter to prawdziwy adres EOA.
+     */
+    function voteFor(uint256 _proposalId, bool _support, address voter) 
+        external 
+        onlyCore
+    {
+        _vote(voter, _proposalId, _support);
+    }
+
     /**
      * @notice Execute a proposal - now with selective pausing
      * @param _proposalId The proposal ID
