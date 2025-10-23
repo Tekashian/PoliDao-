@@ -730,6 +730,32 @@ contract PoliDaoRouter is Ownable, ReentrancyGuard {
     }
     
     /**
+     * @notice Convenience getters for fundraiser metadata stored in Storage
+     * @dev Uses low-level staticcall to avoid interface drift.
+     */
+    function getFundraiserMetadata(uint256 fundraiserId) external view returns (string memory) {
+        address s = address(coreContract.storageContract());
+        (bool ok, bytes memory res) = s.staticcall(abi.encodeWithSignature("getFundraiserMetadata(uint256)", fundraiserId));
+        if (!ok) {
+            // fallback to public mapping accessor if older Storage
+            (ok, res) = s.staticcall(abi.encodeWithSignature("fundraiserMetadata(uint256)", fundraiserId));
+            require(ok, "Router: metadata read failed");
+        }
+        return abi.decode(res, (string));
+    }
+
+    function getFundraiserInitialImage(uint256 fundraiserId) external view returns (string memory) {
+        address s = address(coreContract.storageContract());
+        (bool ok, bytes memory res) = s.staticcall(abi.encodeWithSignature("getFundraiserInitialImage(uint256)", fundraiserId));
+        if (!ok) {
+            // fallback to public mapping accessor if older Storage
+            (ok, res) = s.staticcall(abi.encodeWithSignature("fundraiserInitialImage(uint256)", fundraiserId));
+            require(ok, "Router: initialImage read failed");
+        }
+        return abi.decode(res, (string));
+    }
+
+    /**
      * @notice Checks if fundraiser can be extended
      */
     function canExtendFundraiser(uint256 fundraiserId)

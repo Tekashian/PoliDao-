@@ -508,6 +508,86 @@ async function main() {
     await maybeCall(m.c, "setRouter", [router.addr]);
   }
 
+  // [NEW] Allowlist selektorów dla wywołań przez Router.routeModule/routeModuleStatic
+  // - obejmuje głównie: zapisy w Updates oraz głosowanie (Governance), plus odczyty
+  const sel = (sig) => hre.ethers.id(sig).slice(0, 10);
+  const key = (label) => hre.ethers.keccak256(hre.ethers.toUtf8Bytes(label));
+  const allow = async (label, sigs) => {
+    if (!sigs || sigs.length === 0) return;
+    const selectors = sigs.map(sel);
+    await maybeCall(router.c, "setAllowedSelectorsBatch", [key(label), selectors, true]);
+  };
+
+  // ANALYTICS (odczyty – przydatne przez routeModuleStatic)
+  await allow("ANALYTICS", [
+    "getDonors(uint256,uint256,uint256)",
+    "getDonorsCount(uint256)",
+    "getTopDonors(uint256,uint256)",
+    "getFundraiserMedia(uint256)",
+    "getFundraiserMetadata(uint256)",
+    "getFundraiserInitialImage(uint256)",
+    "getFundraiserImages(uint256,uint256,uint256)",
+    "getFundraiserVideos(uint256,uint256,uint256)",
+    "getFundraiserFinancials(uint256)",
+    "getPlatformStats()",
+    "getFundraiserStats(uint256)",
+    "getTopFundraisers(uint256)",
+    "getRecentActivity(uint256)",
+    "getFundraisersByStatus(uint8,uint256,uint256)",
+    "getFundraisersByCreator(address,uint256,uint256)"
+  ]);
+
+  // MEDIA (bezpieczne odczyty; zapisy można dodać wg potrzeb)
+  await allow("MEDIA", [
+    "getGallerySize(uint256)",
+    "getMediaItem(uint256,uint256)",
+    "getFundraiserGallery(uint256)",
+    "getMediaCounts(uint256)"
+  ]);
+
+  // UPDATES (główne funkcje zapisu + najczęstsze odczyty)
+  await allow("UPDATES", [
+    // write
+    "postUpdate(uint256,address,string)",
+    "postUpdateWithMedia(uint256,string,uint8,uint256[],address)",
+    "createInitialUpdate(uint256,string,address)",
+    "pinUpdate(uint256)",
+    "unpinUpdate(uint256)",
+    "authorizeUpdater(uint256,address)",
+    "revokeUpdater(uint256,address)",
+    // read
+    "getUpdate(uint256)",
+    "getFundraiserUpdates(uint256,uint256,uint256)",
+    "getPinnedUpdate(uint256)",
+    "getUpdateCount()",
+    "getFundraiserUpdateCount(uint256)",
+    "getUpdatesByAuthor(address,uint256,uint256)",
+    "getRecentUpdates(uint256)",
+    "hasMediaAttachments(uint256)",
+    "getUpdateMediaIds(uint256)"
+  ]);
+
+  // GOVERNANCE (głosowanie – preferuj voteFor, który przyjmuje adres EOA; plus odczyty)
+  await allow("GOVERNANCE", [
+    // write
+    "voteFor(uint256,bool,address)",
+    // opcjonalnie: klasyczne vote (głos odda Core, nie EOA) – zwykle niepotrzebne
+    "vote(uint256,bool)",
+    // read
+    "getProposal(uint256)",
+    "getProposalCount()",
+    "getProposals(uint256,uint256)",
+    "getProposalWithStatus(uint256)",
+    "getGovernanceStatus()",
+    "hasVoted(uint256,address)",
+    "getProposalsReadyForExecution()",
+    "getProposalResults(uint256)"
+  ]);
+
+  // (opcjonalnie) SECURITY / WEB3 – brak domyślnych selektorów; dodać wg potrzeb
+  // await allow("SECURITY", [ /* signatures */ ]);
+  // await allow("WEB3", [ /* signatures */ ]);
+
   // [NEW] Whitelist USDC token (env override or provided address)
   try {
     const usdc = process.env.USDC_TOKEN || "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";

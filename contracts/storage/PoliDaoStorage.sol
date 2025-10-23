@@ -149,6 +149,10 @@ contract PoliDaoStorage is Ownable {
     mapping(uint256 => string) public fundraiserDescriptions;
     mapping(uint256 => string) public fundraiserLocations;
 
+    // [ADDED] Metadata and initialImage fields
+    mapping(uint256 => string) public fundraiserMetadata;
+    mapping(uint256 => string) public fundraiserInitialImage;
+
     // Donor tracking
     mapping(uint256 => mapping(address => uint256)) public donations;
     mapping(uint256 => address[]) private _fundraiserDonors;
@@ -175,6 +179,7 @@ contract PoliDaoStorage is Ownable {
         string memory location,
         address creator,
         address token
+        // [ADDED] Optionally add metadata and initialImage as params if needed
     ) internal returns (uint256 fundraiserId) {
         // Start IDs from 1 (id==0 means not exists in libs)
         fundraiserId = ++fundraiserCounter;
@@ -185,6 +190,7 @@ contract PoliDaoStorage is Ownable {
         fundraiserTitles[fundraiserId] = title;
         fundraiserDescriptions[fundraiserId] = description;
         fundraiserLocations[fundraiserId] = location;
+        // [ADDED] Optionally set metadata/initialImage here if passed as params
         emit FundraiserCreatedInStorage(fundraiserId, creator);
     }
 
@@ -608,5 +614,14 @@ contract PoliDaoStorage is Ownable {
         addDonation(fundraiserId, donor, netAmount);
 
         newRaised = _fundraisers[fundraiserId].raisedAmount;
+    }
+
+    // [ADDED] Public getters for metadata and initialImage
+    function getFundraiserMetadata(uint256 fundraiserId) external view returns (string memory) {
+        return fundraiserMetadata[fundraiserId];
+    }
+
+    function getFundraiserInitialImage(uint256 fundraiserId) external view returns (string memory) {
+        return fundraiserInitialImage[fundraiserId];
     }
 }

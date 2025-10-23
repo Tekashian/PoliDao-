@@ -845,4 +845,137 @@ contract PoliDaoAnalytics is Ownable, Pausable, IPoliDaoStructs {
         require(success, "staticcall failed");
         return ret;
     }
+
+    // ========== MEDIA/METADATA GETTERS ==========
+
+    /**
+     * @notice Returns both metadata CID and initial image CID for a fundraiser
+     */
+    function getFundraiserMedia(uint256 fundraiserId)
+        external
+        view
+        returns (string memory metadataCid, string memory initialImageCid)
+    {
+        (bool ok, bytes memory res) = mainContract.staticcall(abi.encodeWithSignature("getContractStatus()"));
+        require(ok, "Core.getContractStatus failed");
+        (address storageAddr,,,) = abi.decode(res, (address, address, address, bool));
+
+        // metadata try explicit getter, then public mapping
+        bytes memory out;
+        (ok, out) = storageAddr.staticcall(abi.encodeWithSignature("getFundraiserMetadata(uint256)", fundraiserId));
+        if (!ok) {
+            (ok, out) = storageAddr.staticcall(abi.encodeWithSignature("fundraiserMetadata(uint256)", fundraiserId));
+            require(ok, "Analytics: metadata read failed");
+        }
+        metadataCid = abi.decode(out, (string));
+
+        // initialImage try explicit getter, then public mapping
+        (ok, out) = storageAddr.staticcall(abi.encodeWithSignature("getFundraiserInitialImage(uint256)", fundraiserId));
+        if (!ok) {
+            (ok, out) = storageAddr.staticcall(abi.encodeWithSignature("fundraiserInitialImage(uint256)", fundraiserId));
+            require(ok, "Analytics: initialImage read failed");
+        }
+        initialImageCid = abi.decode(out, (string));
+    }
+
+    function getFundraiserMetadata(uint256 fundraiserId) external view returns (string memory) {
+        (bool ok, bytes memory res) = mainContract.staticcall(abi.encodeWithSignature("getContractStatus()"));
+        require(ok, "Core.getContractStatus failed");
+        (address storageAddr,,,) = abi.decode(res, (address, address, address, bool));
+
+        (ok, res) = storageAddr.staticcall(abi.encodeWithSignature("getFundraiserMetadata(uint256)", fundraiserId));
+        if (!ok) {
+            (ok, res) = storageAddr.staticcall(abi.encodeWithSignature("fundraiserMetadata(uint256)", fundraiserId));
+            require(ok, "Analytics: metadata read failed");
+        }
+        return abi.decode(res, (string));
+    }
+
+    function getFundraiserInitialImage(uint256 fundraiserId) external view returns (string memory) {
+        (bool ok, bytes memory res) = mainContract.staticcall(abi.encodeWithSignature("getContractStatus()"));
+        require(ok, "Core.getContractStatus failed");
+        (address storageAddr,,,) = abi.decode(res, (address, address, address, bool));
+
+        (ok, res) = storageAddr.staticcall(abi.encodeWithSignature("getFundraiserInitialImage(uint256)", fundraiserId));
+        if (!ok) {
+            (ok, res) = storageAddr.staticcall(abi.encodeWithSignature("fundraiserInitialImage(uint256)", fundraiserId));
+            require(ok, "Analytics: initialImage read failed");
+        }
+        return abi.decode(res, (string));
+    }
+
+    // ========== MEDIA TYPE FILTERED GETTERS ==========
+
+    /**
+     * @notice Returns video IPFS CIDs for a fundraiser with pagination
+     * @dev mediaType: 1 == video in Media module; scans gallery off-chain (view)
+     */
+    function getFundraiserVideos(
+        uint256 fundraiserId,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (string[] memory cids, uint256 total) {
+        return _getMediaByType(fundraiserId, 1, offset, limit);
+    }
+
+    /**
+     * @notice Returns image IPFS CIDs for a fundraiser with pagination
+     * @dev mediaType: 0 == image in Media module
+     */
+    function getFundraiserImages(
+        uint256 fundraiserId,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (string[] memory cids, uint256 total) {
+        return _getMediaByType(fundraiserId, 0, offset, limit);
+    }
+
+    function _getMediaByType(
+        uint256 fundraiserId,
+        uint8 typeFilter,
+        uint256 offset,
+        uint256 limit
+    ) internal view returns (string[] memory cids, uint256 total) {
+        require(mediaModule != address(0), "Analytics: media module not set");
+
+        // Read gallery size
+        uint256 size = abi.decode(
+            _static(mediaModule, abi.encodeWithSignature("getGallerySize(uint256)", fundraiserId)),
+            (uint256)
+        );
+
+        // First pass: count matches to compute total
+        for (uint256 i = 0; i < size; i++) {
+            // getMediaItem(uint256,uint256) returns (ipfsHash, mediaType, filename, uploadTime, uploader, description)
+            (string memory ipfsHash, uint8 mType, , , , ) = abi.decode(
+                _static(mediaModule, abi.encodeWithSignature("getMediaItem(uint256,uint256)", fundraiserId, i)),
+                (string, uint8, string, uint256, address, string)
+            );
+            if (mType == typeFilter && bytes(ipfsHash).length > 0) {
+                total++;
+            }
+        }
+
+        if (total == 0 || offset >= total || limit == 0) {
+            return (new string[](0), total);
+        }
+
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        uint256 toTake = end - offset;
+        cids = new string[](toTake);
+
+        // Second pass: fill only the requested window
+        uint256 seen = 0;
+        uint256 written = 0;
+        for (uint256 i = 0; i < size && written < toTake; i++) {
+            (string memory ipfsHash, uint8 mType, , , , ) = abi.decode(
+                _static(mediaModule, abi.encodeWithSignature("getMediaItem(uint256,uint256)", fundraiserId, i)),
+                (string, uint8, string, uint256, address, string)
+            );
+            if (mType != typeFilter || bytes(ipfsHash).length == 0) continue;
+            if (seen++ < offset) continue;
+            cids[written++] = ipfsHash;
+        }
+    }
 }

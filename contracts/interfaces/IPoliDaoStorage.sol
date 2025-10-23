@@ -8,7 +8,9 @@ import "./IPoliDaoStructs.sol";
  * @notice Interface for PoliDAO unified storage contract
  */
 interface IPoliDaoStorage {
-    // Gettery stanu zbiórek
+    // ======== Views: fundraisers and mappings ========
+    function fundraiserCounter() external view returns (uint256);
+
     function fundraisers(uint256 fundraiserId) external view returns (IPoliDaoStructs.PackedFundraiserData memory);
 
     function fundraiserCreators(uint256 fundraiserId) external view returns (address);
@@ -23,17 +25,40 @@ interface IPoliDaoStorage {
 
     function donations(uint256 fundraiserId, address donor) external view returns (uint256);
 
+    function totalWithdrawn(uint256 fundraiserId) external view returns (uint256);
+
+    function totalRefunded(uint256 fundraiserId) external view returns (uint256);
+
+    function modules(bytes32 key) external view returns (address);
+
+    function isTokenWhitelisted(address token) external view returns (bool);
+
+    function getWhitelistedTokens() external view returns (address[] memory);
+
     function getFundraiserDonors(uint256 fundraiserId) external view returns (address[] memory);
 
-    function fundraiserCounter() external view returns (uint256);
+    // ======== Views: metadata helpers ========
+    function getFundraiserMetadata(uint256 fundraiserId) external view returns (string memory);
 
-    // Mutacje dot. zbiórek
+    function getFundraiserInitialImage(uint256 fundraiserId) external view returns (string memory);
+
+    // ======== Core-only mutators ========
+    function createFundraiser(
+        IPoliDaoStructs.PackedFundraiserData memory data,
+        string memory title,
+        string memory description,
+        string memory location,
+        address creator,
+        address token
+    ) external returns (uint256 fundraiserId);
+
+    function addDonation(uint256 fundraiserId, address donor, uint256 amount) external;
+
     function updateFundraiser(uint256 fundraiserId, IPoliDaoStructs.PackedFundraiserData calldata data) external;
 
-    function updateFundraiserLocation(uint256 fundraiserId, string calldata newLocation) external;
+    function updateFundraiserStatus(uint256 fundraiserId, uint8 newStatus) external;
 
-    // Donacje
-    function addDonation(uint256 fundraiserId, address donor, uint256 amount) external;
+    function updateRaisedAmount(uint256 fundraiserId, uint256 newAmount) external;
 
     function batchAddDonations(
         address donor,
@@ -42,28 +67,19 @@ interface IPoliDaoStorage {
         uint256[] calldata amounts
     ) external;
 
+    function releaseFunds(address token, address to, uint256 amount) external;
+
     function updateDonationAmount(uint256 fundraiserId, address donor, uint256 newAmount) external;
 
-    // Whitelist
-    function isTokenWhitelisted(address token) external view returns (bool);
+    // ======== Ownership/ACL helpers used by Core ========
+    function setModule(bytes32 key, address moduleAddr) external;
 
-    function addWhitelistedToken(address token) external;
-
-    function removeWhitelistedToken(address token) external;
-
-    function getWhitelistedTokens() external view returns (address[] memory);
-
-    // Moduły / autoryzacje
-    function modules(bytes32 key) external view returns (address);
-
-    function setModule(bytes32 moduleKey, address moduleAddr) external;
+    function isContractAuthorized(address a) external view returns (bool);
 
     function authorizeContract(address contractAddress) external;
 
-    function deauthorizeContract(address contractAddress) external;
+    // ======== Analytics helpers ========
+    function recordWithdrawal(uint256 fundraiserId, uint256 amount) external;
 
-    function isContractAuthorized(address contractAddress) external view returns (bool);
-
-    // Transfer środków wykonywany przez Storage
-    function releaseFunds(address token, address to, uint256 amount) external;
+    function recordRefundTotals(uint256 fundraiserId, uint256 netAmount, uint256 commission) external;
 }
