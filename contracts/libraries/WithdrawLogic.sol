@@ -51,21 +51,30 @@ library WithdrawLogic {
         token = s.fundraiserTokens(fundraiserId);
         if (token == address(0)) revert TokenNotSet();
 
-        uint256 requested = uint256(f.raisedAmount);
-        if (requested == 0) revert NothingToWithdraw();
+        // Compute available funds = raised - withdrawn - refunded (saturating at zero)
+        uint256 withdrawnSoFar = s.totalWithdrawn(fundraiserId);
+        uint256 refundedSoFar = s.totalRefunded(fundraiserId);
+        uint256 accounted = withdrawnSoFar + refundedSoFar;
+        uint256 available;
+        if (accounted >= f.raisedAmount) {
+            available = 0;
+        } else {
+            available = uint256(f.raisedAmount) - accounted;
+        }
+        if (available == 0) revert NothingToWithdraw();
 
-        // Security tranching (wymagany komunikat testów)
-        uint256 allowedNow = requested;
+        // Security tranching (limit to 'available')
+        uint256 allowedNow = available;
         uint256 remaining = 0;
         address security = s.modules(keccak256("SECURITY"));
         if (security != address(0)) {
             (allowedNow, /*nextAt*/, remaining) =
-                IPoliDaoSecurity(security).checkAndConsumeWithdraw(fundraiserId, creator, requested);
+                IPoliDaoSecurity(security).checkAndConsumeWithdraw(fundraiserId, creator, available);
             if (allowedNow == 0) revert("Security: payout tranche not available yet");
         }
         if (allowedNow == 0) revert NothingToWithdraw();
 
-        // fee
+        // Fee on allowedNow (gross)
         uint256 fee = 0;
         if (feeRecipient != address(0) && withdrawFeeBps > 0) {
             fee = (allowedNow * withdrawFeeBps) / 10_000;
@@ -76,13 +85,17 @@ library WithdrawLogic {
 
         paidGross = allowedNow;
 
+        // Atomically record gross withdrawal in storage (prevents re-withdraw)
+        s.recordWithdrawal(fundraiserId, paidGross);
+
         // Księgowanie w module ACCOUNTING (bez dotykania Storage)
         address accounting = s.modules(keccak256("ACCOUNTING"));
         if (accounting != address(0)) {
             IPoliDaoAccounting(accounting).recordWithdrawal(fundraiserId, paidGross);
         }
 
-        if (isWithGoal && goalReached && remaining == 0) {
+        // Mark fully withdrawn if no further funds or tranches remain
+        if (remaining == 0 && allowedNow == available) {
             f.fundsWithdrawn = true;
             s.updateFundraiser(fundraiserId, f);
         }

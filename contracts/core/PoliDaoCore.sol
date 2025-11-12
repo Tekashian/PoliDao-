@@ -538,8 +538,8 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         if ((isWithGoal && !goalReached && timeEnded) || (!isWithGoal)) {
             withdrawalsStarted[fundraiserId] = true;
         }
-        // Record withdrawal totals for analytics
-        try PoliDaoStorage(address(storageContract)).recordWithdrawal(fundraiserId, paidNet) {} catch {}
+        // Storage.recordWithdrawal now handled inside WithdrawLogic (gross). Avoid double-counting.
+        // emit event with net paid to creator (as before)
         emit FundsWithdrawn(fundraiserId, creator, token, paidNet);
     }
 
@@ -569,8 +569,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         if ((isWithGoal && !goalReached && timeEnded) || (!isWithGoal)) {
             withdrawalsStarted[fundraiserId] = true;
         }
-        // Record withdrawal totals for analytics
-        try PoliDaoStorage(address(storageContract)).recordWithdrawal(fundraiserId, paidNet) {} catch {}
+        // Storage.recordWithdrawal now handled inside WithdrawLogic (gross). Avoid double-counting.
         emit FundsWithdrawn(fundraiserId, creator, token, paidNet);
     }
 
