@@ -1,4 +1,6 @@
 /* eslint-disable no-console */
+// DEPRECATED: This script targets the legacy non-upgradeable Core. Prefer scripts/deploy-and-verify.js
+// with USE_UUPS_CORE=1 for production deployments. Kept for historical reference only.
 const { ethers } = require("hardhat");
 
 function selector(signature) {

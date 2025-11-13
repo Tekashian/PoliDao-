@@ -3,22 +3,6 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_storageContract",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_routerContract",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "constructor"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
         "name": "target",
         "type": "address"
       }
@@ -28,7 +12,38 @@
   },
   {
     "inputs": [],
+    "name": "AlreadyRefunded",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "AlreadyWithdrawn",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "DescriptionTooLong",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "DonationsClosed",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "implementation",
+        "type": "address"
+      }
+    ],
+    "name": "ERC1967InvalidImplementation",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ERC1967NonPayable",
     "type": "error"
   },
   {
@@ -53,12 +68,32 @@
   },
   {
     "inputs": [],
+    "name": "FundraiserNotEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "FundraiserNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "FundraiserNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "GoalAmountRequired",
     "type": "error"
   },
   {
     "inputs": [],
     "name": "GoalAmountTooLarge",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "GoalReachedNoRefund",
     "type": "error"
   },
   {
@@ -89,6 +124,11 @@
   },
   {
     "inputs": [],
+    "name": "InvalidInitialization",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "InvalidInput",
     "type": "error"
   },
@@ -104,7 +144,22 @@
   },
   {
     "inputs": [],
+    "name": "NotAuthorized",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NotImplemented",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotInitializing",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NothingToWithdraw",
     "type": "error"
   },
   {
@@ -135,6 +190,16 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "RefundNotAllowed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "RefundNotEligible",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -152,7 +217,33 @@
   },
   {
     "inputs": [],
+    "name": "TokenNotSet",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "TokenNotWhitelisted",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "UUPSUnauthorizedCallContext",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "slot",
+        "type": "bytes32"
+      }
+    ],
+    "name": "UUPSUnsupportedProxiableUUID",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "WithdrawalsStarted",
     "type": "error"
   },
   {
@@ -185,7 +276,7 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "netAmount",
+        "name": "newRaised",
         "type": "uint256"
       }
     ],
@@ -227,7 +318,7 @@
         "type": "address"
       },
       {
-        "indexed": false,
+        "indexed": true,
         "internalType": "address",
         "name": "token",
         "type": "address"
@@ -272,13 +363,13 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "id",
+        "name": "fundraiserId",
         "type": "uint256"
       },
       {
         "indexed": true,
         "internalType": "address",
-        "name": "suspendedBy",
+        "name": "by",
         "type": "address"
       },
       {
@@ -332,34 +423,28 @@
     "anonymous": false,
     "inputs": [
       {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "moduleKey",
-        "type": "bytes32"
-      },
-      {
         "indexed": false,
-        "internalType": "bool",
-        "name": "disabled",
-        "type": "bool"
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
       }
     ],
-    "name": "ModuleDisableFlagSet",
+    "name": "Initialized",
     "type": "event"
   },
   {
     "anonymous": false,
     "inputs": [
       {
-        "indexed": true,
+        "indexed": false,
         "internalType": "string",
-        "name": "moduleType",
+        "name": "label",
         "type": "string"
       },
       {
-        "indexed": true,
+        "indexed": false,
         "internalType": "address",
-        "name": "oldModule",
+        "name": "oldAddr",
         "type": "address"
       }
     ],
@@ -370,77 +455,21 @@
     "anonymous": false,
     "inputs": [
       {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "moduleKey",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "module",
-        "type": "address"
-      },
-      {
         "indexed": false,
-        "internalType": "bytes4",
-        "name": "selector",
-        "type": "bytes4"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes",
-        "name": "reason",
-        "type": "bytes"
-      }
-    ],
-    "name": "ModuleNotificationFailed",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "moduleKey",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "module",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes4",
-        "name": "selector",
-        "type": "bytes4"
-      }
-    ],
-    "name": "ModuleNotificationSucceeded",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
         "internalType": "string",
-        "name": "moduleType",
+        "name": "label",
         "type": "string"
       },
       {
-        "indexed": true,
+        "indexed": false,
         "internalType": "address",
-        "name": "oldModule",
+        "name": "oldAddr",
         "type": "address"
       },
       {
-        "indexed": true,
+        "indexed": false,
         "internalType": "address",
-        "name": "newModule",
+        "name": "newAddr",
         "type": "address"
       }
     ],
@@ -449,8 +478,15 @@
   },
   {
     "anonymous": false,
-    "inputs": [],
-    "name": "ModulesLocked",
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "locker",
+        "type": "address"
+      }
+    ],
+    "name": "ModuleUpgradesLocked",
     "type": "event"
   },
   {
@@ -490,6 +526,62 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "uint256",
+        "name": "fundraiserId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "donor",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "netAmount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "commission",
+        "type": "uint256"
+      }
+    ],
+    "name": "RefundClaimed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "fundraiserId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "RefundPeriodEntered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "address",
         "name": "oldRouter",
         "type": "address"
@@ -518,84 +610,29 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "implementation",
+        "type": "address"
+      }
+    ],
+    "name": "Upgraded",
+    "type": "event"
+  },
+  {
     "inputs": [],
-    "name": "MAX_BATCH_SIZE",
+    "name": "UPGRADE_INTERFACE_VERSION",
     "outputs": [
       {
-        "internalType": "uint256",
+        "internalType": "string",
         "name": "",
-        "type": "uint256"
+        "type": "string"
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "module",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes",
-        "name": "data",
-        "type": "bytes"
-      }
-    ],
-    "name": "_invokeModule",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      },
-      {
-        "components": [
-          {
-            "internalType": "string",
-            "name": "ipfsHash",
-            "type": "string"
-          },
-          {
-            "internalType": "uint8",
-            "name": "mediaType",
-            "type": "uint8"
-          },
-          {
-            "internalType": "string",
-            "name": "filename",
-            "type": "string"
-          },
-          {
-            "internalType": "uint256",
-            "name": "uploadTime",
-            "type": "uint256"
-          },
-          {
-            "internalType": "address",
-            "name": "uploader",
-            "type": "address"
-          },
-          {
-            "internalType": "string",
-            "name": "description",
-            "type": "string"
-          }
-        ],
-        "internalType": "struct IPoliDaoStructs.MediaItem[]",
-        "name": "",
-        "type": "tuple[]"
-      }
-    ],
-    "name": "addMediaToFundraiser",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -612,20 +649,12 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "areModuleUpgradesOpen",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [
+      {
+        "internalType": "address",
+        "name": "donor",
+        "type": "address"
+      },
       {
         "internalType": "uint256[]",
         "name": "fundraiserIds",
@@ -637,7 +666,7 @@
         "type": "uint256[]"
       }
     ],
-    "name": "batchDonate",
+    "name": "batchDonateFrom",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -664,64 +693,6 @@
       }
     ],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "fundraiserId",
-        "type": "uint256"
-      }
-    ],
-    "name": "canExtendFundraiser",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "canExtend",
-        "type": "bool"
-      },
-      {
-        "internalType": "uint256",
-        "name": "timeLeft",
-        "type": "uint256"
-      },
-      {
-        "internalType": "string",
-        "name": "reason",
-        "type": "string"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "fundraiserId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "canRefund",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "canRefundResult",
-        "type": "bool"
-      },
-      {
-        "internalType": "string",
-        "name": "reason",
-        "type": "string"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -803,21 +774,78 @@
   {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "",
-        "type": "string"
+        "internalType": "address",
+        "name": "creator",
+        "type": "address"
       },
       {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
+        "components": [
+          {
+            "internalType": "string",
+            "name": "title",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "description",
+            "type": "string"
+          },
+          {
+            "internalType": "uint256",
+            "name": "endDate",
+            "type": "uint256"
+          },
+          {
+            "internalType": "enum IPoliDaoStructs.FundraiserType",
+            "name": "fundraiserType",
+            "type": "uint8"
+          },
+          {
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "goalAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "string[]",
+            "name": "initialImages",
+            "type": "string[]"
+          },
+          {
+            "internalType": "string[]",
+            "name": "initialVideos",
+            "type": "string[]"
+          },
+          {
+            "internalType": "string",
+            "name": "metadataHash",
+            "type": "string"
+          },
+          {
+            "internalType": "string",
+            "name": "location",
+            "type": "string"
+          },
+          {
+            "internalType": "bool",
+            "name": "isFlexible",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct IPoliDaoStructs.FundraiserCreationData",
+        "name": "data",
+        "type": "tuple"
       }
     ],
-    "name": "createProposal",
+    "name": "createFundraiserFor",
     "outputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "fundraiserId",
         "type": "uint256"
       }
     ],
@@ -864,14 +892,37 @@
   {
     "inputs": [
       {
-        "internalType": "uint256[]",
-        "name": "",
-        "type": "uint256[]"
+        "internalType": "uint256",
+        "name": "fundraiserId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "donor",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
       }
     ],
-    "name": "donateBatchFrom",
+    "name": "donateFrom",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "donationFeeBps",
+    "outputs": [
+      {
+        "internalType": "uint16",
+        "name": "",
+        "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -893,6 +944,29 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fundraiserId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "requester",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "additionalDays",
+        "type": "uint256"
+      }
+    ],
+    "name": "extendFundraiserFor",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "extensionsContract",
     "outputs": [
@@ -900,6 +974,32 @@
         "internalType": "address",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "feeRecipient",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "flexibleWithdrawFeeBps",
+    "outputs": [
+      {
+        "internalType": "uint16",
+        "name": "",
+        "type": "uint16"
       }
     ],
     "stateMutability": "view",
@@ -1094,73 +1194,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "fundraiserId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getFundraiserProgress",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "raised",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "goal",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "percentage",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "donorsCount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "timeLeft",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "refundDeadline",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "isSuspended",
-        "type": "bool"
-      },
-      {
-        "internalType": "uint256",
-        "name": "suspensionTime",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "getWhitelistedTokens",
-    "outputs": [
-      {
-        "internalType": "address[]",
-        "name": "",
-        "type": "address[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "governanceModule",
     "outputs": [
@@ -1189,44 +1222,6 @@
     "name": "initialize",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "string",
-        "name": "label",
-        "type": "string"
-      }
-    ],
-    "name": "isModuleDisabled",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "token",
-        "type": "address"
-      }
-    ],
-    "name": "isTokenWhitelisted",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1264,13 +1259,6 @@
   },
   {
     "inputs": [],
-    "name": "pause",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "paused",
     "outputs": [
       {
@@ -1283,19 +1271,27 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "proxiableUUID",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      },
-      {
-        "internalType": "string",
-        "name": "",
-        "type": "string"
       }
     ],
-    "name": "postUpdate",
+    "name": "refund",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1306,35 +1302,14 @@
         "internalType": "uint256",
         "name": "fundraiserId",
         "type": "uint256"
-      }
-    ],
-    "name": "refund",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "refundsModule",
-    "outputs": [
+      },
       {
         "internalType": "address",
-        "name": "",
+        "name": "donor",
         "type": "address"
       }
     ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "token",
-        "type": "address"
-      }
-    ],
-    "name": "removeWhitelistToken",
+    "name": "refundFor",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1375,12 +1350,38 @@
   {
     "inputs": [
       {
+        "internalType": "uint16",
+        "name": "_bps",
+        "type": "uint16"
+      }
+    ],
+    "name": "setDonationFeeBps",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "_extensionsContract",
         "type": "address"
       }
     ],
     "name": "setExtensionsContract",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "_feeRecipient",
+        "type": "address"
+      }
+    ],
+    "name": "setFeeRecipient",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1404,7 +1405,7 @@
       },
       {
         "internalType": "address",
-        "name": "_refunds",
+        "name": "",
         "type": "address"
       },
       {
@@ -1432,13 +1433,44 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_routerContract",
+        "name": "_router",
         "type": "address"
       }
     ],
     "name": "setRouterContract",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint16",
+        "name": "_successBps",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "_flexibleBps",
+        "type": "uint16"
+      }
+    ],
+    "name": "setWithdrawFeesBps",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "spenderAddress",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1479,6 +1511,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "successWithdrawFeeBps",
+    "outputs": [
+      {
+        "internalType": "uint16",
+        "name": "",
+        "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -1510,13 +1555,6 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "unpause",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -1524,12 +1562,17 @@
         "type": "uint256"
       },
       {
+        "internalType": "address",
+        "name": "requester",
+        "type": "address"
+      },
+      {
         "internalType": "string",
         "name": "newLocation",
         "type": "string"
       }
     ],
-    "name": "updateLocation",
+    "name": "updateLocationFor",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1550,12 +1593,17 @@
   {
     "inputs": [
       {
+        "internalType": "string",
+        "name": "label",
+        "type": "string"
+      },
+      {
         "internalType": "address",
         "name": "newAddr",
         "type": "address"
       }
     ],
-    "name": "upgradeAnalyticsModule",
+    "name": "upgradeModule",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1564,78 +1612,18 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "newAddr",
+        "name": "newImplementation",
         "type": "address"
-      }
-    ],
-    "name": "upgradeGovernanceModule",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
+      },
       {
-        "internalType": "address",
-        "name": "newAddr",
-        "type": "address"
+        "internalType": "bytes",
+        "name": "data",
+        "type": "bytes"
       }
     ],
-    "name": "upgradeMediaModule",
+    "name": "upgradeToAndCall",
     "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "newAddr",
-        "type": "address"
-      }
-    ],
-    "name": "upgradeRefundsModule",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "newAddr",
-        "type": "address"
-      }
-    ],
-    "name": "upgradeSecurityModule",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "newAddr",
-        "type": "address"
-      }
-    ],
-    "name": "upgradeUpdatesModule",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "newAddr",
-        "type": "address"
-      }
-    ],
-    "name": "upgradeWeb3Module",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "stateMutability": "payable",
     "type": "function"
   },
   {
@@ -1657,21 +1645,16 @@
     "type": "function"
   },
   {
-    "inputs": [
+    "inputs": [],
+    "name": "version",
+    "outputs": [
       {
-        "internalType": "uint256",
+        "internalType": "string",
         "name": "",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
+        "type": "string"
       }
     ],
-    "name": "vote",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -1690,12 +1673,12 @@
   {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "token",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "fundraiserId",
+        "type": "uint256"
       }
     ],
-    "name": "whitelistToken",
+    "name": "withdrawFunds",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1706,11 +1689,35 @@
         "internalType": "uint256",
         "name": "fundraiserId",
         "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "requester",
+        "type": "address"
       }
     ],
-    "name": "withdrawFunds",
+    "name": "withdrawFundsFor",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "withdrawalsStarted",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   }
 ]

@@ -249,12 +249,6 @@ async function deployBasicFixtures() {
   return deploySystemFixture();
 }
 
-async function deployHelloWorld() {
-  const HelloWorld = await ethers.getContractFactory("HelloWorld");
-  const helloWorld = await HelloWorld.deploy();
-  await helloWorld.waitForDeployment();
-  return { helloWorld };
-}
 
 async function deployExtensionWithStubCore() {
   const [owner] = await ethers.getSigners();
@@ -320,7 +314,6 @@ async function deployFactoryFixture() {
 module.exports = {
   deploySystemFixture,
   deployBasicFixtures,
-  deployHelloWorld,
   deployExtensionWithStubCore,
   deployFactoryFixture,
 };

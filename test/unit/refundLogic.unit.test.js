@@ -65,9 +65,15 @@ describe("RefundLogic (library) – direct harness scenarios", function () {
     storage = await Storage.deploy();
     await storage.waitForDeployment();
 
-    const Core = await ethers.getContractFactory("PoliDaoCore");
-    core = await Core.deploy(await storage.getAddress(), owner.address);
-    await core.waitForDeployment();
+  // Deploy UUPS upgradeable Core behind ERC1967Proxy
+  const ImplFactory = await ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable");
+  const impl = await ImplFactory.deploy();
+  await impl.waitForDeployment();
+  const ProxyFactory = await ethers.getContractFactory("@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy");
+  const initData = ImplFactory.interface.encodeFunctionData("initialize", [await storage.getAddress(), owner.address]);
+  const proxy = await ProxyFactory.deploy(await impl.getAddress(), initData);
+  await proxy.waitForDeployment();
+  core = await ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", await proxy.getAddress());
     await (await storage.setCore(await core.getAddress())).wait();
 
     const Harness = await ethers.getContractFactory("RefundLogicHarness");

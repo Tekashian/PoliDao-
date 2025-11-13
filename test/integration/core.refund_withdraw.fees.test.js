@@ -77,17 +77,24 @@ describe("PoliDaoCore: donate/withdraw/refund rules + fees", function () {
     storage = await Storage.connect(owner).deploy();
     await storage.waitForDeployment();
 
-    // DEPLOY Core bez linkowania (biblioteki mają internal funkcje)
-    const Core = await ethers.getContractFactory("PoliDaoCore");
-    const storageAddr = await storage.getAddress();
-    const routerAddr = await routerEOA.getAddress();
-    core = await Core.connect(owner).deploy(storageAddr, routerAddr);
-    await core.waitForDeployment();
+  // DEPLOY Core (UUPS): implementation + ERC1967Proxy with initialize(storage, owner)
+  const Impl = await ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable");
+  const impl = await Impl.connect(owner).deploy();
+  await impl.waitForDeployment();
+  const storageAddr = await storage.getAddress();
+  const ownerAddr = await owner.getAddress();
+  const initData = Impl.interface.encodeFunctionData("initialize", [storageAddr, ownerAddr]);
+  const Proxy = await ethers.getContractFactory("@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy");
+  const proxy = await Proxy.connect(owner).deploy(await impl.getAddress(), initData);
+  await proxy.waitForDeployment();
+  core = await ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", await proxy.getAddress());
 
-    await (await storage.connect(owner).setCore(await core.getAddress())).wait();
+  await (await storage.connect(owner).setCore(await core.getAddress())).wait();
     await (await storage.connect(owner).addWhitelistedToken(await usdc.getAddress())).wait();
 
     await (await core.connect(owner).setFeeRecipient(await feeWallet.getAddress())).wait();
+  // Set router so onlyRouter modifiers allow routerEOA
+  await (await core.connect(owner).setRouterContract(await routerEOA.getAddress())).wait();
 
     await (await usdc.connect(owner).transfer(await donor1.getAddress(), toUnits(100_000))).wait();
     await (await usdc.connect(owner).transfer(await donor2.getAddress(), toUnits(100_000))).wait();

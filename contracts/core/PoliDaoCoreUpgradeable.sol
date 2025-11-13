@@ -20,8 +20,36 @@ import "../storage/PoliDaoStorage.sol";
 
 /**
  * @title PoliDaoCoreUpgradeable
- * @notice UUPS-upgradeable Core coordinating between storage, extensions, and modules
- * @dev Initializable + UUPS + Ownable (upgradeable). Storage layout must remain compatible across upgrades.
+ * @notice The production Core for PoliDAO, deployed behind an ERC1967 proxy (UUPS pattern).
+ * @dev
+ *  Design overview
+ *  - This Core is a thin orchestrator that coordinates between Storage (authoritative state),
+ *    stateless libraries (Fundraiser/Withdraw/Refund), the Router (user entry), and feature Modules.
+ *  - Upgradeability: UUPS via OpenZeppelin. The proxy delegates to an implementation that can be
+ *    upgraded by the owner. The initialize() function replaces constructors.
+ *  - Storage layout: DO NOT re-order or delete existing state variables. Only append new ones and
+ *    adjust the __gap accordingly to preserve storage compatibility across upgrades.
+ *  - Authorization model:
+ *      owner()         — upgrade and admin setters
+ *      onlyRouter      — enforced entry for certain flows (createFor/donateFrom/withdrawFor/...)
+ *      Storage ACL     — storageContract.isContractAuthorized(address)
+ *  - Security:
+ *      ReentrancyGuard is used for mutating flows; SafeERC20 protects ERC20 transfers;
+ *      onlyRouter prevents unmediated actions; refunds are blocked once withdrawals started.
+ *  - Fees:
+ *      Donation fee (BPS) is applied on inbound donations. Withdraw fees (success/flexible) are
+ *      applied in WithdrawLogic and accounted in Storage.
+ *
+ *  Frontend integration
+ *  - The stable address your FE talks to is the PROXY. Always use the upgradeable ABI.
+ *  - version() is exposed for easy cache busting on ABI/impl updates.
+ *  - Typical FE flow goes through the Router; direct Core calls remain available when appropriate.
+ *
+ *  Upgrade notes and hazards
+ *  - Never introduce constructors; initialization logic must live in initialize().
+ *  - Keep modifiers and auth semantics stable; changing onlyRouter/onlyAuthorized can break Router/Modules.
+ *  - Consider emitting explicit upgrade events in owner-controlled flows if future analytics need them.
+ *
  * @custom:version 1.0.0-upgradeable
  */
 contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
@@ -89,6 +117,12 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     event ModuleUpgradesLocked(address indexed locker);
 
     // ========== INITIALIZER ==========
+    /**
+     * @notice Initializes the Core implementation behind the proxy.
+     * @param _storageContract Deployed Storage contract address that holds campaign state.
+     * @param initialOwner Address that will own upgrade authority and admin setters.
+     * @dev Must be called exactly once through the proxy. Subsequent calls revert by OZ initializer.
+     */
     function initialize(address _storageContract, address initialOwner) public initializer {
         require(_storageContract != address(0), "PoliDaoCore: Invalid storage contract");
         require(initialOwner != address(0), "PoliDaoCore: Invalid owner");
@@ -103,9 +137,15 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== UUPS AUTH ==========
+    /**
+     * @dev UUPS authorization hook — only the owner can upgrade the implementation.
+     */
     function _authorizeUpgrade(address /*newImplementation*/ ) internal override onlyOwner {}
 
     // Public version for FE cache invalidation
+    /**
+     * @notice Human-readable implementation version for tooling and cache invalidation.
+     */
     function version() external pure returns (string memory) {
         return "1.0.0-upgradeable";
     }
@@ -136,6 +176,10 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== ADMIN / CONFIG ==========
+    /**
+     * @notice Sets the optional Extensions contract used by some router flows.
+     * @param _extensionsContract Address of the extensions contract (must be a contract).
+     */
     function setExtensionsContract(address _extensionsContract) external onlyOwner {
         require(_extensionsContract != address(0), "PoliDaoCore: Invalid extensions contract");
         require(_hasCode(_extensionsContract), "PoliDaoCore: Extensions must be a contract");
@@ -144,6 +188,10 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         emit ExtensionsContractUpdated(old, _extensionsContract);
     }
 
+    /**
+     * @notice Sets the Router contract allowed to call router-only methods.
+     * @param _router Router address.
+     */
     function setRouterContract(address _router) external onlyOwner {
         require(_router != address(0), "PoliDaoCore: invalid router");
         address old = routerContract;
@@ -152,6 +200,11 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== CORE BUSINESS LOGIC ==========
+    /**
+     * @notice Creates a fundraiser for msg.sender.
+     * @param data Structured fundraiser parameters.
+     * @return fundraiserId Newly created fundraiser ID.
+     */
     function createFundraiser(IPoliDaoStructs.FundraiserCreationData memory data)
         external
         whenNotPaused
@@ -174,6 +227,12 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         return fundraiserId;
     }
 
+    /**
+     * @notice Router-only variant to create a fundraiser on behalf of a creator.
+     * @param creator Beneficiary/creator address.
+     * @param data Structured fundraiser parameters.
+     * @return fundraiserId Newly created fundraiser ID.
+     */
     function createFundraiserFor(
         address creator,
         IPoliDaoStructs.FundraiserCreationData memory data
@@ -197,6 +256,11 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         return fundraiserId;
     }
 
+    /**
+     * @notice Extends a fundraiser’s endDate by additional days.
+     * @param fundraiserId Target fundraiser ID.
+     * @param additionalDays Number of days to add.
+     */
     function extendFundraiser(uint256 fundraiserId, uint256 additionalDays)
         external
         whenNotPaused
@@ -209,6 +273,12 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         storageContract.updateFundraiser(fundraiserId, f);
     }
 
+    /**
+     * @notice Donates tokens to a fundraiser using msg.sender’s allowance.
+     * @param fundraiserId Target fundraiser ID.
+     * @param amount Amount to donate (token units).
+     * @dev Applies donationFeeBps if configured; forwards net to Storage and records donation.
+     */
     function donate(uint256 fundraiserId, uint256 amount)
         external
         whenNotPaused
@@ -232,6 +302,12 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         emit DonationMade(fundraiserId, msg.sender, token, net, fr.raisedAmount);
     }
 
+    /**
+     * @notice Router-only donation using donor’s allowance (e.g., after permit).
+     * @param fundraiserId Target fundraiser ID.
+     * @param donor Donor address whose funds are transferred via SafeERC20.
+     * @param amount Amount to donate.
+     */
     function donateFrom(uint256 fundraiserId, address donor, uint256 amount)
         external
         whenNotPaused
@@ -254,6 +330,12 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         emit DonationMade(fundraiserId, donor, token, net, fr.raisedAmount);
     }
 
+    /**
+     * @notice Router-only batch donation helper.
+     * @param donor Donor address.
+     * @param fundraiserIds Parallel array of fundraiser IDs.
+     * @param amounts Parallel array of donation amounts.
+     */
     function batchDonateFrom(address donor, uint256[] calldata fundraiserIds, uint256[] calldata amounts)
         external
         whenNotPaused
@@ -281,12 +363,23 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== EXTENSIONS / MODULES ==========
+    /**
+     * @notice Router-only opaque delegate to the Extensions contract.
+     * @param data Encoded function selector and args for Extensions.
+     * @return result Raw return data.
+     */
     function delegateToExtensions(bytes calldata data) external onlyRouter returns (bytes memory result) {
         require(extensionsContract != address(0), "PoliDaoCore: Extensions contract not set");
         bytes memory returnData = extensionsContract.functionCall(data);
         return returnData;
     }
 
+    /**
+     * @notice Router-only opaque call into a mapped Module.
+     * @param moduleKey keccak256 label of the Module (e.g., keccak256("GOVERNANCE")).
+     * @param data Encoded function selector and args for the Module.
+     * @return result Raw return data.
+     */
     function callModule(bytes32 moduleKey, bytes calldata data) external onlyRouter returns (bytes memory result) {
         address module = storageContract.modules(moduleKey);
         require(module != address(0), "PoliDaoCore: Module not set");
@@ -294,6 +387,12 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         return returnData;
     }
 
+    /**
+     * @notice Read-only static call into a mapped Module.
+     * @param moduleKey Module key.
+     * @param data Encoded selector and args.
+     * @return result Raw return data.
+     */
     function staticCallModule(bytes32 moduleKey, bytes calldata data) external view returns (bytes memory result) {
         address module = storageContract.modules(moduleKey);
         require(module != address(0), "PoliDaoCore: Module not set");
@@ -302,6 +401,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== VIEWS ==========
+    /**
+     * @notice Backward compatible basic fundraiser info accessor.
+     */
     function getFundraiserBasicInfo(uint256 fundraiserId)
         external
         view
@@ -326,10 +428,16 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         );
     }
 
+    /**
+     * @notice Total number of created fundraisers.
+     */
     function getFundraiserCount() external view returns (uint256) {
         return storageContract.fundraiserCounter();
     }
 
+    /**
+     * @notice Backward compatible detailed fundraiser metadata accessor.
+     */
     function getFundraiserDetails(uint256 fundraiserId)
         external
         view
@@ -366,6 +474,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         suspensionReason = "";
     }
 
+    /**
+     * @notice Suspends a fundraiser (authorized actors only), emitting an audit event.
+     */
     function suspendFundraiser(uint256 fundraiserId, string calldata reason)
         external
         whenNotPaused
@@ -382,10 +493,16 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         emit FundraiserSuspended(fundraiserId, msg.sender, reason, block.timestamp);
     }
 
+    /**
+     * @notice Returns the donation amount recorded for a donor in a fundraiser.
+     */
     function getDonationAmount(uint256 fundraiserId, address donor) external view returns (uint256) {
         return storageContract.donations(fundraiserId, donor);
     }
 
+    /**
+     * @notice Router-only: delegates an extension operation to Extensions.
+     */
     function extendFundraiserFor(uint256 fundraiserId, address requester, uint256 additionalDays)
         external
         whenNotPaused
@@ -398,6 +515,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         );
     }
 
+    /**
+     * @notice Router-only: delegates location update to Extensions.
+     */
     function updateLocationFor(uint256 fundraiserId, address requester, string calldata newLocation)
         external
         whenNotPaused
@@ -411,6 +531,10 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== WITHDRAW / REFUND ==========
+    /**
+     * @notice Creator-initiated withdrawal. Applies fees and records in Storage.
+     * @param fundraiserId Target fundraiser.
+     */
     function withdrawFunds(uint256 fundraiserId) external whenNotPaused nonReentrant {
         (
             address creator,
@@ -434,6 +558,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         emit FundsWithdrawn(fundraiserId, creator, token, paidNet);
     }
 
+    /**
+     * @notice Router-only withdrawal on behalf of requester.
+     */
     function withdrawFundsFor(uint256 fundraiserId, address requester)
         external
         whenNotPaused
@@ -462,10 +589,16 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         emit FundsWithdrawn(fundraiserId, creator, token, paidNet);
     }
 
+    /**
+     * @notice Deprecated no-op. Refunds are managed per-donor via refundFor().
+     */
     function refund(uint256) external whenNotPaused nonReentrant onlyAuthorizedOrOwner {
         revert RefundNotAllowed();
     }
 
+    /**
+     * @notice Router-only donor refund. Blocks if withdrawals already started.
+     */
     function refundFor(uint256 fundraiserId, address donor)
         external
         whenNotPaused
@@ -479,6 +612,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== MODULE MGMT ==========
+    /**
+     * @notice One-time bulk set of core module addresses.
+     */
     function setModules(
         address _governance,
         address _media,
@@ -506,6 +642,11 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         analyticsModule = _analytics;
     }
 
+    /**
+     * @notice Upgrades or disables a single Module by label. Also attempts to mirror Storage mapping and ACL.
+     * @param label Human-readable label (e.g., "GOVERNANCE").
+     * @param newAddr New implementation address or zero to disable.
+     */
     function upgradeModule(string calldata label, address newAddr) external onlyOwner nonReentrant {
         require(!_moduleUpgradesLocked, "PoliDaoCore: module upgrades locked");
         if (bytes(label).length == 0) revert InvalidInput();
@@ -530,6 +671,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         }
     }
 
+    /**
+     * @notice Permanently locks further module upgrades.
+     */
     function lockModuleUpgrades() external onlyOwner nonReentrant {
         require(!_moduleUpgradesLocked, "PoliDaoCore: already locked");
         _moduleUpgradesLocked = true;
@@ -537,6 +681,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== STATUS / CONFIG ==========
+    /**
+     * @notice Returns current wiring status for basic health checks.
+     */
     function getContractStatus()
         external
         view
@@ -555,6 +702,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         );
     }
 
+    /**
+     * @notice Validates that required components are configured and Core is authorized in Storage.
+     */
     function validateConfiguration() external view returns (bool isValid, string memory missingComponent) {
         if (extensionsContract == address(0)) return (false, "Extensions contract not set");
         if (routerContract == address(0)) return (false, "Router contract not set");
@@ -563,6 +713,9 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== HELPERS / SETTERS ==========
+    /**
+     * @dev Resolves a module address prioritizing local overrides, falling back to Storage mapping.
+     */
     function _resolveModule(string memory moduleKey) internal view returns (address) {
         bytes32 h = keccak256(bytes(moduleKey));
         if (h == keccak256("GOVERNANCE") && governanceModule != address(0)) return governanceModule;
@@ -574,19 +727,34 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
         return storageContract.modules(h);
     }
 
+    /**
+     * @dev Cheap contract code existence check.
+     */
     function _hasCode(address a) internal view returns (bool) {
         return a.code.length > 0;
     }
 
+    /**
+     * @notice Returns the address that must be approved for token transfers (this Core/proxy).
+     */
     function spenderAddress() external view returns (address) { return address(this); }
 
+    /**
+     * @notice Sets fee recipient for donation and withdraw commissions.
+     */
     function setFeeRecipient(address _feeRecipient) external onlyOwner { feeRecipient = _feeRecipient; }
 
+    /**
+     * @notice Sets donation fee in BPS (0..10000).
+     */
     function setDonationFeeBps(uint16 _bps) external onlyOwner {
         require(_bps <= 10_000, "bps>100%");
         donationFeeBps = _bps;
     }
 
+    /**
+     * @notice Sets withdraw fees (success and flexible) in BPS (each 0..10000).
+     */
     function setWithdrawFeesBps(uint16 _successBps, uint16 _flexibleBps) external onlyOwner {
         require(_successBps <= 10_000 && _flexibleBps <= 10_000, "bps>100%");
         successWithdrawFeeBps = _successBps;
@@ -594,5 +762,6 @@ contract PoliDaoCoreUpgradeable is OwnableUpgradeable, PausableUpgradeable, Reen
     }
 
     // ========== STORAGE GAPS ==========
-    uint256[45] private __gap; // reserve space for future vars (after accounting for existing layout)
+    // Storage gap to allow adding variables in future upgrades without shifting the storage layout.
+    uint256[45] private __gap; // adjust down when you append new variables above
 }

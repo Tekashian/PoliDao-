@@ -7,11 +7,9 @@ const path = require("path");
 const CONTRACTS = [
   // Core (prefer UUPS)
   "core/PoliDaoCoreUpgradeable.sol/PoliDaoCoreUpgradeable.json|AS:PoliDaoCore.abi.json",
-  "core/PoliDaoCore.sol/PoliDaoCore.json|AS:PoliDaoCore.abi.json",
   "router/PoliDaoRouter.sol/PoliDaoRouter.json",
   "modules/PoliDaoMedia.sol/PoliDaoMedia.json",
   "modules/PoliDaoUpdates.sol/PoliDaoUpdates.json",
-  "modules/PoliDaoRefunds.sol/PoliDaoRefunds.json",
   "modules/PoliDaoGovernance.sol/PoliDaoGovernance.json",
   "modules/PoliDaoAnalytics.sol/PoliDaoAnalytics.json",
   "modules/PoliDaoSecurity.sol/PoliDaoSecurity.json",

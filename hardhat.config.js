@@ -10,11 +10,10 @@ const path = require("path");
 const { SEPOLIA_RPC_URL, PRIVATE_KEY, ETHERSCAN_API_KEY } = process.env;
 const pk = PRIVATE_KEY ? (PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : `0x${PRIVATE_KEY}`) : undefined;
 
-// Zadania: verify Core z deployments/<network>.json (ctor: storage, router)
-task("verify-core", "Verify PoliDaoCore using deployments/<network>.json")
+// UUPS verification tasks (implementation + proxy)
+// verify-core-uups: verifies implementation and proxy using deployments/<network>.json
+task("verify-core-uups", "Verify UUPS Core (implementation + proxy) using deployments/<network>.json")
   .addOptionalParam("file", "Deployments JSON path", undefined)
-  .addOptionalParam("donationlib", "DonationLogic library address", undefined)
-  .addOptionalParam("withdrawlib", "WithdrawLogic library address", undefined)
   .setAction(async (args, hre) => {
     const net = hre.network.name;
     const fp = args.file
@@ -22,51 +21,66 @@ task("verify-core", "Verify PoliDaoCore using deployments/<network>.json")
       : path.join(process.cwd(), "deployments", `${net}.json`);
     if (!fs.existsSync(fp)) throw new Error(`Deployments file not found: ${fp}`);
     const j = JSON.parse(fs.readFileSync(fp, "utf8"));
-    const core = j.core;
-    const storage = j.storage;
-    const router = j.router;
-    if (!core || !storage || !router) throw new Error(`Missing core/storage/router in ${fp}`);
+    const proxy = j.core;
+    const impl = j.core_impl || (j.core_impl_history && j.core_impl_history[j.core_impl_history.length - 1]);
+    if (!proxy) throw new Error(`Missing core proxy address in ${fp}`);
+    if (!impl) throw new Error(`Missing core implementation address in ${fp}`);
 
     await hre.run("compile");
 
-    const libraries = {};
-    if (args.donationlib) libraries["DonationLogic"] = args.donationlib;
-    if (args.withdrawlib) libraries["WithdrawLogic"] = args.withdrawlib;
-
-    // Prefer ctor args zapisane przy deployu; fallback do [storage, router] tylko jeśli brak
-    const ctorArgs = (j.args && Array.isArray(j.args.core)) ? j.args.core : [storage, router];
+    // Verify implementation
     await hre.run("verify:verify", {
-      address: core,
-      constructorArguments: ctorArgs,
-      contract: "contracts/core/PoliDaoCore.sol:PoliDaoCore",
-      libraries: Object.keys(libraries).length ? libraries : undefined,
+      address: impl,
+      constructorArguments: [],
+      contract: "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable",
     });
-    console.log("Verified Core:", core);
+    console.log("Verified Core Implementation:", impl);
+
+    // Verify proxy with (implementation, initData)
+    try {
+      const ImplIface = (await hre.ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable")).interface;
+      const coreArgs = (j.args && Array.isArray(j.args.core)) ? j.args.core : [j.storage, j.owner || j.router];
+      const initData = ImplIface.encodeFunctionData("initialize", coreArgs);
+      await hre.run("verify:verify", {
+        address: proxy,
+        constructorArguments: [impl, initData],
+        contract: "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy",
+      });
+      console.log("Verified Core Proxy:", proxy);
+    } catch (e) {
+      console.warn("Verify proxy failed:", e?.message || e);
+    }
   });
 
-task("verify-core-args", "Verify PoliDaoCore with explicit args (storage, router)")
-  .addParam("core", "Core address")
-  .addParam("storage", "Storage address (ctor arg #1)")
-  .addOptionalParam("router", "Router address (ctor arg #2)")
-  .addOptionalParam("owner", "Owner address (ctor arg #2 when Router not passed)")
-  .addOptionalParam("donationlib", "DonationLogic library address", undefined)
-  .addOptionalParam("withdrawlib", "WithdrawLogic library address", undefined)
+// verify-core-uups-impl: verify implementation only
+task("verify-core-uups-impl", "Verify UUPS Core implementation")
+  .addParam("impl", "Implementation address")
   .setAction(async (args, hre) => {
     await hre.run("compile");
-
-    const libraries = {};
-    if (args.donationlib) libraries["DonationLogic"] = args.donationlib;
-    if (args.withdrawlib) libraries["WithdrawLogic"] = args.withdrawlib;
-
-    const ctor2 = args.owner || args.router;
-    if (!ctor2) throw new Error("Provide either --router or --owner for ctor arg #2");
     await hre.run("verify:verify", {
-      address: args.core,
-      constructorArguments: [args.storage, ctor2],
-      contract: "contracts/core/PoliDaoCore.sol:PoliDaoCore",
-      libraries: Object.keys(libraries).length ? libraries : undefined,
+      address: args.impl,
+      constructorArguments: [],
+      contract: "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable",
     });
-    console.log("Verified Core:", args.core);
+    console.log("Verified Core Implementation:", args.impl);
+  });
+
+// verify-core-uups-proxy: verify proxy only with explicit initialization args
+task("verify-core-uups-proxy", "Verify UUPS Core proxy with init args")
+  .addParam("proxy", "Proxy address")
+  .addParam("impl", "Implementation address used in constructor")
+  .addParam("storage", "Storage address (initialize arg #1)")
+  .addParam("owner", "Owner address (initialize arg #2)")
+  .setAction(async (args, hre) => {
+    await hre.run("compile");
+    const ImplIface = (await hre.ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable")).interface;
+    const initData = ImplIface.encodeFunctionData("initialize", [args.storage, args.owner]);
+    await hre.run("verify:verify", {
+      address: args.proxy,
+      constructorArguments: [args.impl, initData],
+      contract: "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy",
+    });
+    console.log("Verified Core Proxy:", args.proxy);
   });
 
 /** @type import('hardhat/config').HardhatUserConfig */
