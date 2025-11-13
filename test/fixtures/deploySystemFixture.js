@@ -19,14 +19,10 @@ async function deployLibraries() {
   };
 }
 
-async function getCoreFactory(libs) {
-  return ethers.getContractFactory("PoliDaoCore", {
-    libraries: {
-      DonationLogic: libs.DonationLogic,
-      RefundLogic: libs.RefundLogic,
-      WithdrawLogic: libs.WithdrawLogic,
-    },
-  });
+async function getUpgradeableCoreFactory(libs) {
+  // CoreUpgradeable bytecode has no external link references in OZ v5 layout;
+  // obtain factory without library linking to avoid HardhatEthersError.
+  return ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable");
 }
 
 async function deployRouter(optionalCoreAddress = ethers.ZeroAddress) {
@@ -56,42 +52,23 @@ async function deploySecurityModule(core, owner) {
   }
 }
 
-async function deployCoreWithLibraries(storage, router, libs) {
+async function deployCoreUUPSWithLibraries(storage, owner, libs) {
   try {
-    const CoreFactory = await getCoreFactory(libs);
-    const artifact = await hre.artifacts.readArtifact("PoliDaoCore");
-    const ctor = (artifact.abi || []).find((e) => e.type === "constructor");
-    const storageAddr = await storage.getAddress();
-    const routerAddr = router ? await router.getAddress() : ethers.ZeroAddress;
+    const CoreFactory = await getUpgradeableCoreFactory(libs);
+    const impl = await CoreFactory.deploy();
+    await impl.waitForDeployment();
+    const implAddr = await impl.getAddress();
 
-    const candidates = [];
-    if (ctor && Array.isArray(ctor.inputs)) {
-      const names = ctor.inputs.map((i) => (i.name || "").toLowerCase());
-      if (ctor.inputs.length === 2 && ctor.inputs[0].type === "address" && ctor.inputs[1].type === "address") {
-        candidates.push([storageAddr, routerAddr]);
-      } else if (ctor.inputs.length === 1 && ctor.inputs[0].type === "address") {
-        if (names[0].includes("stor")) candidates.push([storageAddr]);
-        else if (names[0].includes("rout")) candidates.push([routerAddr]);
-        else candidates.push([storageAddr], [routerAddr]);
-      } else if (ctor.inputs.length === 0) {
-        candidates.push([]);
-      }
-    }
-    candidates.push([storageAddr, routerAddr], [storageAddr], []);
+    const initData = CoreFactory.interface.encodeFunctionData("initialize", [await storage.getAddress(), owner.address]);
+    const ProxyFactory = await ethers.getContractFactory("@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy");
+    const proxy = await ProxyFactory.deploy(implAddr, initData);
+    await proxy.waitForDeployment();
 
-    for (const args of candidates) {
-      try {
-        const core = await CoreFactory.deploy(...args);
-        await core.waitForDeployment();
-        return core;
-      } catch {
-        // try next
-      }
-    }
+    const core = await ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", await proxy.getAddress());
+    return { core, impl, proxy };
   } catch {
-    // ignore
+    return null;
   }
-  return null;
 }
 
 async function safeCallWrite(contract, fn, args = []) {
@@ -196,22 +173,24 @@ async function deploySystemFixture() {
   console.log("✅ PoliDaoStorage deployed successfully");
 
   const libs = await deployLibraries();
-  const router = await deployRouter(ethers.ZeroAddress);
 
-  let core = await deployCoreWithLibraries(storage, router, libs);
-  if (!core) {
+  // Deploy upgradeable Core (UUPS + proxy)
+  let coreBundle = await deployCoreUUPSWithLibraries(storage, owner, libs);
+  let core;
+  if (!coreBundle) {
     console.warn("⚠️ PoliDaoCore deployment failed, using CoreMock");
     const CoreMock = await ethers.getContractFactory("CoreMock");
     core = await CoreMock.deploy(await storage.getAddress());
     await core.waitForDeployment();
   } else {
-    console.log("✅ PoliDaoCore deployed successfully");
+    core = coreBundle.core;
+    console.log("✅ PoliDaoCoreUpgradeable (proxy) deployed successfully");
   }
 
   await (await storage.setCore(await core.getAddress())).wait();
-  if (router) {
-    await safeCallWrite(router, "setCore", [await core.getAddress()]);
-  }
+
+  // Router after Core so we can pass the proxy address to ctor
+  const router = await deployRouter(await core.getAddress());
 
   let web3 = null;
   try {

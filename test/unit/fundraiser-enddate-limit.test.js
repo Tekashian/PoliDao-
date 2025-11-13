@@ -21,9 +21,17 @@ describe("Fundraiser endDate limit (MAX_FUTURE_DATE)", function () {
 
     await storage.connect(owner).addWhitelistedToken(token.target);
 
-    const Core = await ethers.getContractFactory("PoliDaoCore");
-    core = await Core.deploy(await storage.getAddress(), owner.address);
-    await core.waitForDeployment();
+    // Deploy upgradeable Core (UUPS): impl + proxy + initialize (no external library linking required)
+    const CoreImplFactory = await ethers.getContractFactory(
+      "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable"
+    );
+    const impl = await CoreImplFactory.deploy();
+    await impl.waitForDeployment();
+    const initData = CoreImplFactory.interface.encodeFunctionData("initialize", [await storage.getAddress(), owner.address]);
+    const ProxyFactory = await ethers.getContractFactory("@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy");
+    const proxy = await ProxyFactory.deploy(await impl.getAddress(), initData);
+    await proxy.waitForDeployment();
+    core = await ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", await proxy.getAddress());
 
     await storage.connect(owner).setCore(await core.getAddress());
   });

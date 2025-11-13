@@ -14,9 +14,26 @@ describe("Flexible fundraiser - single withdraw & refund block", () => {
     storage = await Storage.deploy();
     await storage.connect(owner).addWhitelistedToken(token.target);
 
-    const Core = await ethers.getContractFactory("PoliDaoCore");
-    core = await Core.deploy(storage.target, owner.address);
-    await storage.connect(owner).authorizeContract(core.target);
+    // Deploy upgradeable Core (UUPS): impl + proxy + initialize (no external library linking required)
+    const CoreImplFactory = await ethers.getContractFactory(
+      "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable"
+    );
+    const impl = await CoreImplFactory.deploy();
+    await impl.waitForDeployment();
+    const initData = CoreImplFactory.interface.encodeFunctionData("initialize", [storage.target, owner.address]);
+    const ProxyFactory = await ethers.getContractFactory("@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy");
+    const proxy = await ProxyFactory.deploy(await impl.getAddress(), initData);
+    await proxy.waitForDeployment();
+    core = await ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", await proxy.getAddress());
+  // Bind storage to core and authorize if required by guards
+  await storage.connect(owner).setCore(core.target);
+  await storage.connect(owner).authorizeContract(core.target);
+
+  // Deploy Router and bind to Core for onlyRouter flows (refund path)
+  const Router = await ethers.getContractFactory("PoliDaoRouter");
+  const router = await Router.deploy(await core.getAddress());
+  await router.waitForDeployment();
+  await core.connect(owner).setRouterContract(await router.getAddress());
 
     await core.connect(owner).setFeeRecipient(feeRecipient.address);
     await core.connect(owner).setDonationFeeBps(0);
@@ -56,7 +73,10 @@ describe("Flexible fundraiser - single withdraw & refund block", () => {
 
     await expect(core.connect(creator).withdrawFunds(fid)).to.be.reverted;
 
-    await expect(core.connect(owner).refundFor(fid, donor.address))
+    // Refund must be called through Router and should be blocked after withdrawals start
+    const Router = await ethers.getContractFactory("PoliDaoRouter");
+    const router = Router.attach(await core.routerContract());
+    await expect(router.connect(donor).claimRefund(fid))
       .to.be.revertedWith("PoliDaoCore: withdrawals started");
   });
 });

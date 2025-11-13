@@ -13,8 +13,19 @@ before(async () => {
   storage = await Storage.deploy();
   await storage.connect(owner).addWhitelistedToken(token.target);
 
-  const Core = await ethers.getContractFactory("PoliDaoCore");
-  core = await Core.deploy(storage.target, owner.address);
+  // Deploy upgradeable Core (UUPS): impl + proxy + initialize (no external library linking required)
+  const CoreImplFactory = await ethers.getContractFactory(
+    "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable"
+  );
+  const impl = await CoreImplFactory.deploy();
+  await impl.waitForDeployment();
+  const initData = CoreImplFactory.interface.encodeFunctionData("initialize", [storage.target, owner.address]);
+  const ProxyFactory = await ethers.getContractFactory("@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy");
+  const proxy = await ProxyFactory.deploy(await impl.getAddress(), initData);
+  await proxy.waitForDeployment();
+  core = await ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", await proxy.getAddress());
+  // Bind storage to core and authorize if required by guards
+  await storage.connect(owner).setCore(core.target);
   await storage.connect(owner).authorizeContract(core.target);
 
   // fee setup

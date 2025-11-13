@@ -29,6 +29,9 @@ const REDEPLOY_LIST = (process.env.REDEPLOY_LIST || "")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
+// NEW: switch to deploy Core as UUPS proxy (implementation + ERC1967Proxy)
+const USE_UUPS_CORE = process.env.USE_UUPS_CORE === "1";
+
 // NEW: keep track of deployed libraries (name -> address)
 const deployedLibs = {};
 
@@ -412,10 +415,57 @@ async function main() {
 
   // Kolejność i argumenty:
 
-  // Core – zapewnij biblioteki jeśli wymagane (np. DonationLogic/WithdrawLogic/FundraiserLogic)
-  const coreLibs = await ensureLibrariesFor("PoliDaoCore");
+  // Core + Storage
   const storage = await attachOrDeploy("Storage", "PoliDaoStorage", [], {}, previous);
-  const core = await attachOrDeploy("Core", "PoliDaoCore", [storage.addr, owner], { libraries: coreLibs }, previous);
+
+  let core; // proxy or classic
+  let coreImpl; // only for UUPS path
+  if (USE_UUPS_CORE) {
+    // Ensure libraries for upgradeable Core
+    const coreUpLibs = await ensureLibrariesFor("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable");
+
+    const wantRedeployProxy = FORCE_REDEPLOY || REDEPLOY_LIST.includes("core");
+    const wantRedeployImpl = FORCE_REDEPLOY || REDEPLOY_LIST.includes("core_impl") || wantRedeployProxy;
+
+    // Reuse existing proxy if present and no force
+    const prevProxyAddr = previous?.core && hre.ethers.isAddress(previous.core) ? previous.core : undefined;
+    const prevImplAddr = previous?.core_impl && hre.ethers.isAddress(previous.core_impl) ? previous.core_impl : undefined;
+
+    // Deploy implementation (always when forced or when none exists)
+    if (!prevImplAddr || wantRedeployImpl) {
+      const ImplFactory = await hre.ethers.getContractFactory(
+        "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable",
+        { libraries: coreUpLibs }
+      );
+      const implTx = await ImplFactory.deploy();
+      const implC = await implTx.waitForDeployment();
+      const implAddr = await implC.getAddress();
+      coreImpl = { name: "CoreImpl", factoryName: "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", addr: implAddr, args: [], libraries: coreUpLibs, txHash: implTx.deploymentTransaction().hash, fresh: true, c: implC };
+    } else {
+      const ImplFactory = await hre.ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable");
+      const implC = await ImplFactory.attach(prevImplAddr);
+      coreImpl = { name: "CoreImpl", factoryName: "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", addr: prevImplAddr, args: [], libraries: coreUpLibs, txHash: previous?.txs?.core_impl, fresh: false, c: implC };
+    }
+
+    // Deploy or reuse proxy
+    if (!prevProxyAddr || wantRedeployProxy) {
+      const ImplIface = (await hre.ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable")).interface;
+      const initData = ImplIface.encodeFunctionData("initialize", [storage.addr, owner]);
+
+      const ProxyFactory = await hre.ethers.getContractFactory("@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy");
+      const proxyTx = await ProxyFactory.deploy(coreImpl.addr, initData);
+      const proxyC = await proxyTx.waitForDeployment();
+      const proxyAddr = await proxyC.getAddress();
+      core = { name: "Core", factoryName: "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", addr: proxyAddr, args: [storage.addr, owner], libraries: coreUpLibs, txHash: proxyTx.deploymentTransaction().hash, fresh: true, c: await hre.ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", proxyAddr) };
+    } else {
+      const proxyAddr = prevProxyAddr;
+      core = { name: "Core", factoryName: "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", addr: proxyAddr, args: previous?.args?.core || [storage.addr, owner], libraries: coreUpLibs, txHash: previous?.txs?.core, fresh: false, c: await hre.ethers.getContractAt("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", proxyAddr) };
+    }
+  } else {
+    // Classic Core
+    const coreLibs = await ensureLibrariesFor("PoliDaoCore");
+    core = await attachOrDeploy("Core", "PoliDaoCore", [storage.addr, owner], { libraries: coreLibs }, previous);
+  }
 
   // Router
   const router = await attachOrDeploy("Router", "contracts/router/PoliDaoRouter.sol:PoliDaoRouter", [core.addr], {}, previous);
@@ -444,7 +494,7 @@ async function main() {
   const web3 = await attachOrDeploy("Web3", "PoliDaoWeb3", [], { libraries: web3Libs }, previous);
 
   // NEW: summarize whether anything was newly deployed
-  const all = [storage, core, router, extension, media, updates, governance, analytics, security, web3];
+  const all = [storage, core, router, extension, media, updates, governance, analytics, security, web3, ...(coreImpl ? [coreImpl] : [])];
   const freshCount = all.filter((x) => x?.fresh).length;
   if (freshCount === 0) {
     console.log("No new deployments performed (reused previous addresses).");
@@ -506,6 +556,34 @@ async function main() {
   const modules = [media, updates, governance, analytics, security, web3].filter(Boolean);
   for (const m of modules) {
     await maybeCall(m.c, "setRouter", [router.addr]);
+  }
+
+  // Auto-rewire modules' core reference when Core is freshly deployed and module was reused
+  if (coreWasFresh) {
+    console.log("Core was freshly deployed -> attempting to rewire modules to new Core address...");
+    for (const m of modules) {
+      try {
+        if (m.fresh) {
+          // freshly deployed module is expected to be wired in its own constructor or elsewhere
+          console.log(`Module ${m.name}: fresh deploy, skipping explicit setCore`);
+          continue;
+        }
+        // detect optional coreFrozen flag to avoid revert
+        let frozen = false;
+        try {
+          if (typeof m.c.coreFrozen === "function") {
+            frozen = await m.c.coreFrozen();
+          }
+        } catch {}
+        if (frozen) {
+          console.warn(`Module ${m.name}: coreFrozen=true -> skipping setCore(${core.addr})`);
+          continue;
+        }
+        await maybeCall(m.c, "setCore", [core.addr]);
+      } catch (e) {
+        console.warn(`Module ${m.name}: setCore wiring failed -> ${e?.message || e}`);
+      }
+    }
   }
 
   // [NEW] Allowlist selektorów dla wywołań przez Router.routeModule/routeModuleStatic
@@ -630,7 +708,29 @@ async function main() {
     }
   }
   if (shouldVerify(storage)) await verify(storage.addr, storage.args, storage.libraries, "PoliDaoStorage", storage.txHash);
-  if (shouldVerify(core)) await verify(core.addr, core.args, core.libraries, "contracts/core/PoliDaoCore.sol:PoliDaoCore", core.txHash);
+  if (USE_UUPS_CORE) {
+    if (coreImpl && shouldVerify(coreImpl)) {
+      await verify(coreImpl.addr, [], coreImpl.libraries, "contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable", coreImpl.txHash);
+    }
+    if (core && shouldVerify(core)) {
+      // Verify proxy with constructor (implementation, initData)
+      try {
+        const ImplIface = (await hre.ethers.getContractFactory("contracts/core/PoliDaoCoreUpgradeable.sol:PoliDaoCoreUpgradeable")).interface;
+        const initData = ImplIface.encodeFunctionData("initialize", core.args);
+        await verify(
+          core.addr,
+          [coreImpl?.addr || previous?.core_impl, initData],
+          undefined,
+          "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy",
+          core.txHash
+        );
+      } catch (e) {
+        console.warn("Verify proxy failed:", e?.message || e);
+      }
+    }
+  } else {
+    if (shouldVerify(core)) await verify(core.addr, core.args, core.libraries, "contracts/core/PoliDaoCore.sol:PoliDaoCore", core.txHash);
+  }
   if (shouldVerify(router)) await verify(router.addr, router.args, router.libraries, "contracts/router/PoliDaoRouter.sol:PoliDaoRouter", router.txHash);
   if (shouldVerify(extension)) await verify(extension.addr, extension.args, extension.libraries, "PoliDaoExtension", extension.txHash);
   if (shouldVerify(media)) await verify(media.addr, media.args, media.libraries, "PoliDaoMedia", media.txHash);
@@ -656,6 +756,9 @@ async function main() {
     analytics: analytics.addr,
     security: security.addr,
     web3: web3.addr,
+    core_previous: previous?.core && previous.core !== core.addr ? previous.core : null,
+    core_impl: USE_UUPS_CORE ? (coreImpl?.addr || previous?.core_impl || null) : null,
+    core_impl_history: USE_UUPS_CORE ? ([...(previous?.core_impl_history || []), ...(coreImpl?.addr ? [coreImpl.addr] : [])]) : undefined,
     // Persist constructor args for reproducible verify
     args: {
       storage: storage.args || [],
@@ -674,6 +777,7 @@ async function main() {
     txs: {
       ...(storage.txHash ? { storage: storage.txHash } : {}),
       ...(core.txHash ? { core: core.txHash } : {}),
+      ...(coreImpl?.txHash ? { core_impl: coreImpl.txHash } : {}),
       ...(router.txHash ? { router: router.txHash } : {}),
       ...(extension.txHash ? { extension: extension.txHash } : {}),
       ...(media.txHash ? { media: media.txHash } : {}),

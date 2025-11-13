@@ -23,9 +23,20 @@ describe("Withdraw flow", function () {
 
     const endDate = (await time.latest()) + 7 * 24 * 60 * 60;
 
-    const tx = await core.connect(creator).createFundraiser(
-      await token.getAddress(), amount, endDate, "Test", "Desc"
-    );
+    const data = {
+      title: "Test",
+      description: "Desc",
+      endDate,
+      fundraiserType: 0,
+      token: await token.getAddress(),
+      goalAmount: amount,
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "",
+      isFlexible: false
+    };
+    const tx = await core.connect(creator).createFundraiser(data);
     const rc = await tx.wait();
     const ev = rc.logs.map(l => { try { return core.interface.parseLog(l); } catch { return null; } })
       .find(x => x && /FundraiserCreated/i.test(x.name));
@@ -33,14 +44,14 @@ describe("Withdraw flow", function () {
 
     // ethers v6: dla przeciążonych funkcji użyj podpisu
     // donate (signaturą, bo są 2 overloady)
-    await (await core.connect(donor)["donate(uint256,address,uint256)"](fundraiserId, await token.getAddress(), amount)).wait();
+  await (await core.connect(donor).donate(fundraiserId, amount)).wait();
 
     await time.increaseTo(endDate + 1);
 
     const balCreatorBefore = await token.balanceOf(creator.address);
     const balStorageBefore = await token.balanceOf(await storage.getAddress());
 
-    await (await core.connect(creator).withdrawFunds(fundraiserId, await token.getAddress())).wait();
+  await (await core.connect(creator).withdrawFunds(fundraiserId)).wait();
 
     const balCreatorAfter = await token.balanceOf(creator.address);
     const balStorageAfter = await token.balanceOf(await storage.getAddress());

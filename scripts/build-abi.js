@@ -3,8 +3,11 @@ const fs = require("fs");
 const path = require("path");
 
 // Lista artefaktów (po kompilacji Hardhat)
+// Preferuj upgradeowalny Core jeśli istnieje; w przeciwnym razie użyj klasycznego
 const CONTRACTS = [
-  "core/PoliDaoCore.sol/PoliDaoCore.json",
+  // Core (prefer UUPS)
+  "core/PoliDaoCoreUpgradeable.sol/PoliDaoCoreUpgradeable.json|AS:PoliDaoCore.abi.json",
+  "core/PoliDaoCore.sol/PoliDaoCore.json|AS:PoliDaoCore.abi.json",
   "router/PoliDaoRouter.sol/PoliDaoRouter.json",
   "modules/PoliDaoMedia.sol/PoliDaoMedia.json",
   "modules/PoliDaoUpdates.sol/PoliDaoUpdates.json",
@@ -30,17 +33,23 @@ function main() {
   const combined = [];
   const sigSet = new Set();
 
-  for (const rel of CONTRACTS) {
+  for (const entry of CONTRACTS) {
+    // allow mapping output filename via suffix "|AS:<file>"
+    const [rel, asOut] = entry.split("|AS:");
     const artifactPath = path.join(artifactsDir, rel);
     if (!fs.existsSync(artifactPath)) {
-      console.warn("Missing artifact (skip):", rel);
+      // Silently skip when upgradeable core is missing; classic core fallback will handle it
+      if (!rel.includes("PoliDaoCoreUpgradeable")) {
+        console.warn("Missing artifact (skip):", rel);
+      }
       continue;
     }
     const json = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
     const abi = json.abi || [];
 
-    // Zapis pojedynczego ABI
-    const shortName = rel.split("/").pop().replace(".json", ".abi.json");
+    // Zapis pojedynczego ABI (z mapowaniem nazwy jeśli podano |AS:)
+    const defaultOut = rel.split("/").pop().replace(".json", ".abi.json");
+    const shortName = asOut || defaultOut;
     fs.writeFileSync(path.join(OUT_DIR, shortName), JSON.stringify(abi, null, 2));
 
     // Dodawanie do combined (unikając duplikatów sygnatur)

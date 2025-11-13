@@ -18,12 +18,33 @@ describe("PoliDaoStorage - unit tests (storage access & config)", function () {
     const token = await Token.deploy("Mock", "MOCK", 18);
     await token.waitForDeployment();
 
-    // zasil Storage w tokeny
-    await (await token.mint(await storage.getAddress(), 1000n)).wait();
+    // whitelist and basic fundraiser setup
+    await (await storage.setFundraiserTokenWhitelist(await token.getAddress(), true)).wait();
+    const now = (await ethers.provider.getBlock("latest")).timestamp;
+    const data = {
+      title: "X",
+      description: "Y",
+      endDate: now + 3600,
+      fundraiserType: 0,
+      token: await token.getAddress(),
+      goalAmount: 1n,
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "",
+      isFlexible: false
+    };
+    const tx = await core.connect(owner).createFundraiser(data);
+    const rc = await tx.wait();
+    const ev = rc.logs.find(l => l.fragment && l.fragment.name === "FundraiserCreated");
+    const fundraiserId = ev.args.fundraiserId;
 
-    // wywołaj jako core (CoreMock lub realny core)
-    await expect(
-      core.connect(owner).withdrawFunds(1, await token.getAddress())
-    ).to.not.be.reverted;
+    // donate to have something to withdraw
+    await (await token.mint(owner.address, 1000n)).wait();
+    await (await token.connect(owner).approve(await core.getAddress(), 500n)).wait();
+    await (await core.connect(owner).donate(fundraiserId, 200n)).wait();
+
+    // withdraw via core path triggers storage.releaseFunds internally
+    await expect(core.connect(owner).withdrawFunds(fundraiserId)).to.not.be.reverted;
   });
 });

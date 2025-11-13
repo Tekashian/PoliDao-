@@ -12,9 +12,22 @@ describe("Whitelist enforcement - creation and donations", function () {
     await token.waitForDeployment();
 
     const endDate = (await time.latest()) + 3600;
+    const data = {
+      title: "T",
+      description: "D",
+      endDate,
+      fundraiserType: 0,
+      token: await token.getAddress(),
+      goalAmount: 1n,
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "",
+      isFlexible: false
+    };
 
     await expect(
-      core.createFundraiser(await token.getAddress(), 0, endDate, "T", "D")
+      core.createFundraiser(data)
     ).to.be.reverted;
   });
 
@@ -31,8 +44,21 @@ describe("Whitelist enforcement - creation and donations", function () {
     }
 
     const endDate = (await time.latest()) + 3600;
+    const data = {
+      title: "T",
+      description: "D",
+      endDate,
+      fundraiserType: 0,
+      token: await token.getAddress(),
+      goalAmount: 1n,
+      initialImages: [],
+      initialVideos: [],
+      metadataHash: "",
+      location: "",
+      isFlexible: false
+    };
     await expect(
-      core.connect(owner).createFundraiser(await token.getAddress(), 0, endDate, "T", "D")
+      core.connect(owner).createFundraiser(data)
     ).to.not.be.reverted;
 
     await (await storage.setFundraiserTokenWhitelist(await token.getAddress(), false)).wait();
@@ -41,7 +67,7 @@ describe("Whitelist enforcement - creation and donations", function () {
     }
 
     await expect(
-      core.connect(owner).createFundraiser(await token.getAddress(), 0, endDate, "T2", "D2")
+      core.connect(owner).createFundraiser(data)
     ).to.be.reverted;
   });
 });
