@@ -46,7 +46,10 @@ contract PoliDaoStorage is Ownable {
     uint256 public constant MAX_EXTENSIONS = 3;
     uint256 public constant MIN_EXTENSION_NOTICE = 1 days;
     uint256 public constant SECONDS_PER_DAY = 1 days;
-    uint256 public constant MAX_FUTURE_DATE = 365 days;
+    // Max allowed offset for fundraiser endDate from now: 3 years + 1 day (1096 days)
+    // Rationale: allows long-running campaigns while keeping an upper bound for safety.
+    // Note: Solidity time units use 1 day = 24h; "years" unit is not used to avoid ambiguity.
+    uint256 public constant MAX_FUTURE_DATE = 1096 days;
 
     // Text limits
     uint256 public constant MAX_LOCATION_LENGTH = 256;
