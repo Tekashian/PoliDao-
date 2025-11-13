@@ -95,9 +95,18 @@ library WithdrawLogic {
         }
 
         // Mark fully withdrawn if no further funds or tranches remain
+        // Important nuance:
+        // - For WITH_GOAL: mark fundsWithdrawn and set status to COMPLETED when all available funds are withdrawn
+        //   (either goal reached or time ended path).
+        // - For NO_GOAL (flex): do NOT permanently lock with fundsWithdrawn flag; new donations may arrive later.
         if (remaining == 0 && allowedNow == available) {
-            f.fundsWithdrawn = true;
-            s.updateFundraiser(fundraiserId, f);
+            if (isWithGoal || timeEnded) {
+                f.fundsWithdrawn = true;
+                // Best-effort status refresh similar to post-refund/donate state changes
+                // Prefer COMPLETED when funds are fully drained for WITH_GOAL or after end.
+                f.status = uint8(IPoliDaoStructs.FundraiserStatus.COMPLETED);
+                s.updateFundraiser(fundraiserId, f);
+            }
         }
     }
 

@@ -18,7 +18,8 @@ describe("Refunds integration - flows and commission handling", function () {
         refunds = await ethers.getContractAt("PoliDaoRefunds", addr);
       }
     }
-    if (!refunds) this.skip();
+  // If refunds module is not available in this build, continue with fallback path below
+  // (withdraw path will be exercised instead of direct refunds API)
 
     const Token = await ethers.getContractFactory("MockToken");
     const token = await Token.deploy("Mock", "MOCK", 18);

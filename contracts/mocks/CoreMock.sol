@@ -25,6 +25,14 @@ contract CoreMock {
     // prosta ewidencja zbiórek (do donate(fId, amount))
     mapping(uint256 => Fundraiser) public fundraisers;
 
+    // Minimal module registry and upgrade lock to satisfy upgrade tests
+    mapping(bytes32 => address) public modules;
+    bool private _moduleUpgradesLocked;
+
+    event ModuleUpgraded(string label, address oldAddr, address newAddr);
+    event ModuleDisabled(string label, address oldAddr);
+    event ModuleUpgradesLocked(address indexed locker);
+
     event FundraiserCreated(uint256 indexed fundraiserId, address indexed creator, address indexed token, uint256 goal, uint256 endDate);
     event Donated(uint256 indexed fundraiserId, address indexed donor, address indexed token, uint256 amount);
     event Withdrawn(uint256 indexed fundraiserId, address indexed to, address indexed token, uint256 amount);
@@ -82,5 +90,21 @@ contract CoreMock {
         require(bal > 0, "CoreMock: nothing to withdraw");
         storageContract.releaseFunds(token, msg.sender, bal);
         emit Withdrawn(fundraiserId, msg.sender, token, bal);
+    }
+
+    // ===== Module management stubs =====
+    function upgradeModule(string calldata label, address newAddr) external {
+        require(!_moduleUpgradesLocked, "CoreMock: module upgrades locked");
+        bytes32 h = keccak256(bytes(label));
+        address old = modules[h];
+        modules[h] = newAddr;
+        if (newAddr == address(0)) emit ModuleDisabled(label, old);
+        else emit ModuleUpgraded(label, old, newAddr);
+    }
+
+    function lockModuleUpgrades() external {
+        require(!_moduleUpgradesLocked, "CoreMock: already locked");
+        _moduleUpgradesLocked = true;
+        emit ModuleUpgradesLocked(msg.sender);
     }
 }

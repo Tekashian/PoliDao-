@@ -92,6 +92,7 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     // DODANE: brakujące eventy używane w kodzie
     event FundraiserSuspended(uint256 indexed fundraiserId, address indexed by, string reason, uint256 timestamp);
     event ModuleUpgraded(string label, address oldAddr, address newAddr);
+    event ModuleDisabled(string label, address oldAddr);
     // RESTORED (required by constructor/setters)
     event RouterContractUpdated(address indexed oldRouter, address indexed newRouter);
     event ExtensionsContractUpdated(address indexed oldExtensions, address indexed newExtensions);
@@ -629,10 +630,15 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
     }
 
     function upgradeModule(string calldata label, address newAddr) external onlyOwner nonReentrant {
+        require(!_moduleUpgradesLocked, "PoliDaoCore: module upgrades locked");
         if (bytes(label).length == 0) revert InvalidInput();
         if (newAddr != address(0)) require(_hasCode(newAddr), "Not a contract");
         address oldEffective = _resolveModule(label);
-        emit ModuleUpgraded(label, oldEffective, newAddr);
+        if (newAddr == address(0)) {
+            emit ModuleDisabled(label, oldEffective);
+        } else {
+            emit ModuleUpgraded(label, oldEffective, newAddr);
+        }
         bytes32 h = keccak256(bytes(label));
         if (h == keccak256("GOVERNANCE")) governanceModule = newAddr;
         else if (h == keccak256("MEDIA")) mediaModule = newAddr;
@@ -645,6 +651,16 @@ contract PoliDaoCore is Ownable, Pausable, ReentrancyGuard {
         if (newAddr != address(0) && !storageContract.isContractAuthorized(newAddr)) {
             try storageContract.authorizeContract(newAddr) {} catch {}
         }
+    }
+
+    // ========== MODULE UPGRADE LOCK ==========
+    bool private _moduleUpgradesLocked;
+    event ModuleUpgradesLocked(address indexed locker);
+
+    function lockModuleUpgrades() external onlyOwner nonReentrant {
+        require(!_moduleUpgradesLocked, "PoliDaoCore: already locked");
+        _moduleUpgradesLocked = true;
+        emit ModuleUpgradesLocked(msg.sender);
     }
 
     // ========== STATUS / CONFIG ==========
