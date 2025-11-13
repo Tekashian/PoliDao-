@@ -524,6 +524,8 @@ async function main() {
   // grant Router permissions where supported
   await maybeCall(core.c, "authorizeContract", [router.addr]);
   await maybeCall(storage.c, "authorizeContract", [router.addr]);
+  // ensure Core is explicitly authorized in Storage for validateConfiguration()
+  await maybeCall(storage.c, "authorizeContract", [core.addr]);
   // try to deauthorize previous router if different (best-effort)
   if (previous?.router && previous.router !== router.addr) {
     await maybeCall(core.c, "deauthorizeContract", [previous.router]);
@@ -556,6 +558,26 @@ async function main() {
   const modules = [media, updates, governance, analytics, security, web3].filter(Boolean);
   for (const m of modules) {
     await maybeCall(m.c, "setRouter", [router.addr]);
+  }
+
+  // [NEW] Populate Storage module registry so Core.callModule/Router.routeModule work out of the box
+  try {
+    const zero = hre.ethers.ZeroAddress;
+    await maybeCall(
+      storage.c,
+      "setModules",
+      [
+        governance?.addr || zero,
+        media?.addr || zero,
+        updates?.addr || zero,
+        zero, // refunds module not used
+        security?.addr || zero,
+        web3?.addr || zero,
+        analytics?.addr || zero,
+      ]
+    );
+  } catch (e) {
+    console.warn("Storage.setModules wiring failed:", e?.message || e);
   }
 
   // Auto-rewire modules' core reference when Core is freshly deployed and module was reused
