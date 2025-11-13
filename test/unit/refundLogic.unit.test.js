@@ -260,4 +260,59 @@ describe("RefundLogic (library) – direct harness scenarios", function () {
     expect(donorAfter - donorBefore).to.equal(expectedNet);
     expect(walletAfter - walletBefore).to.equal(expectedCommission);
   });
+
+  it("respects Security payout schedule via Storage.modules(SECURITY)", async () => {
+    // Deploy Security and wire into Storage so RefundLogic can call it
+    const Security = await ethers.getContractFactory("PoliDaoSecurity");
+    const security = await Security.deploy(await core.getAddress());
+    await security.waitForDeployment();
+
+    // Set a small per-tranche payout limit (treat token units as USDC-6 for test simplicity)
+    await (await security.connect(owner).setPayoutLimitUSDC(300)).wait();
+
+    const SECURITY_KEY = ethers.keccak256(ethers.toUtf8Bytes("SECURITY"));
+    await (await storage.connect(owner).setModule(SECURITY_KEY, await security.getAddress())).wait();
+
+    // Create WITH_GOAL fundraiser and donate 1000 units
+    const data = await buildCreateData(await token.getAddress(), {
+      goalAmount: 10_000, // any non-zero goal to allow refunds when not reached
+      endDate: (await ethers.provider.getBlock("latest")).timestamp + 3600
+    });
+    await core.connect(creator).createFundraiser(data);
+
+    // Mint small integer units (no parseEther) to keep scale consistent with Security limit
+    await token.mint(donor.address, 1000);
+    await token.connect(donor).approve(await core.getAddress(), 1000);
+    await core.connect(donor).donate(1, 1000);
+
+    // First claim: should refund only 300 now (minus commission if set; default 0 in this test)
+    const balBefore = await token.balanceOf(donor.address);
+    await harness.claimRefund(await storage.getAddress(), 1, donor.address);
+    const balAfterFirst = await token.balanceOf(donor.address);
+    expect(balAfterFirst - balBefore).to.equal(300n);
+
+    // Immediate second claim should revert due to schedule
+    await expect(
+      harness.claimRefund(await storage.getAddress(), 1, donor.address)
+    ).to.be.revertedWith("Security: payout tranche not available yet");
+
+    // After 1h -> next tranche available
+    await increaseTime(3600);
+    await harness.claimRefund(await storage.getAddress(), 1, donor.address);
+    const balAfterSecond = await token.balanceOf(donor.address);
+    expect(balAfterSecond - balAfterFirst).to.equal(300n);
+
+    // Drain remaining in subsequent windows
+    await increaseTime(3600);
+    await harness.claimRefund(await storage.getAddress(), 1, donor.address);
+    await increaseTime(3600);
+    await harness.claimRefund(await storage.getAddress(), 1, donor.address);
+
+    // Donation mapping should be zeroed, totals accounted
+    const remainingDonation = await core.getDonationAmount ? await core.getDonationAmount(1, donor.address) : 0n;
+    // If core exposes getDonationAmount, expect zero; otherwise skip invariant
+    if (remainingDonation !== undefined) {
+      expect(remainingDonation).to.equal(0n);
+    }
+  });
 });

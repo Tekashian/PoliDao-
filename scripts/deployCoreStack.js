@@ -89,6 +89,31 @@ async function main() {
     console.warn("Refunds module not deployed or not present. Skipping.", e.message || e);
   }
 
+  // 7b) (Opcjonalnie) Deploy Security module, rejestracja w Storage i podłączenie w Routerze
+  let security;
+  try {
+    security = await deployWithArgs("PoliDaoSecurity", [await core.getAddress()]);
+    // Zmapuj w Storage pod kluczem SECURITY, aby RefundLogic mogła egzekwować harmonogram refundów
+    try {
+      const SECURITY_KEY = ethers.keccak256(ethers.toUtf8Bytes("SECURITY"));
+      await (await storage.setModule(SECURITY_KEY, await security.getAddress())).wait();
+      console.log("Storage.setModule(SECURITY) done");
+    } catch (e) {
+      console.warn("Setting SECURITY module mapping failed (optional)", e.message || e);
+    }
+    // Podłącz Security do Routera, jeśli dostępny setter
+    try {
+      if (router && typeof router.setSecurity === "function") {
+        await (await router.setSecurity(await security.getAddress())).wait();
+        console.log("Router.setSecurity done");
+      }
+    } catch (e) {
+      console.warn("Router.setSecurity failed (optional)", e.message || e);
+    }
+  } catch (e) {
+    console.warn("Security module not deployed or not present. Skipping.", e.message || e);
+  }
+
   // 8) Allow‑lista selectorów w Routerze (dla routeModule/routeModuleStatic)
   try {
     const batch = [];

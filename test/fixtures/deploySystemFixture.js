@@ -229,6 +229,14 @@ async function deploySystemFixture() {
     await safeCallWrite(router, "setSecurity", [await security.getAddress()]);
   }
 
+  // Map SECURITY module in Storage so RefundLogic can enforce scheduling via Security
+  if (security) {
+    try {
+      const key = ethers.keccak256(ethers.toUtf8Bytes("SECURITY"));
+      await setModuleIfPossible(storage, key, await security.getAddress(), owner);
+    } catch {}
+  }
+
   // Deploy i zmapuj kluczowe moduły
   const refunds = await deployModuleAndMap({
     name: "Refunds",
